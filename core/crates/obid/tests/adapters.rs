@@ -195,6 +195,8 @@ fn a_codex_jobs_transcript_matches_claudes() {
         shape,
         [
             ("start", "", ""),
+            // The job's request, as the first words from you.
+            ("you", "", ""),
             ("said", "", ""),
             read,
             read,
@@ -211,18 +213,18 @@ fn a_codex_jobs_transcript_matches_claudes() {
         answer.text
     );
     assert_eq!(entries[0]["summary"], "Started on Codex");
-    assert_eq!(entries[2]["summary"], "Reading scan.rs");
-    assert_eq!(entries[7]["summary"], "1 of 2 done");
+    assert_eq!(entries[3]["summary"], "Reading scan.rs");
+    assert_eq!(entries[8]["summary"], "1 of 2 done");
     assert_eq!(
-        entries[7]["todos"][1],
+        entries[8]["todos"][1],
         json!({"text": "Fix it", "state": "running"})
     );
     assert_eq!(
-        (&entries[9]["added"], &entries[9]["removed"]),
+        (&entries[10]["added"], &entries[10]["removed"]),
         (&json!(3), &json!(2))
     );
-    assert_eq!(entries[11]["summary"], "Running node --test");
-    assert_eq!(entries[11]["exit"], 101);
+    assert_eq!(entries[12]["summary"], "Running node --test");
+    assert_eq!(entries[12]["exit"], 101);
     assert!(!answer.text.contains("raw output"), "{}", answer.text);
     // The same kinds in its activity (#730).
     assert_eq!(
@@ -232,13 +234,13 @@ fn a_codex_jobs_transcript_matches_claudes() {
     );
     assert_eq!(job["activity"]["groups"][1]["title"], "Found it");
     // Opened (#784): a command's output and exit code, a file change's diff.
-    let bash = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/12"), None).body;
+    let bash = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/13"), None).body;
     assert_eq!(bash["detail"]["input"]["command"], "node --test", "{bash}");
     assert_eq!(
         bash["detail"]["output"],
         json!({"text": "raw output that never leaves obid", "lines": 1, "truncated": false, "exit": 101})
     );
-    let edit = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/10"), None).body;
+    let edit = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/11"), None).body;
     assert_eq!(
         edit["detail"]["diff"],
         json!([{"path": "src/scan.rs",

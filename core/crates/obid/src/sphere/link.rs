@@ -3456,8 +3456,31 @@ impl Link {
         items
     }
 
-    /// `POST /v1/inbox/{id}/answer`.
+    /// `POST /v1/inbox/{id}/answer`, from anything but the owner's own tap: a `Confirm` on a
+    /// `confirm` item is refused (#776). Agents, oby-mcp, the brain and obid's own callers come
+    /// this way.
     pub async fn answer(self: &Arc<Self>, id: &str, body: &[u8]) -> Result<Value, ApiError> {
+        self.answer_as(id, body, None).await
+    }
+
+    /// `POST /v1/inbox/{id}/answer` after a registered device signed a Confirm of item `id`
+    /// whose title was `approved` (crate::approval, `oby-confirm`): checked by the route before
+    /// this, and here again against the item as it's claimed.
+    pub async fn answer_confirmed(
+        self: &Arc<Self>,
+        id: &str,
+        body: &[u8],
+        approved: &str,
+    ) -> Result<Value, ApiError> {
+        self.answer_as(id, body, Some(approved)).await
+    }
+
+    async fn answer_as(
+        self: &Arc<Self>,
+        id: &str,
+        body: &[u8],
+        approved: Option<&str>,
+    ) -> Result<Value, ApiError> {
         let map = object(body, &["answer", "done", "later"])?;
         let one_of = "The body is exactly one of {\"answer\": …}, {\"done\": true} or {\"later\": \"<date>\"}.";
         if map.len() != 1 {
@@ -3500,8 +3523,17 @@ impl Link {
                 .get(id)
                 .filter(|i| i.done.is_none() && i.kind == "confirm")
                 .cloned();
+            let confirming = matches!(&given, Given::Answer(a) if a == inbox::CONFIRM);
+            // Only the owner's tap confirms: a device's signature over this item's own title,
+            // checked before the item is claimed, so a refused Confirm leaves it open (#776).
+            if let Some(open) = &item
+                && confirming
+                && approved != Some(open.title.as_str())
+            {
+                return Err(api(StatusCode::FORBIDDEN, NEEDS_YOUR_TAP));
+            }
             if item.is_some()
-                && matches!(&given, Given::Answer(a) if a == inbox::CONFIRM)
+                && confirming
                 && let Some(kept) = state.inbox.get_mut(id)
             {
                 kept.done = Some(time::now());
@@ -5178,6 +5210,10 @@ impl Link {
             .is_some_and(|m| m.accepts().iter().any(|a| a == "share_offer"))
     }
 }
+
+/// Why a Confirm without the owner's tap is refused (#776).
+pub const NEEDS_YOUR_TAP: &str =
+    "Only your tap can confirm this: confirm it in Oby on your Mac or iPhone.";
 
 #[cfg(test)]
 mod tests {

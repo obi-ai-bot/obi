@@ -791,12 +791,7 @@ fn a_routine_said_in_chat_waits_for_the_owners_confirm() {
                     && i["title"].as_str().unwrap().starts_with(title)
             })
             .unwrap_or_else(|| panic!("a confirm item {title}: {:?}", inbox(&obid)));
-        let confirmed = call(
-            &obid,
-            "POST",
-            &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
-            Some(&json!({"answer": "Confirm"})),
-        );
+        let confirmed = confirm(&obid, item["id"].as_str().unwrap());
         assert_eq!(confirmed.status, 200, "{}", confirmed.text);
         item
     };
@@ -905,12 +900,7 @@ fn a_routine_said_in_chat_waits_for_the_owners_confirm() {
         .into_iter()
         .find(|i| i["kind"] == "confirm" && i["done"].is_null())
         .expect("the resume card");
-    let refused = call(
-        &obid,
-        "POST",
-        &format!("/v1/inbox/{}/answer", stale["id"].as_str().unwrap()),
-        Some(&json!({"answer": "Confirm"})),
-    );
+    let refused = support::confirm(&obid, stale["id"].as_str().unwrap());
     assert_eq!(refused.status, 409, "{}", refused.text);
     assert!(
         refused.text.contains("changed since Oby asked"),
@@ -1869,13 +1859,7 @@ fn confirm_for(obid: &Obid, job: &str) -> Value {
 }
 
 fn confirmed(obid: &Obid, item: &Value) -> Answer {
-    let id = item["id"].as_str().unwrap();
-    call(
-        obid,
-        "POST",
-        &format!("/v1/inbox/{id}/answer"),
-        Some(&json!({"answer": "Confirm"})),
-    )
+    confirm(obid, item["id"].as_str().unwrap())
 }
 
 /// oby_continue_job picks a job that ended up again in its own session, its agent hearing Try

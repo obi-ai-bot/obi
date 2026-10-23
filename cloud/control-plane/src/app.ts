@@ -169,6 +169,7 @@ async function route(request: Request, env: Env, deps: Deps, now: () => Date): P
   const path = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
   const method = request.method;
   if (path === "/v1/health" && method === "GET") return json({ ok: true });
+  if (path === "/v1/auth" && method === "GET") return json(signInOptions(env));
   for (const provider of ["apple", "google"] as const) {
     if (path === `/v1/auth/${provider}/start` && method === "POST") return startSignIn(request, env, now, provider);
     if (path === `/v1/auth/${provider}/callback` && method === "POST") return finishSignIn(request, env, deps, now, provider);
@@ -206,6 +207,8 @@ const PROVIDERS: Record<Provider, { name: string; client: keyof Env; redirect: k
 /// for it, answered with a form post to the callback.
 async function startSignIn(request: Request, env: Env, now: () => Date, provider: Provider): Promise<Response> {
   const call = await signed(request, env, now());
+  const members = memberWorkspaces(env);
+  if (members.length && provider === "apple") throw new Reply(403, `This Oby is for ${members.join(", ")} accounts only: sign in with Google.`);
   const client = setting(env, provider, "client");
   const redirect = setting(env, provider, "redirect");
   const address = addressBucket(request.headers.get("CF-Connecting-IP") ?? "unknown");
@@ -258,9 +261,11 @@ async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => D
     const audience = setting(env, provider, "client");
     if (provider === "google") {
       const google = await verifyGoogleToken(token, deps.google, audience, pending.nonce_hash, now());
+      if (!isMember(env, google.workspaceDomain)) throw new TokenError(`not a member Workspace: ${google.workspaceDomain ?? "a personal account"}`);
       account = `google:${google.sub}`;
       domains = { workspace: google.workspaceDomain, email: google.emailDomain, limit: limitDomain(google.workspaceDomain, google.emailDomain) };
     } else {
+      if (memberWorkspaces(env).length) throw new TokenError("Apple accounts have no Workspace: this instance is members-only");
       account = await verifyAppleToken(token, deps.apple, audience, pending.nonce_hash, now());
     }
   } catch (error) {
@@ -277,6 +282,19 @@ async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => D
     env.DB.prepare("UPDATE sign_ins SET sub = ?2, code_hash = ?3 WHERE state = ?1 AND sub IS NULL").bind(state, account, await sha256Hex(code)),
   ]);
   return back("done", state, code);
+}
+
+/// MEMBER_WORKSPACES, lowercased: the Google Workspaces a members-only instance serves; none for an
+/// open one.
+function memberWorkspaces(env: Env): string[] {
+  return (env.MEMBER_WORKSPACES ?? "").split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
+}
+
+/// Whether an account of Workspace `workspace` (Google's `hd`; null for a personal account) may
+/// use this instance: any account on an open one, only a member Workspace's on a members-only one.
+function isMember(env: Env, workspace: string | null): boolean {
+  const members = memberWorkspaces(env);
+  return !members.length || (!!workspace && members.includes(workspace.toLowerCase()));
 }
 
 /// The registrable domain a Google account's limits are shared under (`users.limit_domain`): its
@@ -299,6 +317,17 @@ function domainAllowance(env: Env, workspace: boolean): { endpoints: number; reg
 }
 
 /// A provider's setting from wrangler.jsonc, or the control plane says it isn't set up.
+/// What a Mac shows before it signs in (`GET /v1/auth`): the providers this instance takes, set up
+/// and allowed (a members-only instance refuses Apple), and the Workspaces it's for, if it's
+/// members-only. Nothing secret: the same as the refusals say.
+function signInOptions(env: Env): { providers: Provider[]; workspaces: string[] } {
+  const workspaces = memberWorkspaces(env);
+  const providers = (Object.keys(PROVIDERS) as Provider[]).filter(
+    (p) => String(env[PROVIDERS[p].client] ?? "").trim() && !(p === "apple" && workspaces.length),
+  );
+  return { providers, workspaces };
+}
+
 function setting(env: Env, provider: Provider, which: "client" | "redirect"): string {
   const name = PROVIDERS[provider][which];
   const text = String(env[name] ?? "").trim();
@@ -332,12 +361,14 @@ async function register(request: Request, env: Env, deps: Deps, now: () => Date)
   const code = typeof call.body.signInCode === "string" ? call.body.signInCode : "";
   const seconds = Math.floor(now().getTime() / 1000);
   const signIn = await env.DB.prepare(
-    `SELECT s.sub, s.code_hash, u.limit_domain, u.workspace_domain IS NOT NULL AS workspace FROM sign_ins s JOIN users u ON u.sub = s.sub
+    `SELECT s.sub, s.code_hash, u.limit_domain, u.workspace_domain, u.workspace_domain IS NOT NULL AS workspace FROM sign_ins s JOIN users u ON u.sub = s.sub
      WHERE s.state = ?1 AND s.public_key = ?2 AND s.used_at IS NULL AND s.expires_at > ?3`,
   )
     .bind(state, call.key, seconds)
-    .first<{ sub: string; code_hash: string; limit_domain: string | null; workspace: number }>();
+    .first<{ sub: string; code_hash: string; limit_domain: string | null; workspace_domain: string | null; workspace: number }>();
   if (!signIn || !code || (await sha256Hex(code)) !== signIn.code_hash) throw new Reply(403, "Sign in with Apple or Google first.");
+  // Checked again here: MEMBER_WORKSPACES may have changed since the sign-in.
+  if (!isMember(env, signIn.workspace_domain)) throw new Reply(403, `This Oby is for ${memberWorkspaces(env).join(", ")} accounts only.`);
   await spend(env.DB, call);
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
   const counted = [`registrations:account:${signIn.sub}`, `registrations:address:${addressBucket(address)}`, `registrations:network:${networkBucket(address)}`];
@@ -526,7 +557,11 @@ async function deviceDomain(env: Env, tunnels: TunnelAPI): Promise<string> {
   if (!devices) throw new Reply(503, "No device domain is set up: set DEVICE_DOMAIN in wrangler.jsonc to a domain of its own.");
   const products = registrableDomain(product);
   if (!products) throw new Reply(503, "PRODUCT_DOMAIN isn't set in wrangler.jsonc, so DEVICE_DOMAIN can't be checked against it.");
-  if (devices === products) throw new Reply(503, "DEVICE_DOMAIN can't share the product's registrable domain: register a domain of its own.");
+  // Anyone who signs in gets a hostname: under the product's domain, a stranger's page could get it
+  // flagged or set its cookies. Only a members-only instance may share it (MEMBER_WORKSPACES).
+  if (devices === products && !memberWorkspaces(env).length) {
+    throw new Reply(503, "DEVICE_DOMAIN can't share the product's registrable domain unless MEMBER_WORKSPACES makes this instance members-only: register a domain of its own, or set MEMBER_WORKSPACES.");
+  }
   if (!checkedZones.has(domain)) {
     const zone = (await tunnels.zoneName()).toLowerCase();
     if (zone !== domain) throw new Reply(503, "CF_ZONE_ID isn't DEVICE_DOMAIN's zone: set it to that zone's id.");
@@ -685,8 +720,15 @@ async function endpointOf(db: D1Database, installation: string): Promise<Endpoin
 
 async function publicInstallation(db: D1Database, row: InstallationRow) {
   const endpoint = await endpointOf(db, row.id);
+  // The account it's signed in with, as Settings shows it: the provider, and for Google the
+  // domain kept (its Workspace's, else its email's). Never an email: none is kept.
+  const user = row.user_sub
+    ? await db.prepare("SELECT provider, workspace_domain, email_domain FROM users WHERE sub = ?1").bind(row.user_sub)
+        .first<{ provider: string; workspace_domain: string | null; email_domain: string | null }>()
+    : null;
   return {
     id: row.id,
+    account: user ? { provider: user.provider, domain: user.workspace_domain ?? user.email_domain } : null,
     name: row.name,
     platform: row.platform,
     createdAt: row.created_at,

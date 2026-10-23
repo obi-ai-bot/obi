@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { apply } from '../live';
+import { apply, CONFIRM_IN_APP, confirmsInBrowser } from '../live';
 import { item, job, state, turn } from './fixtures';
 
 describe('events over what the page shows', () => {
@@ -39,5 +39,14 @@ describe('events over what the page shows', () => {
     const s = apply(state(), { kind: 'accounts', accounts: [] });
     expect(s.status?.accounts).toEqual([]);
     expect(apply(s, { kind: 'clear', clearedAt: '2026-10-16T10:00:00Z' }).clearedAt).toBe('2026-10-16T10:00:00Z');
+  });
+});
+
+describe('Confirm in a browser (#776)', () => {
+  it('sends nothing and says where to confirm; Cancel and other items go as before', () => {
+    expect(confirmsInBrowser(item({ kind: 'confirm' }), 'Confirm')).toBe(CONFIRM_IN_APP);
+    expect(confirmsInBrowser(item({ kind: 'confirm' }), 'Cancel')).toBeNull();
+    expect(confirmsInBrowser(item({ kind: 'question' }), 'Confirm')).toBeNull();
+    expect(confirmsInBrowser(undefined, 'Confirm')).toBeNull();
   });
 });

@@ -82,12 +82,7 @@ fn started_in(obid: &Obid, script: &str, kind: &str, task: &str, mode: &str) -> 
             .into_iter()
             .find(|i| i["kind"] == "confirm")
             .unwrap_or_else(|| panic!("{}", answer.text));
-        let confirmed = call(
-            obid,
-            "POST",
-            &format!("/v1/inbox/{}/answer", item["id"].as_str().unwrap()),
-            Some(&json!({"answer": "Confirm"})),
-        );
+        let confirmed = confirm(obid, item["id"].as_str().unwrap());
         assert_eq!(confirmed.status, 200, "{}", confirmed.text);
         let job = within(30, "the Bypass job starts", || {
             jobs(obid)

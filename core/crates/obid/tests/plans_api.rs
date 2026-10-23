@@ -1360,8 +1360,15 @@ fn items_of(obid: &Obid, kind: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// The owner's own answer, with the API token.
+/// The owner's own answer: Confirm on a confirm item is their tap, signed on a device (#776).
 fn owner_answers(obid: &Obid, item: &str, answer: &str) -> Answer {
+    let open = call(obid, "GET", "/v1/inbox", None).body;
+    let is_confirm = open
+        .as_array()
+        .is_some_and(|a| a.iter().any(|i| i["id"] == item && i["kind"] == "confirm"));
+    if answer == "Confirm" && is_confirm {
+        return confirm(obid, item);
+    }
     call(
         obid,
         "POST",
@@ -1615,15 +1622,18 @@ fn a_bypass_dispatch_waits_for_the_owners_confirm() {
     // completed card, but only one proposed job may be created.
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let port = obid.port;
+    // Two taps a second apart: both signatures hold, so the claim decides (#776).
+    let now = obi_protocol::time::now();
     let confirmers: Vec<_> = (0..2)
-        .map(|_| {
+        .map(|n| {
             let barrier = barrier.clone();
             let id = id.clone();
+            let approval = confirm_approval_at(&obid, &id, now - n);
             std::thread::spawn(move || {
                 use std::io::{Read, Write};
                 use std::net::TcpStream;
                 barrier.wait();
-                let body = json!({"answer": "Confirm"}).to_string();
+                let body = json!({"answer": "Confirm", "approval": approval}).to_string();
                 let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
                 write!(
                     stream,
@@ -3734,6 +3744,8 @@ fn the_brain_cant_press_start_on_its_own_proposal() {
     );
     // The owner's own Confirm starts it, through the proposal: once, however many come at once.
     let confirm_id = confirm["id"].as_str().unwrap();
+    // The test device is registered before the taps race.
+    let _ = confirm_approval(&obid, confirm_id);
     let statuses: Vec<u16> = std::thread::scope(|scope| {
         let tries: Vec<_> = (0..8)
             .map(|_| scope.spawn(|| owner_answers(&obid, confirm_id, "Confirm").status))
@@ -4777,7 +4789,7 @@ fn a_calls_output_never_reaches_the_brain() {
     let ended = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None);
     assert_eq!(ended.status, 200, "{}", ended.text);
     let canary = "DETAIL-ONLY-CANARY-7f3a";
-    let opened = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/2"), None);
+    let opened = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/3"), None);
     assert!(opened.text.contains(canary), "{}", opened.text);
     queue(&obid, &[reply("It listed the files.")]);
     assert_eq!(
@@ -4792,4 +4804,93 @@ fn a_calls_output_never_reaches_the_brain() {
             assert!(!text.contains(canary), "{part}: {text}");
         }
     }
+}
+
+/// #776: only the owner's tap confirms. A Confirm with the API token alone is refused with the
+/// title to sign and leaves the item open; a registered device's signature over this item's own
+/// title carries it out once; another item's signature, or a publish signature over the same
+/// words, doesn't pass; Cancel and later need no signature.
+#[test]
+fn a_confirm_needs_the_owners_tap_on_a_device() {
+    use base64::Engine as _;
+    use p256::ecdsa::signature::Signer as _;
+    let folder = Folder::new("brain-confirm-tap");
+    let mut first = ended(
+        "c1c1c1c1",
+        "Average helper empty lists",
+        obid::job::Status::Done,
+        2,
+        None,
+    );
+    first.publish_error = Some("Not published: the secret scan couldn't run.".into());
+    let mut second = ended("c2c2c2c2", "Retry jitter", obid::job::Status::Done, 2, None);
+    second.publish_error = Some("Not published: the secret scan couldn't run.".into());
+    let obid = started_with(&folder, &[first, second]);
+    for (job, words) in [
+        ("c1c1c1c1", "let the average one go"),
+        ("c2c2c2c2", "let the retry one go"),
+    ] {
+        queue(&obid, &[on_jobs("dismiss_job", &[job]), reply("")]);
+        said(&obid, words);
+    }
+    let confirms = items_of(&obid, "confirm");
+    assert_eq!(confirms.len(), 2, "{confirms:?}");
+    let item_of = |job: &str| confirms.iter().find(|i| i["job"] == job).unwrap().clone();
+    let (a, b) = (item_of("c1c1c1c1"), item_of("c2c2c2c2"));
+    let (a_id, b_id) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
+    let answer = |item: &str, body: serde_json::Value| {
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/inbox/{item}/answer"),
+            Some(&body),
+        )
+    };
+
+    // The token alone: refused, with the title to sign, and the item stays open.
+    let refused = answer(a_id, json!({"answer": "Confirm"}));
+    assert_eq!(refused.status, 403, "{}", refused.text);
+    assert_eq!(refused.body["action"], a["title"]);
+    assert!(refused.text.contains("Only your tap"), "{}", refused.text);
+    assert_eq!(items_of(&obid, "confirm").len(), 2);
+    assert!(get_job(&obid, "c1c1c1c1")["dismissed"].is_null());
+
+    // Another item's approval doesn't confirm this one.
+    let for_b = confirm_approval(&obid, b_id);
+    let wrong = answer(a_id, json!({"answer": "Confirm", "approval": for_b}));
+    assert_eq!(wrong.status, 403, "{}", wrong.text);
+    assert!(get_job(&obid, "c1c1c1c1")["dismissed"].is_null());
+
+    // A publish signature by the same device over the same words isn't a Confirm.
+    let mut publish = confirm_approval(&obid, a_id);
+    let secret = p256::SecretKey::from_slice(&[42; 32]).unwrap();
+    let signed_at = publish["signedAt"].as_str().unwrap().to_owned();
+    let title = a["title"].as_str().unwrap();
+    let signature: p256::ecdsa::Signature = p256::ecdsa::SigningKey::from(secret)
+        .sign(format!("oby-publish\n{a_id}\n{title}\n{signed_at}").as_bytes());
+    publish["signature"] =
+        json!(base64::engine::general_purpose::STANDARD.encode(signature.to_der()));
+    let wrong = answer(a_id, json!({"answer": "Confirm", "approval": publish}));
+    assert_eq!(wrong.status, 403, "{}", wrong.text);
+    assert!(get_job(&obid, "c1c1c1c1")["dismissed"].is_null());
+
+    // The owner's tap: carried out once, and the same approval can't do it again.
+    let tap = confirm_approval(&obid, a_id);
+    let confirmed = answer(a_id, json!({"answer": "Confirm", "approval": tap.clone()}));
+    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    assert!(get_job(&obid, "c1c1c1c1")["dismissed"].is_string());
+    let again = answer(a_id, json!({"answer": "Confirm", "approval": tap}));
+    assert_ne!(again.status, 200, "{}", again.text);
+
+    // An approval with anything but Confirm is refused; later and Cancel need none.
+    let odd = answer(
+        b_id,
+        json!({"answer": "Cancel", "approval": confirm_approval(&obid, b_id)}),
+    );
+    assert_eq!(odd.status, 422, "{}", odd.text);
+    let later = answer(b_id, json!({"later": "2099-01-01T00:00:00Z"}));
+    assert_eq!(later.status, 200, "{}", later.text);
+    let cancelled = answer(b_id, json!({"answer": "Cancel"}));
+    assert_eq!(cancelled.status, 200, "{}", cancelled.text);
+    assert!(get_job(&obid, "c2c2c2c2")["dismissed"].is_null());
 }
