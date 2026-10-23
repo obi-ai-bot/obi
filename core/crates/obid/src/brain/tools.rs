@@ -96,6 +96,11 @@ fn list() -> Value {
              "schedule": {"type": "object", "description": "For reschedule: the new schedule, as oby_routine takes it."},
              "zone": {"type": "string", "description": "For reschedule: a new IANA time zone, if it changes."}},
              "required": ["id", "action"]}},
+        {"name": "oby_check_in", "description": "Oby's check-ins, only as the owner asks (\"check in with me every weekday at 9\"): with schedule, turns them on or changes when; with off, turns them off; with neither, says how they are. While they're on, Oby posts in this conversation by itself: at that time, at most once a day, one to three sentences on what finished, what needs the owner and what you'd do next; and once while the owner is away over 30 minutes; each only when something happened. A check-in never starts, approves or answers anything. Say back to the owner what was saved.",
+         "inputSchema": {"type": "object", "properties": {
+             "schedule": {"type": "object", "description": "One of {\"every\": \"weekdays\", \"at\": \"09:00\"} (Monday to Friday), {\"every\": \"daily\", \"at\": \"08:30\"} or {\"every\": \"weekly\", \"days\": [\"mon\", \"thu\"], \"at\": \"09:00\"}; at is 24-hour HH:MM in zone. Never hourly."},
+             "zone": {"type": "string", "description": "The owner's IANA time zone, like America/Sao_Paulo; left out, the Mac's."},
+             "off": {"type": "boolean", "description": "true turns check-ins off."}}}},
         {"name": "oby_rules", "description": "Lists the owner's standing rules for alerts and failed deploys (each looks into a source's events on one project with no tap, a job each time, publishing only when the owner does): id, what it covers, how often it started.",
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "oby_rule", "description": "Proposes a standing rule: from now on, Oby looks into a source's alerts (or failed deploys) on one project with no tap, an investigate job each time that publishes only when the owner does. Nothing is saved until the owner confirms it in their inbox. Never for warnings or tickets.",
@@ -337,6 +342,7 @@ async fn call(
         }
         "oby_routine" => propose_routine(shared, session, args),
         "oby_change_routine" => change_routine(shared, session, args),
+        "oby_check_in" => check_in(shared, session, args),
         "oby_shell" | "oby_shell_output" | "oby_shell_stop" => {
             let shown = super::shell::tool(shared, session, name, args).await?;
             let text = if shown.output.is_empty() {
@@ -1162,6 +1168,104 @@ fn change_routine(shared: &Shared, session: &Session, args: Value) -> Result<Str
     Ok(format!(
         "{title} waits for the owner's OK in their inbox: nothing changes until they confirm it."
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckInArgs {
+    schedule: Option<Value>,
+    zone: Option<String>,
+    #[serde(default)]
+    off: bool,
+}
+
+/// oby_check_in: the owner's words turn their check-ins on, change them or turn them off, at once
+/// (#1116). A check-in only posts in its conversation and never starts, approves or answers
+/// anything, so it waits for no Confirm; but a turn that read what others wrote turns none on, and
+/// a turn nobody watches changes none.
+fn check_in(shared: &Shared, session: &Session, args: Value) -> Result<String, String> {
+    let CheckInArgs {
+        schedule,
+        zone,
+        off,
+    } = parse(args)?;
+    if session.supervising.is_some() {
+        return Err("A turn nobody watches changes no check-in.".into());
+    }
+    let home = &shared.config.home;
+    let unkept = |e: std::io::Error| format!("Oby couldn't keep that: {e}");
+    let now = obi_protocol::time::now();
+    if off {
+        let was = crate::settings::update(home, |s| s.check_in.take()).map_err(unkept)?;
+        return Ok(match was {
+            Some(_) => {
+                "Check-ins are off: Oby posts nothing by itself until the owner asks again.".into()
+            }
+            None => "Check-ins were off already.".into(),
+        });
+    }
+    let Some(schedule) = schedule else {
+        return Ok(match crate::settings::load(home).check_in {
+            Some(kept) => format!("Check-ins are on. {}", check_in_words(&kept, session, now)),
+            None => "Check-ins are off.".into(),
+        });
+    };
+    if source(session) == crate::jobs::Source::Untrusted {
+        return Err("This turn read what others wrote, so Oby turns check-ins on only when the owner says it again.".into());
+    }
+    let schedule = serde_json::from_value::<crate::routines::Schedule>(schedule)
+        .map_err(|e| format!("That isn't a schedule Oby runs: {e}"))?
+        .checked()?;
+    if matches!(schedule, crate::routines::Schedule::Hourly { .. }) {
+        return Err(
+            "A check-in is at most once a day: daily, weekdays or weekly, at a time.".into(),
+        );
+    }
+    let zone = zone.filter(|z| !z.trim().is_empty()).unwrap_or_else(|| {
+        jiff::tz::TimeZone::system()
+            .iana_name()
+            .unwrap_or("UTC")
+            .to_owned()
+    });
+    jiff::tz::TimeZone::get(&zone).map_err(|_| format!("{zone} isn't a time zone Oby knows."))?;
+    let kept = crate::settings::update(home, |s| {
+        // Today's summary stays sent: a new time never sends a second one today.
+        let sent = s.check_in.as_ref().and_then(|kept| kept.sent);
+        let kept = crate::settings::CheckIn {
+            schedule,
+            zone,
+            conversation: session.conversation.clone(),
+            from: now,
+            sent,
+        };
+        s.check_in = Some(kept.clone());
+        kept
+    })
+    .map_err(unkept)?;
+    Ok(format!(
+        "Saved: check-ins are on. {} Say it back to the owner in a sentence: they change it or turn it off by asking.",
+        check_in_words(&kept, session, now)
+    ))
+}
+
+/// A check-in that's on, in obid's words: when, where, the next one and the away recap's hours.
+fn check_in_words(kept: &crate::settings::CheckIn, session: &Session, now: i64) -> String {
+    let place = if kept.conversation == session.conversation {
+        "this conversation"
+    } else {
+        "another conversation"
+    };
+    let next = kept
+        .schedule
+        .next_after(&kept.zone(), now)
+        .map_or_else(String::new, |t| {
+            format!(" The next one: {}.", local(&kept.zone, t))
+        });
+    format!(
+        "{} in {}, posted in {place}, only when something happened.{next} While they're on, Oby also posts a recap there once when the owner has been away over 30 minutes and something finished or needs them, in the 12 hours after that time on its days.",
+        kept.schedule.words(),
+        kept.zone
+    )
 }
 
 #[derive(Deserialize)]

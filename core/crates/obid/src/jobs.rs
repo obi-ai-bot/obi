@@ -1252,9 +1252,8 @@ impl Jobs {
         if !crate::settings::MAX_RUNNING_RANGE.contains(&max) {
             return Err(SettingsError::Refused("maxRunning is 1 to 20.".into()));
         }
-        let mut settings = crate::settings::load(&self.config.home);
-        settings.max_running = max;
-        crate::settings::save(&self.config.home, &settings).map_err(SettingsError::Unkept)?;
+        crate::settings::update(&self.config.home, |s| s.max_running = max)
+            .map_err(SettingsError::Unkept)?;
         self.max_running
             .store(max as usize, std::sync::atomic::Ordering::Relaxed);
         self.schedule();

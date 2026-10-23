@@ -58,7 +58,7 @@ pub enum Schedule {
 
 impl Schedule {
     /// Why it isn't a schedule obid runs, or nothing. Days come back in order, once each.
-    fn checked(mut self) -> Result<Schedule, String> {
+    pub fn checked(mut self) -> Result<Schedule, String> {
         if let Schedule::Hourly { minute } = self {
             if minute > 59 {
                 return Err("minute is 0 to 59.".into());
@@ -945,6 +945,9 @@ pub fn spawn(shared: Arc<Shared>) {
             let _ =
                 tokio::task::spawn_blocking(move || tick(&tick_shared, obi_protocol::time::now()))
                     .await;
+            // The owner's check-in, on the same minute (#1116). ponytail: its one background
+            // call holds the next routine check up to its timeout, once a day at most.
+            crate::brain::recap::check_in(&shared, obi_protocol::time::now()).await;
             tokio::select! {
                 () = tokio::time::sleep(EVERY) => {}
                 _ = stopping.changed() => {
