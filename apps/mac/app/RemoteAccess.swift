@@ -7,16 +7,17 @@ import OSLog
 
 /// Settings › Remote access (#285): reach this Mac from anywhere. Oby's control plane on
 /// Cloudflare (Engine/ControlPlane.swift) gives each installation its own Cloudflare Tunnel and
-/// an opaque hostname, and this Mac runs the bundled `cloudflared` outbound as a child of Oby,
-/// the login item (TunnelRunner). The iPhone talks HTTPS to the hostname, and the tunnel routes
-/// only to the gateway (#284) on 127.0.0.1:8810.
+/// an opaque hostname. The app hands the tunnel's run token to obid on this Mac, which runs the
+/// bundled `cloudflared` as its own child (#896, ObidTunnel), so the tunnel lives as long as obid,
+/// not this window app. The iPhone talks HTTPS to the hostname, and the tunnel routes only to
+/// obid's gateway (#284) on 127.0.0.1:8810.
 ///
 /// Turning it on the first time signs in with Apple or Google (on the web: Oby is a Developer ID
 /// app, and Apple's native Sign in with Apple is App Store only); Apple is asked for no name or
 /// email, Google for the email only so the control plane knows its domain. This Mac makes
-/// a P-256 key (in the Secure Enclave when it has one) that signs every call to the control plane. What stays on this Mac: the key
-/// and the tunnel's run token, in the keychain under a service of their own (not the user's
-/// vault, which Settings › Vault lists); the hostname in the defaults.
+/// a P-256 key (in the Secure Enclave when it has one) that signs every call to the control plane. What stays in the app: the key,
+/// in the keychain under a service of its own (not the user's vault, which Settings › Vault
+/// lists), and the hostname in the defaults. The run token is obid's, in its vault.
 @Observable
 final class RemoteAccess {
     /// How the tunnel is, as `cloudflared` says.
@@ -51,24 +52,30 @@ final class RemoteAccess {
     @ObservationIgnored private let plane: ControlPlane
     @ObservationIgnored private let secrets: any VaultStore
     @ObservationIgnored private let defaults: UserDefaults
-    @ObservationIgnored let runner: TunnelRunner
+    @ObservationIgnored let host: any TunnelHost
     @ObservationIgnored private var checkIns: Task<Void, Never>?
+    @ObservationIgnored private var following: Task<Void, Never>?
     /// Shows Apple's or Google's sign-in page and gives back the URL it ends at (`oby-signin://…`): the
     /// system's web sheet, or a test's stand-in.
     @ObservationIgnored private let authenticate: @MainActor (URL) async throws -> URL
 
     init(plane: ControlPlane = ControlPlane(), secrets: any VaultStore = KeychainVault(service: RemoteAccess.service),
-         defaults: UserDefaults = .standard, runner: TunnelRunner = TunnelRunner(),
+         defaults: UserDefaults = .standard, host: (any TunnelHost)? = nil,
          authenticate: @escaping @MainActor (URL) async throws -> URL = WebSignIn.run) {
         self.plane = plane
         self.authenticate = authenticate
         self.secrets = secrets
         self.defaults = defaults
-        self.runner = runner
+        let host = host ?? ObidTunnel()
+        self.host = host
         on = defaults.bool(forKey: "remote.enabled")
         hostname = defaults.string(forKey: "remote.hostname")
-        runner.onState = { [weak self] state in self?.tunnel = state }
+        host.onState = { [weak self] state in self?.tunnel = state }
     }
+
+    /// Remote access reaches obid's gateway on this Mac: with Settings › Runner on a remote
+    /// runner, there's no gateway here.
+    static let needsThisMac = "Remote access reaches Oby's engine on this Mac: choose This Mac in Settings › Runner first."
 
     /// Turning on needs a sign-in first: this Mac has no hostname (never set up, forgotten, or
     /// away 30 days), so Settings offers the providers' buttons instead of the switch.
@@ -90,22 +97,35 @@ final class RemoteAccess {
 
     // MARK: At launch and quit
 
-    /// Remote access was on: the tunnel runs again with the keychain's token. With a hostname, on
-    /// or off, this Mac checks in now and once a day, so its installation isn't removed as idle.
-    func start() {
+    /// Remote access was on: obid runs the tunnel by itself (#896). A token an older Oby kept in
+    /// this app's keychain goes to obid once, and the app's copy is deleted. With a hostname, on or
+    /// off, this Mac checks in now and once a day, so its installation isn't removed as idle.
+    func start() async {
         // ponytail: once the email sign-in's leftovers are gone from every Mac, drop this.
         for name in Self.oldSecrets { try? secrets.remove(name) }
         for key in Self.oldDefaults { defaults.removeObject(forKey: key) }
-        if on {
-            if let token = (try? secrets.value(Self.tokenKey)) ?? nil {
-                runner.start(token: token)
-            } else {
-                problem = "The tunnel's token isn't in the keychain any more: turn remote access on again."
-                on = false
-                defaults.set(false, forKey: "remote.enabled")
+        if on, let token = (try? secrets.value(Self.tokenKey)) ?? nil {
+            do {
+                try await host.hand(token)
+                try? secrets.remove(Self.tokenKey)
+            } catch {
+                problem = error.localizedDescription
             }
         }
+        follow()
         checkInDaily()
+    }
+
+    /// Settings' Status follows obid's tunnel while remote access is on.
+    private func follow() {
+        guard following == nil else { return }
+        following = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let remote = self else { return }
+                if remote.on { await remote.host.refresh() }
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
     }
 
     private func checkInDaily() {
@@ -119,11 +139,12 @@ final class RemoteAccess {
         }
     }
 
-    /// Oby is quitting: the tunnel ends with it.
+    /// Oby is quitting: the check-ins stop here. The tunnel is obid's and keeps running (#896).
     func stop() {
         checkIns?.cancel()
         checkIns = nil
-        runner.stop()
+        following?.cancel()
+        following = nil
     }
 
     /// A signed call keeps the installation. When the control plane took the tunnel back (not
@@ -135,7 +156,7 @@ final class RemoteAccess {
             let mine = try await plane.installation(try signer())
             if mine.endpoint?.hostname != hostname { await lost() }
         } catch let failure as ControlPlane.Failure where failure.status == 410 {
-            runner.stop()
+            try? await host.stop()
             hostname = nil
             on = false
             for key in ["remote.hostname", "remote.enabled"] { defaults.removeObject(forKey: key) }
@@ -150,8 +171,8 @@ final class RemoteAccess {
         hostname = nil
         defaults.removeObject(forKey: "remote.hostname")
         guard on else { return }
-        // The old tunnel is gone at Cloudflare: its cloudflared ends, and the new one runs.
-        runner.stop()
+        // The old tunnel is gone at Cloudflare: obid's cloudflared ends, and the new one runs.
+        try? await host.stop()
         await turnOn()
     }
 
@@ -164,37 +185,39 @@ final class RemoteAccess {
     func turnOn(with provider: ControlPlane.Provider = .apple) async {
         var evicted: String?
         await attempt {
+            try host.ready()
             let signer = try signer()
             evicted = try await registered(signer, with: provider)
             let endpoint = try await plane.createEndpoint(signer)
             let token = try await plane.tunnelToken(signer)
-            try secrets.save(token.token, as: Self.tokenKey)
+            // obid keeps the token in its vault and runs cloudflared (#896); the app keeps no copy.
+            try await host.hand(token.token)
             hostname = endpoint.hostname
             defaults.set(endpoint.hostname, forKey: "remote.hostname")
             defaults.set(true, forKey: "remote.enabled")
             on = true
-            runner.start(token: token.token)
             Logger.remote.notice("remote access on: \(endpoint.hostname, privacy: .public)")
         }
         // Not a failure, but the user should know: another Mac of theirs lost remote access.
         if let evicted, problem == nil {
             problem = "Your account had 5 Macs with remote access, so “\(evicted)”, the one used longest ago, was removed to make room."
         }
+        follow()
         checkInDaily()
     }
 
-    /// The tunnel stops; the hostname and the installation stay for next time.
-    func turnOff() {
-        runner.stop()
+    /// obid's tunnel stops and forgets its token; the hostname and the installation stay for next time.
+    func turnOff() async {
         defaults.set(false, forKey: "remote.enabled")
         on = false
+        await attempt { try await host.stop() }
         Logger.remote.notice("remote access off")
     }
 
     /// Removes this Mac from the control plane (its tunnel and hostname go), signed by its key,
     /// and forgets everything here, the key too. A hostname it had never answers again.
     func forget() async {
-        runner.stop()
+        try? await host.stop()
         await attempt {
             if let saved = try secrets.value(Self.keyKey) {
                 do {
@@ -317,109 +340,65 @@ enum WebSignIn {
     }
 }
 
-/// `cloudflared tunnel run`, bundled with Oby (apps/mac/app/Tools/bundle-cloudflared.sh), as a child of
-/// the app: it starts when remote access is on and again after it exits, waiting a little longer
-/// each time. The token goes in its environment (`TUNNEL_TOKEN`), never in its arguments, so the
-/// process list doesn't show it.
-final class TunnelRunner {
-    /// Where the bundled binary is: Contents/MacOS/cloudflared, signed with the app.
+/// Where the tunnel runs (#896): obid on this Mac keeps the run token in its vault and runs Oby's
+/// bundled cloudflared as its own child (docs/runner-api.md, "obid only: the tunnel"), so the
+/// tunnel outlives this window app. The app hands it the token and reads how it is. A test's
+/// stand-in records what it was asked.
+@MainActor
+protocol TunnelHost: AnyObject {
+    var onState: (RemoteAccess.TunnelState) -> Void { get set }
+    /// Throws when there's no obid on this Mac to run it.
+    func ready() throws
+    /// obid keeps `token` and runs cloudflared on it.
+    func hand(_ token: String) async throws
+    /// obid stops cloudflared and forgets the token.
+    func stop() async throws
+    /// How obid says the tunnel is now.
+    func refresh() async
+}
+
+/// The tunnel run by obid on this Mac, through its API with its token (Engine/LocalRunner.swift).
+final class ObidTunnel: TunnelHost {
+    /// Where the bundled binary is: Contents/MacOS/cloudflared, signed with the app; obid runs it.
     nonisolated static var bundled: URL? { Bundle.main.url(forAuxiliaryExecutable: "cloudflared") }
 
     var onState: (RemoteAccess.TunnelState) -> Void = { _ in }
-    private let binary: URL?
-    /// Starts the process: `Process.run`, or a test's stand-in that only looks at it.
-    private let launch: (Process) throws -> Void
-    private var process: Process?
-    private var token: String?
-    private var stopped = true
-    private var failures = 0
 
-    init(binary: URL? = TunnelRunner.bundled, launch: @escaping (Process) throws -> Void = { try $0.run() }) {
-        self.binary = binary
-        self.launch = launch
+    /// obid on this Mac, when Settings › Runner is This Mac and its token is found.
+    private func obid() throws -> Runner {
+        guard UserDefaults.standard.bool(forKey: RunnerFeed.thisMacKey), let token = LocalRunner.token() else {
+            throw Shell.Failure(message: RemoteAccess.needsThisMac)
+        }
+        return Runner(base: LocalRunner.url, token: token)
     }
 
-    var isRunning: Bool { process != nil }
+    func ready() throws { _ = try obid() }
 
-    func start(token: String) {
-        self.token = token
-        stopped = false
-        failures = 0
-        if process == nil { run() } else { onState(.starting) }
+    func hand(_ token: String) async throws {
+        struct Body: Encodable { var token: String }
+        try await obid().send("PUT", "v1/obid/tunnel", body: Body(token: token))
+        onState(.starting)
     }
 
-    func stop() {
-        stopped = true
-        token = nil
-        if let process, process.isRunning {
-            // Its exit clears `process` and says off.
-            process.terminate()
-        } else {
-            process = nil
-            onState(.off)
-        }
+    func stop() async throws {
+        try await obid().send("DELETE", "v1/obid/tunnel")
+        onState(.off)
     }
 
-    private func run() {
-        guard let token else { return }
-        guard let binary else {
-            onState(.failed("cloudflared isn't bundled with this build of Oby."))
-            return
-        }
-        let process = Process()
-        process.executableURL = binary
-        process.arguments = ["tunnel", "--no-autoupdate", "run"]
-        var environment = ProcessInfo.processInfo.environment
-        environment["TUNNEL_TOKEN"] = token
-        process.environment = environment
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        let log = Pipe()
-        process.standardError = log
-        log.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            let text = String(decoding: data, as: UTF8.self)
-            Task { @MainActor in self?.heard(text) }
-        }
-        process.terminationHandler = { [weak self] process in
-            log.fileHandleForReading.readabilityHandler = nil
-            let status = process.terminationStatus
-            Task { @MainActor in self?.exited(status) }
-        }
-        do {
-            try launch(process)
-            self.process = process
-            onState(.starting)
-        } catch {
-            onState(.failed("cloudflared couldn't start: \(error.localizedDescription)"))
-        }
+    func refresh() async {
+        guard let data = try? await obid().send("GET", "v1/status"),
+              let status = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let tunnel = status["tunnel"] as? [String: Any] else { return }
+        onState(Self.state(tunnel))
     }
 
-    /// cloudflared's log: one line per edge connection it registers.
-    private func heard(_ text: String) {
-        if text.contains("Registered tunnel connection") {
-            failures = 0
-            onState(.connected)
-        }
-        for line in text.split(separator: "\n") where line.contains("ERR") {
-            Logger.remote.error("cloudflared: \(String(line), privacy: .public)")
-        }
-    }
-
-    private func exited(_ status: Int32) {
-        process = nil
-        guard !stopped, token != nil else {
-            onState(.off)
-            return
-        }
-        failures += 1
-        let wait = min(60, 2 << min(failures, 5))
-        onState(.failed("The tunnel dropped (cloudflared exited with \(status)); trying again in \(wait) s."))
-        Task {
-            try? await Task.sleep(for: .seconds(wait))
-            guard !stopped, process == nil else { return }
-            run()
+    /// obid's `tunnel` field as Settings shows it.
+    nonisolated static func state(_ tunnel: [String: Any]) -> RemoteAccess.TunnelState {
+        switch tunnel["state"] as? String {
+        case "connected": .connected
+        case "starting": .starting
+        case "failed": .failed((tunnel["detail"] as? String) ?? "The tunnel stopped; obid is trying again.")
+        default: .off
         }
     }
 }

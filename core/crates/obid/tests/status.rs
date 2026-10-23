@@ -297,6 +297,8 @@ fn status_answers_with_engine_obid() {
     assert_eq!(status["github"], "owner");
     assert_eq!(status["checks"], "no app");
     assert_eq!(status["permissions"], json!({"mode": "sandbox"}));
+    // No remote access set up: no tunnel (crate::tunnel, #896).
+    assert_eq!(status["tunnel"], json!({"state": "off", "detail": null}));
     // claudeKeychain left out: obid decided, and the stand-in Keychain holds no Claude login.
     assert_eq!(status["claudeKeychain"], json!({"on": false, "auto": true}));
     let worktrees = folder.0.join("home").join("worktrees");
