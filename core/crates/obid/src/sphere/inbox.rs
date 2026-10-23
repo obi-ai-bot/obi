@@ -709,8 +709,8 @@ pub fn github_item_id(work: &str) -> String {
     format!("github-{work}")
 }
 
-/// The `github` item offering to do `work`: obid's own words from its typed fields, GitHub's
-/// title quoted under `github.quoted`.
+/// The `github` item offering to do `work`: obid's own words from its typed fields (its author's
+/// login only for sorting it, crate::triage), GitHub's title quoted under `github.quoted`.
 pub fn github_item(work: &crate::github_work::Item, now: i64) -> Item {
     let name = work.repo.rsplit('/').next().unwrap_or(&work.repo);
     let n = work.number;
@@ -755,7 +755,7 @@ pub fn github_item(work: &crate::github_work::Item, now: i64) -> Item {
         start: None,
         github: Some(Box::new(json!({
             "id": work.id, "list": work.list, "repo": work.repo, "number": work.number,
-            "url": work.url, "quoted": {"title": work.title},
+            "author": work.author, "url": work.url, "quoted": {"title": work.title},
         }))),
         watch: None,
     }

@@ -250,6 +250,8 @@ pub struct Link {
     sharing: sharing::Kept,
     /// The owner keys this Obi trusts, pinned the first time it saw each (crate::sphere::pins).
     pins: super::pins::Pins,
+    /// What the quick model said of the inbox's items, and when it was asked (crate::triage).
+    pub(crate) triage: crate::triage::Kept,
     /// What the model that answers a question by itself runs in: the job sandbox.
     sandbox: Result<Sandbox, String>,
     /// At most this many of those runs at once, whoever asked.
@@ -395,6 +397,16 @@ fn parse_later(text: &str) -> Option<i64> {
     time::parse(&format!("{whole}Z"))
 }
 
+/// What needs the owner first (crate::triage, with what waits for the model), then FYI, then
+/// ignore; each in the order they came, also within one second (Item::arrival_order).
+fn needs_you_first(items: &mut [impl std::borrow::Borrow<Item>], sorts: &crate::triage::Sorts) {
+    items.sort_by_cached_key(|i| {
+        let i: &Item = i.borrow();
+        let rank = crate::triage::rank(sorts.get(i));
+        (rank, i.arrival_order(), i.id.clone())
+    });
+}
+
 impl Link {
     /// Opens what obid keeps of its Sphere, its exchanges, inbox and decisions.
     pub fn open(
@@ -421,6 +433,7 @@ impl Link {
         let decisions = Decisions::open(&config.home);
         let sharing = sharing::Kept::open(&config.home);
         let pins = super::pins::Pins::open(&config.home);
+        let triage = crate::triage::Kept::open(&config.home);
         let chain = ChainKept::open(&config.home);
         // Nothing of a guest job a crash left behind: obid starts with none running.
         super::hosting::clean_leftovers(&config.home);
@@ -479,6 +492,7 @@ impl Link {
             decisions,
             sharing,
             pins,
+            triage,
             sandbox,
             answering: tokio::sync::Semaphore::new(ANSWER_RUNS),
             jobs,
@@ -1266,8 +1280,56 @@ impl Link {
         let now = self.lock().inbox.get(&item.id).cloned();
         let item = now.as_ref().unwrap_or(item);
         let kept = self.inbox.save(item).map_err(|e| e.to_string());
-        self.events.send("inbox", item.to_json());
+        self.events.send("inbox", self.shown(item));
         kept
+    }
+
+    /// The inbox's sorts as they are now (crate::triage), over `inbox`.
+    fn sorts<'a>(&'a self, inbox: &'a HashMap<String, Item>) -> crate::triage::Sorts<'a> {
+        crate::triage::Sorts::of(&self.triage, inbox.values(), time::now())
+    }
+
+    /// An item's sort now (crate::triage). Never with this Link's state locked.
+    pub fn triage_of(&self, item: &Item) -> &'static str {
+        let state = self.lock();
+        self.sorts(&state.inbox).get(item)
+    }
+
+    /// An item as the API shows it: with its `triage`.
+    fn shown(&self, item: &Item) -> Value {
+        let mut shown = item.to_json();
+        shown["triage"] = self.triage_of(item).into();
+        shown
+    }
+
+    /// Open items waiting for the quick model (crate::triage), the longest-waiting first.
+    pub fn unsorted(&self) -> Vec<Item> {
+        let state = self.lock();
+        let sorts = self.sorts(&state.inbox);
+        let mut items: Vec<Item> = state
+            .inbox
+            .values()
+            .filter(|i| sorts.waits(i))
+            .cloned()
+            .collect();
+        items.sort_by_key(Item::arrival_order);
+        items
+    }
+
+    /// The model's sorts (crate::triage::sort), kept for good: the apps hear each item again, now
+    /// sorted. Nothing about the item changes but that.
+    pub fn sorted(&self, sorts: &[(String, &str)]) {
+        self.retell(&self.triage.keep(sorts));
+    }
+
+    /// The apps hear these items again, as they are now: their sort changed, nothing else.
+    pub fn retell(&self, ids: &[String]) {
+        let _saving = self.saving.lock().unwrap_or_else(|e| e.into_inner());
+        for id in ids {
+            if let Some(item) = self.item(id) {
+                self.events.send("inbox", self.shown(&item));
+            }
+        }
     }
 
     fn save_sharing(&self, sharing: &Sharing) {
@@ -3198,8 +3260,9 @@ impl Link {
         true
     }
 
-    /// `GET /v1/inbox` (`done` false: open and put off, the longest-waiting first) or
-    /// `?state=done` (the latest settled first, at most `limit`).
+    /// `GET /v1/inbox` (`done` false: open and put off, what needs the owner first, then FYI,
+    /// then ignore, each the longest-waiting first) or `?state=done` (the latest settled first, at
+    /// most `limit`).
     pub fn inbox_json(&self, done: bool, limit: usize) -> Value {
         self.settle_stale_starts();
         let state = self.lock();
@@ -3208,18 +3271,19 @@ impl Link {
             .values()
             .filter(|i| i.done.is_some() == done)
             .collect();
+        let sorts = self.sorts(&state.inbox);
         if done {
             items.sort_by(|a, b| b.done.cmp(&a.done).then_with(|| b.id.cmp(&a.id)));
             items.truncate(limit);
         } else {
-            // The order they came in, also within one second (Item::arrival_order).
-            items.sort_by(|a, b| {
-                a.arrival_order()
-                    .cmp(&b.arrival_order())
-                    .then_with(|| a.id.cmp(&b.id))
-            });
+            needs_you_first(&mut items, &sorts);
         }
-        Value::Array(items.into_iter().map(Item::to_json).collect())
+        let shown = items.into_iter().map(|i| {
+            let mut shown = i.to_json();
+            shown["triage"] = sorts.get(i).into();
+            shown
+        });
+        Value::Array(shown.collect())
     }
 
     /// Settles an open item with no answer: what it asked about is gone (a shell command whose
@@ -3786,8 +3850,8 @@ impl Link {
         self.lock().inbox.get(id).cloned()
     }
 
-    /// The items waiting for the owner now (not done, and not put off past `now`), in the order
-    /// they came: what the brain is told about the inbox (#546).
+    /// The items waiting for the owner now (not done, and not put off past `now`), what needs them
+    /// first and each group in the order they came: what the brain is told about the inbox (#546).
     pub fn waiting_items(&self, now: i64) -> Vec<Item> {
         self.settle_stale_starts();
         let state = self.lock();
@@ -3797,11 +3861,7 @@ impl Link {
             .filter(|i| i.done.is_none() && i.later.is_none_or(|later| later <= now))
             .cloned()
             .collect();
-        items.sort_by(|a, b| {
-            a.arrival_order()
-                .cmp(&b.arrival_order())
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        needs_you_first(&mut items, &self.sorts(&state.inbox));
         items
     }
 
@@ -3809,7 +3869,16 @@ impl Link {
     /// `confirm` item is refused (#776). Agents, oby-mcp, the brain and obid's own callers come
     /// this way.
     pub async fn answer(self: &Arc<Self>, id: &str, body: &[u8]) -> Result<Value, ApiError> {
-        self.answer_as(id, body, None).await
+        let answered = self.answer_as(id, body, None).await;
+        answered.map(|shown| self.with_triage(shown))
+    }
+
+    /// An answer's item with its `triage`, as every item the API shows (crate::triage).
+    fn with_triage(&self, mut shown: Value) -> Value {
+        if let Some(item) = shown["id"].as_str().and_then(|id| self.item(id)) {
+            shown["triage"] = self.triage_of(&item).into();
+        }
+        shown
     }
 
     /// `POST /v1/inbox/{id}/answer` after a registered device signed a Confirm of item `id`
@@ -3821,7 +3890,8 @@ impl Link {
         body: &[u8],
         approved: &str,
     ) -> Result<Value, ApiError> {
-        self.answer_as(id, body, Some(approved)).await
+        let answered = self.answer_as(id, body, Some(approved)).await;
+        answered.map(|shown| self.with_triage(shown))
     }
 
     async fn answer_as(
@@ -5778,6 +5848,127 @@ mod tests {
         let kept = Exchanges::open(&home).unwrap().load_all();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].state, "declined");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+    /// The inbox lists what needs the owner first (with what waits for the model), then FYI, then
+    /// ignore, each by arrival; a second item about the same thing is `ignore` while the one that
+    /// stands for it is open, an offer standing before what only says something; and the model's
+    /// sort is kept once, the apps told (crate::triage).
+    #[tokio::test]
+    async fn the_inbox_lists_what_needs_you_first() {
+        let home = std::env::temp_dir().join(format!("obid-link-triage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let config = Config::parse(
+            &json!({"listen": "127.0.0.1:0", "home": home, "owner": "wellington"}).to_string(),
+        )
+        .unwrap();
+        let events = Events::new();
+        let jobs = Jobs::open(config.clone(), events.clone(), Err("no sandbox".into())).unwrap();
+        let (_stop, stopping) = watch::channel(false);
+        let link = Link::open(config, jobs, events.clone(), stopping).unwrap();
+        let mut heard = events.subscribe();
+        let event = |id: &str, kind: &str, subject: Value| -> obi_plugin_api::PluginEvent {
+            serde_json::from_value(json!({"plugin": "tetrix", "event": {"id": id, "kind": kind,
+                "occurredAt": "2026-10-23T03:12:00Z", "subject": subject, "actor": "sangam",
+                "data": {"title": "Needs you NOW", "url": "https://example.com/x"}}}))
+            .unwrap()
+        };
+        let warning = event(
+            "w",
+            "alert.fired",
+            json!({"repo": "o/r", "project": "api", "severity": "warning"}),
+        );
+        let review = event(
+            "r",
+            "pull_request.review_requested",
+            json!({"repo": "o/r", "pr": 12}),
+        );
+        link.plugin_event(warning);
+        link.plugin_event(review);
+        let work: crate::github_work::Item = serde_json::from_value(json!({
+            "id": "i-7", "list": "assigned", "repo": "o/r", "number": 7, "title": "Fix it",
+            "url": "https://github.com/o/r/issues/7", "author": "sangam", "labels": [],
+            "updated": "2026-10-23T03:12:00Z", "state": "OPEN", "draft": null,
+            "reviewDecision": null, "checks": null, "board": null}))
+        .unwrap();
+        let mut asked = work.clone();
+        (asked.id, asked.list, asked.number) = ("r-12".into(), "reviews".into(), 12);
+        link.github_work(&[asked, work], None);
+
+        let drain = |heard: &mut tokio::sync::broadcast::Receiver<crate::events::Event>| {
+            std::iter::from_fn(|| heard.try_recv().ok())
+                .map(|e| (e.data["title"].clone(), e.data["triage"].clone()))
+                .collect::<Vec<_>>()
+        };
+        // The plug-in's review request needed the owner when it came; the feed's offer of the same
+        // review then stands for both.
+        assert_eq!(
+            drain(&mut heard),
+            [
+                (json!("Alert: api (warning)"), json!("fyi")),
+                (json!("Review requested: o/r #12"), json!("needs_you")),
+                (json!("Review requested: r #12"), json!("needs_you")),
+                (json!("Assigned to you: r #7"), json!("pending")),
+            ]
+        );
+        let order = |items: Vec<Value>| -> Vec<(String, Value)> {
+            items
+                .iter()
+                .map(|i| (i["title"].as_str().unwrap().to_owned(), i["triage"].clone()))
+                .collect()
+        };
+        let listed = order(link.inbox_json(false, 50).as_array().unwrap().clone());
+        assert_eq!(
+            listed,
+            [
+                ("Review requested: r #12".to_owned(), json!("needs_you")),
+                ("Assigned to you: r #7".to_owned(), json!("pending")),
+                ("Alert: api (warning)".to_owned(), json!("fyi")),
+                ("Review requested: o/r #12".to_owned(), json!("ignore")),
+            ]
+        );
+        let waiting: Vec<String> = link
+            .waiting_items(time::now())
+            .into_iter()
+            .map(|i| i.title)
+            .collect();
+        assert_eq!(
+            waiting,
+            listed.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>()
+        );
+        // The offer dismissed, the plug-in's request needs the owner again.
+        link.answer("github-r-12", br#"{"answer": "Dismiss"}"#)
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(
+            order(link.inbox_json(false, 50).as_array().unwrap().clone())[0],
+            ("Review requested: o/r #12".to_owned(), json!("needs_you"))
+        );
+        drain(&mut heard);
+
+        // Only the assigned issue waits for the model; its sort is kept once, the apps told.
+        let unsorted = link.unsorted();
+        assert_eq!(unsorted.len(), 1);
+        let id = unsorted[0].id.clone();
+        link.sorted(&[(id.clone(), crate::triage::FYI)]);
+        link.sorted(&[(id.clone(), crate::triage::NEEDS_YOU)]);
+        assert_eq!(
+            drain(&mut heard),
+            [(json!("Assigned to you: r #7"), json!("fyi"))]
+        );
+        assert!(link.unsorted().is_empty());
+        // Answered, it shows its sort too; nothing was answered or settled by sorting.
+        let answered = link
+            .answer(&id, br#"{"answer": "Dismiss"}"#)
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(
+            (&answered["state"], &answered["triage"]),
+            (&json!("done"), &json!("fyi"))
+        );
+        assert_eq!(link.inbox_json(true, 50).as_array().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&home);
     }
 }
