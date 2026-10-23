@@ -4532,6 +4532,7 @@ impl Jobs {
                 AgentEvent::Delta(_)
                 | AgentEvent::Said(_)
                 | AgentEvent::Thought { .. }
+                | AgentEvent::Thinking { .. }
                 | AgentEvent::Plan(_) => {}
             }
         };

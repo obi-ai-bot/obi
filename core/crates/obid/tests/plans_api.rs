@@ -4733,6 +4733,41 @@ fn a_follow_ups_proposal_closes_once_its_work_merged() {
     );
 }
 
+/// Claude Code's thinking shows while it goes on, though its stream carries no thinking text: a
+/// `thought` entry that's `running`, then `done` with how long it took.
+#[test]
+fn a_jobs_thinking_shows_with_no_words() {
+    let folder = Folder::new("thinking");
+    let obid = started(&folder);
+    let answer = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research",
+                             "task": "THINKING", "title": "Thinker"}}),
+        ),
+    );
+    assert_eq!(answer.status, 201, "{}", answer.text);
+    let id = answer.body["id"].as_str().unwrap().to_owned();
+    let ended = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None);
+    assert_eq!(ended.status, 200, "{}", ended.text);
+    let transcript = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript"), None);
+    let thought = transcript.body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "thought")
+        .cloned()
+        .unwrap_or_else(|| panic!("no thought: {}", transcript.text));
+    assert_eq!(thought["summary"], "Thinking", "{thought}");
+    assert_eq!(thought["state"], "done", "{thought}");
+    assert!(thought["seconds"].is_number(), "{thought}");
+    assert!(
+        thought.get("text").is_none_or(serde_json::Value::is_null),
+        "{thought}"
+    );
+}
 /// #784: what a job's call printed is kept for its transcript (opened per entry), and never
 /// reaches the brain: not its prompt, its arguments or its quoted file, even while it reads about
 /// that very job.

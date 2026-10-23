@@ -272,6 +272,13 @@ rl.on("line", (line) => {
     const read = tries(() => readFileSync(`${plant[1]}/.credentials.json`));
     const dir = own === plant[1] ? "account" : "own";
     result(`plant: dir=${dir} refresh=${refresh} settings=${settings} state=${state} real=${real} real-state=${realState} read=${read}`);
+  } else if (prompt.includes("THINKING")) {
+    // As Claude Code streams it: the thinking block starts and stops, with no thinking text.
+    emit({ type: "stream_event", session_id: session, event: { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } } });
+    emit({ type: "stream_event", session_id: session, event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "", estimated_tokens: 50 } } });
+    emit({ type: "stream_event", session_id: session, event: { type: "content_block_stop", index: 0 } });
+    emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "sig" }] } });
+    result("Thought it through.");
   } else if (prompt.includes("DETAIL")) {
     emit({ type: "assistant", session_id: session, message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }] } });
     emit({ type: "user", session_id: session, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", is_error: false, content: "DETAIL-ONLY-CANARY-7f3a\nREADME.md" }] } });
