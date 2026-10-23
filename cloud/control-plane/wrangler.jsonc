@@ -59,8 +59,8 @@
         "GATEWAY": "http://127.0.0.1:8810"
       },
       "d1_databases": [
-        // `wrangler d1 create oby-control` prints the id; paste it here before the first deploy.
-        { "binding": "DB", "database_name": "oby-control", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+        // Made by `wrangler d1 create oby-control` in Deskree's account on 2026-10-22.
+        { "binding": "DB", "database_name": "oby-control", "database_id": "a0c20945-43b9-4090-ad09-753de05d76c3", "migrations_dir": "migrations" }
       ]
     }
   }
