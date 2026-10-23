@@ -20,6 +20,7 @@ export default defineConfig(async () => {
             APPLE_REDIRECT_URI: "https://oby-control.oby.test/v1/auth/apple/callback",
             GOOGLE_CLIENT_ID: "1234-oby.apps.googleusercontent.com",
             GOOGLE_REDIRECT_URI: "https://oby-control.oby.test/v1/auth/google/callback",
+            APNS_TOPICS: "com.deskree.oby.ios",
           },
         },
       }),

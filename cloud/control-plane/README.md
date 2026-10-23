@@ -7,4 +7,4 @@ A Cloudflare Worker with a D1 database (#285): one installation per Mac, known b
 - `pnpm install`, then `pnpm test` (inside workerd, with the Cloudflare API and the sign-in providers faked), `pnpm check` (TypeScript), `pnpm dev --env <name>` (`wrangler dev`).
 - Its API, and how the Mac and the iPhone use it: [docs/remote-access.md](../../docs/remote-access.md).
 
-The Worker currently provisions tunnels only. It does not relay APNs pushes; the runner sends APNs directly while awake until a separately specified relay adds token storage, APNs secrets, and an event API.
+It also relays pushes to iPhones (#398): a phone registers its APNs token for a `pushId` and `pushSecret`, obid posts alerts sealed to the phone's key, and the Worker sends Apple a fixed alert with the sealed blob, which it can't read. The APNs key and `PUSH_SECRET_KEY` are Worker secrets: [docs/remote-access.md, Pushes](../../docs/remote-access.md#pushes).

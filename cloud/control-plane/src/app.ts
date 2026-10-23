@@ -13,7 +13,14 @@
 // Nothing secret is kept: D1 holds public keys, and a tunnel's run token is fetched from
 // Cloudflare when the Mac asks. A hook's delivery while its Mac is away is kept only sealed to that
 // Mac's obid (#1315), so nothing kept can be read here.
+//
+// The sealed push relay (#398, the owner's decision of 2026-10-23) is the one part open to any
+// phone, members or not: an iPhone registers its APNs token for a pushId and pushSecret it gives
+// its obid, and obid posts alerts sealed to the phone's own key, signed with that secret. The relay
+// sends Apple a fixed alert carrying the sealed blob: it never sees what a push says, and never
+// learns which Mac sent it.
 
+import { apnsKey, type Send, sendAlert } from "./apns";
 import { CloudflareError, CloudflareSetupError, type TunnelAPI, type TunnelStatus } from "./cloudflare";
 import type { Env } from "./env";
 import { counted as countedSoFar, type Limit, takeOne } from "./limits";
@@ -24,6 +31,8 @@ export interface Deps {
   tunnels: TunnelAPI;
   /// How a hook's delivery goes on to the Mac (`fetch`); a test's stand-in sees what would be sent.
   forward?: (url: string, init: RequestInit) => Promise<Response>;
+  /// How a push goes to Apple (`fetch`, HTTP/2 on Cloudflare's edge); a test's stand-in plays APNs.
+  apns?: Send;
   /// Apple's and Google's public keys, for their identity tokens.
   apple: KeyCache;
   google: KeyCache;
@@ -104,6 +113,14 @@ export const LIMITS = {
   hooksMadePerInstallation: { max: 20, windowSeconds: 24 * 60 * 60 } satisfies Limit,
   deliveriesPerHookMinute: { max: 60, windowSeconds: 60 } satisfies Limit,
   deliveriesPerHookDay: { max: 2000, windowSeconds: 24 * 60 * 60 } satisfies Limit,
+  // The push relay (#398): new phones per client, network and everyone; a phone registering its
+  // token again; and pushes per phone, counted only once their MAC checks out.
+  phonesPerAddress: { max: 30, windowSeconds: 60 * 60 } satisfies Limit,
+  phonesPerNetwork: { max: 200, windowSeconds: 60 * 60 } satisfies Limit,
+  phonesEverywhere: { max: 2000, windowSeconds: 60 * 60 } satisfies Limit,
+  reRegistrationsPerPhone: { max: 20, windowSeconds: 60 * 60 } satisfies Limit,
+  pushesPerPhoneMinute: { max: 30, windowSeconds: 60 } satisfies Limit,
+  pushesPerPhoneDay: { max: 1000, windowSeconds: 24 * 60 * 60 } satisfies Limit,
 };
 /// The most hooks one installation has at once.
 export const HOOKS_PER_INSTALLATION = 20;
@@ -133,6 +150,15 @@ export const SIGNED_PREFIX = "oby-control-v1";
 export const QUEUE = { bodyMax: 256 * 1024, perInstallation: 100, bytesPerInstallation: 2 * 1024 * 1024, hours: 72, batch: 20 };
 /// HKDF's `info` when a delivery is sealed; obid opens with the same.
 export const QUEUE_INFO = "oby-hook-queue/1";
+/// The push relay (#398): the biggest registration and push bodies, and the most base64url
+/// characters `sealed` may have, so Apple's payload stays under its 4 KB.
+export const PUSH = { registrationMax: 1024, bodyMax: 4096, sealedMax: 3072 };
+/// What every push shows until the phone's Notification Service Extension opens what's sealed.
+export const PUSH_ALERT = { title: "Oby", body: "Open Oby to see it." };
+/// What a pushSecret is the HMAC of, with the pushId (`pushSecret`).
+export const PUSH_SECRET_INFO = "oby-push-secret/1";
+/// A pushId: 24 base64url characters when made here (18 random bytes, 144 bits).
+const PUSH_ID = /^[A-Za-z0-9_-]{22,64}$/;
 
 /// An answer with an error: thrown anywhere, sent as `{"error": …}` with its status.
 class Reply extends Error {
@@ -220,6 +246,10 @@ async function route(request: Request, env: Env, deps: Deps, now: () => Date): P
   if (kept?.[1] && method === "DELETE") return removeKept(request, env, now, kept[1]);
   const hook = /^\/v1\/installations\/self\/hooks\/([a-z0-9]{32})$/.exec(path);
   if (hook?.[1] && method === "DELETE") return removeHook(request, env, now, hook[1]);
+  if (path === "/v1/push/devices" && method === "POST") return registerPhone(request, env, now);
+  const phone = /^\/v1\/push\/devices\/([A-Za-z0-9_-]{22,64})$/.exec(path);
+  if (phone?.[1] && method === "DELETE") return forgetPhone(request, env, phone[1]);
+  if (path === "/v1/push" && method === "POST") return push(request, env, deps, now);
   const delivery = /^\/h\/([^/]+)$/.exec(path);
   if (delivery?.[1]) {
     if (method !== "POST") throw new Reply(405, "A hook takes POST only.", { Allow: "POST" });
@@ -856,6 +886,145 @@ async function boundedBody(request: Request, max: number): Promise<Uint8Array | 
     body.set(part, at);
     at += part.byteLength;
   }
+  return body;
+}
+
+// MARK: The push relay (#398)
+
+const notSetUp = "Pushes aren't set up on this control plane.";
+const wrongSecret = "That pushId and pushSecret don't go together.";
+const phoneGone = "That phone isn't registered for pushes any more.";
+
+/// An iPhone registers its APNs token (`{apns, topic, sandbox}`) and gets `{pushId, pushSecret}`
+/// for its obid. The same call with them added registers a changed token for the same id, and
+/// brings back one the relay forgot: the secret proves it's that phone's. A token another pushId
+/// has moves to this one, so one phone never gets two of each push.
+async function registerPhone(request: Request, env: Env, now: () => Date): Promise<Response> {
+  pushSecretKey(env);
+  const topics = (env.APNS_TOPICS ?? "").split(",").map((topic) => topic.trim()).filter(Boolean);
+  if (!topics.length) throw new Reply(503, notSetUp);
+  const body = only(await smallJSON(request, PUSH.registrationMax), ["apns", "topic", "sandbox", "pushId", "pushSecret"]);
+  const token = field(body.apns, "apns", /^(?:[0-9a-fA-F]{2}){32,100}$/, "the APNs device token, in hex").toLowerCase();
+  if (typeof body.topic !== "string" || !topics.includes(body.topic)) throw new Reply(422, `topic is ${topics.join(" or ")}.`);
+  if (typeof body.sandbox !== "boolean") throw new Reply(422, "sandbox is true or false.");
+  let id: string;
+  if (body.pushId !== undefined || body.pushSecret !== undefined) {
+    if (typeof body.pushId !== "string" || !(await secretMatches(env, body.pushId, body.pushSecret))) throw new Reply(401, wrongSecret);
+    id = body.pushId;
+    await limit(env.DB, `phones:again:${id}`, LIMITS.reRegistrationsPerPhone, now(), "This phone registered too often lately.");
+  } else {
+    const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
+    const busy = "Too many phones registered from this network lately.";
+    await limit(env.DB, `phones:address:${addressBucket(address)}`, LIMITS.phonesPerAddress, now(), busy);
+    await limit(env.DB, `phones:network:${networkBucket(address)}`, LIMITS.phonesPerNetwork, now(), busy);
+    await limit(env.DB, "phones:everywhere", LIMITS.phonesEverywhere, now(), "Too many phones registered lately.");
+    const max = whole(env.MAX_PUSH_DEVICES, "MAX_PUSH_DEVICES", 1, 100_000_000);
+    const count = (await env.DB.prepare("SELECT count(*) AS n FROM push_devices").first<{ n: number }>())?.n ?? 0;
+    if (count >= max) throw new Reply(503, "This control plane can't take more phones now.");
+    // Workers Logs keep it, as MAX_ENDPOINTS's warning.
+    if (count + 1 >= max * 0.8) console.warn(`push relay: ${count + 1} of ${max} phones, past 80% of MAX_PUSH_DEVICES`);
+    id = base64url(randomBytes(18));
+  }
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM push_devices WHERE apns_token = ?1 AND id <> ?2").bind(token, id),
+    env.DB.prepare(
+      `INSERT INTO push_devices (id, apns_token, topic, sandbox) VALUES (?1, ?2, ?3, ?4)
+       ON CONFLICT (id) DO UPDATE SET apns_token = excluded.apns_token, topic = excluded.topic, sandbox = excluded.sandbox`,
+    ).bind(id, token, body.topic, body.sandbox ? 1 : 0),
+  ]);
+  return json({ pushId: id, pushSecret: base64url(await pushSecret(env, id)) }, 200, noStore);
+}
+
+/// The phone forgets itself: `Authorization: Bearer <pushSecret>`. 204, also when it was gone.
+async function forgetPhone(request: Request, env: Env, id: string): Promise<Response> {
+  pushSecretKey(env);
+  const bearer = /^Bearer\s+(\S+)$/i.exec(request.headers.get("Authorization") ?? "")?.[1];
+  if (!(await secretMatches(env, id, bearer))) throw new Reply(401, wrongSecret);
+  await env.DB.prepare("DELETE FROM push_devices WHERE id = ?1").bind(id).run();
+  return new Response(null, { status: 204 });
+}
+
+/// obid's push: `{pushId, sealed, collapse?, urgent?}` with `Oby-Push-Mac`, the HMAC-SHA-256 of
+/// the body's bytes under the pushSecret's 32 bytes, base64url. The MAC is checked before anything
+/// is read or counted, so a stranger's push costs no D1 and can't spend the phone's allowance.
+/// Apple gets the fixed alert with `sealed` beside `aps`; Apple saying the token is gone forgets
+/// the phone (410). Nothing of a push is kept or logged but Apple's status and reason.
+async function push(request: Request, env: Env, deps: Deps, now: () => Date): Promise<Response> {
+  const key = apnsKey(env);
+  pushSecretKey(env);
+  if (!key) throw new Reply(503, notSetUp);
+  if (Number(request.headers.get("Content-Length") ?? "0") > PUSH.bodyMax) throw new Reply(413, "That push is too large.");
+  const raw = await boundedBody(request, PUSH.bodyMax);
+  if (!raw) throw new Reply(413, "That push is too large.");
+  const body = only(parseJSON(raw), ["pushId", "sealed", "collapse", "urgent"]);
+  const id = field(body.pushId, "pushId", PUSH_ID, "the phone's pushId");
+  const sealed = field(body.sealed, "sealed", /^[A-Za-z0-9_-]+$/, "the sealed alert, base64url");
+  if (sealed.length > PUSH.sealedMax) throw new Reply(413, `sealed is at most ${PUSH.sealedMax} characters.`);
+  const collapse = body.collapse === undefined ? undefined : field(body.collapse, "collapse", /^[\x21-\x7e]{1,64}$/, "1 to 64 printable characters, no spaces");
+  if (body.urgent !== undefined && typeof body.urgent !== "boolean") throw new Reply(422, "urgent is true or false.");
+  if (!(await macMatches(env, id, request.headers.get("Oby-Push-Mac"), raw))) throw new Reply(401, "This push isn't signed with that phone's pushSecret.");
+  await limit(env.DB, `pushes:minute:${id}`, LIMITS.pushesPerPhoneMinute, now(), "Too many pushes to this phone.");
+  await limit(env.DB, `pushes:day:${id}`, LIMITS.pushesPerPhoneDay, now(), "Too many pushes to this phone today.");
+  const phone = await env.DB.prepare("SELECT apns_token, topic, sandbox FROM push_devices WHERE id = ?1").bind(id)
+    .first<{ apns_token: string; topic: string; sandbox: number }>();
+  if (!phone) throw new Reply(410, phoneGone);
+  const payload = JSON.stringify({ aps: { alert: PUSH_ALERT, "mutable-content": 1, sound: "default" }, sealed });
+  const send = deps.apns ?? ((url: string, init: RequestInit) => fetch(url, init));
+  const answer = await sendAlert(send, key, { token: phone.apns_token, topic: phone.topic, sandbox: phone.sandbox === 1, payload, urgent: body.urgent === true, collapse }, now());
+  if (answer.status === 200) return json({ ok: true });
+  const gone = answer.status === 410 || (answer.status === 400 && (answer.reason === "BadDeviceToken" || answer.reason === "DeviceTokenNotForTopic"));
+  console.log(`push: APNs ${answer.status || "didn't answer"}${answer.reason ? ` ${answer.reason}` : ""}${gone ? ", phone forgotten" : ""}`);
+  if (gone) {
+    // Only that token: the phone may have registered a new one meanwhile.
+    await env.DB.prepare("DELETE FROM push_devices WHERE id = ?1 AND apns_token = ?2").bind(id, phone.apns_token).run();
+    throw new Reply(410, phoneGone);
+  }
+  if (answer.status === 429) throw new Reply(429, "Apple says too many pushes to this phone. Try again later.", answer.retryAfter ? { "Retry-After": answer.retryAfter } : {});
+  if (answer.status === 0 || answer.status >= 500) throw new Reply(502, "Apple didn't take the push. Try again later.");
+  throw new Reply(502, `Apple refused the push${answer.reason ? `: ${answer.reason}` : ""}.`);
+}
+
+/// PUSH_SECRET_KEY, or the relay is off (503).
+function pushSecretKey(env: Env): string {
+  const key = env.PUSH_SECRET_KEY?.trim() ?? "";
+  if (key.length < 32) throw new Reply(503, notSetUp);
+  return key;
+}
+
+/// A phone's pushSecret: the HMAC-SHA-256 of PUSH_SECRET_INFO and its pushId under PUSH_SECRET_KEY,
+/// 32 bytes. Made again whenever it's needed, so D1 keeps no secret.
+async function pushSecret(env: Env, id: string): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(pushSecretKey(env)), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${PUSH_SECRET_INFO}\n${id}`)));
+}
+
+/// Whether `secret` (base64url) is `id`'s pushSecret, compared in constant time.
+async function secretMatches(env: Env, id: string, secret: unknown): Promise<boolean> {
+  const given = typeof secret === "string" && PUSH_ID.test(id) ? fromBase64url(secret) : null;
+  if (given?.length !== 32) return false;
+  return crypto.subtle.timingSafeEqual(given, await pushSecret(env, id));
+}
+
+/// Whether `mac` (base64url) is the HMAC-SHA-256 of `body` under `id`'s pushSecret, compared in
+/// constant time.
+async function macMatches(env: Env, id: string, mac: string | null, body: Uint8Array): Promise<boolean> {
+  const given = fromBase64url(mac ?? "");
+  if (given?.length !== 32) return false;
+  const key = await crypto.subtle.importKey("raw", await pushSecret(env, id), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return crypto.subtle.timingSafeEqual(given, new Uint8Array(await crypto.subtle.sign("HMAC", key, body)));
+}
+
+/// A JSON object of at most `max` bytes (413 past it).
+async function smallJSON(request: Request, max: number): Promise<Record<string, unknown>> {
+  if (Number(request.headers.get("Content-Length") ?? "0") > max) throw new Reply(413, "That's too large.");
+  const raw = await boundedBody(request, max);
+  if (!raw) throw new Reply(413, "That's too large.");
+  return parseJSON(raw);
+}
+
+/// `body`, when it has no field but `names` (422 otherwise).
+function only(body: Record<string, unknown>, names: string[]): Record<string, unknown> {
+  if (Object.keys(body).some((name) => !names.includes(name))) throw new Reply(422, `This call takes only ${names.join(", ")}.`);
   return body;
 }
 

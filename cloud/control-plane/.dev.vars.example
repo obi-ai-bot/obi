@@ -6,3 +6,10 @@ CF_API_TOKEN=paste-the-api-token-here
 CF_ACCOUNT_ID=paste-the-account-id-here
 CF_ZONE_ID=paste-the-device-domain-zone-id-here
 
+
+# The push relay (#398): an Apple Developer key with APNs (the .p8 file's text, with its newlines),
+# its Key ID and the team's ID, and at least 32 random characters every pushSecret is made from.
+APNS_KEY="-----BEGIN PRIVATE KEY-----\npaste-the-p8-key-here\n-----END PRIVATE KEY-----"
+APNS_KEY_ID=paste-the-key-id-here
+APNS_TEAM_ID=paste-the-team-id-here
+PUSH_SECRET_KEY=paste-32-or-more-random-characters-here

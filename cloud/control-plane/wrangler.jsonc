@@ -13,7 +13,7 @@
   // connected (src/app.ts, `sweep`).
   "triggers": { "crons": ["* * * * *"] },
   // Plain settings, every one documented in src/env.ts. Secrets (the Cloudflare API token, the
-  // account and zone ids) are never here: `wrangler secret put --env <name>`, or .dev.vars for
+  // account and zone ids, the APNs key and PUSH_SECRET_KEY) are never here: `wrangler secret put --env <name>`, or .dev.vars for
   // `wrangler dev`. Wrangler doesn't inherit `vars` or `d1_databases`: an environment lists them all.
   "vars": {
     "PRODUCT_DOMAIN": "",
@@ -28,7 +28,9 @@
     "WORKSPACE_DOMAIN_REGISTRATIONS": "50",
     "MAX_ENDPOINTS": "500",
     "GATEWAY": "http://127.0.0.1:8810",
-    "QUEUE_TOTAL_MIB": "200"
+    "QUEUE_TOTAL_MIB": "200",
+    "APNS_TOPICS": "",
+    "MAX_PUSH_DEVICES": "100000"
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "oby-control", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
@@ -60,7 +62,11 @@
         "GATEWAY": "http://127.0.0.1:8810",
         // The most bytes of sealed deliveries kept for every Mac away together (#1315), in MiB.
         // D1's free plan holds 500 MB a database, so this leaves room for everything else.
-        "QUEUE_TOTAL_MIB": "200"
+        "QUEUE_TOTAL_MIB": "200",
+        // The sealed push relay (#398): the iPhone app's bundle id (#1350), and the most phones
+        // registered at once (about 200 bytes each in D1).
+        "APNS_TOPICS": "com.deskree.oby.ios",
+        "MAX_PUSH_DEVICES": "100000"
       },
       "d1_databases": [
         // Made by `wrangler d1 create oby-control` in Deskree's account on 2026-10-22.
