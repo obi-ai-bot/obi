@@ -127,6 +127,40 @@ struct LoginItemTests {
         #expect(RunnerLoginItem.launchd("com.deskree.oby.nothing.\(UUID().uuidString)") == nil)
     }
 
+    /// After an update, an obid still running the old executable is restarted, once (2026-10-23,
+    /// the MacBook Air on 0.3.0 with 0.2.1's obid: "There's no such endpoint").
+    @Test func anObidFromBeforeTheUpdateIsRestarted() throws {
+        func decide(_ status: SMAppService.Status, runs: Bool = true, outdated: Bool, onThisMac: Bool = true) -> RunnerLoginItem.AtLaunch {
+            RunnerLoginItem.atLaunch(onThisMac: onThisMac, byScript: false, mayRegister: true, status: status,
+                                     signingChanged: false, runs: runs, outdated: outdated)
+        }
+        #expect(decide(.enabled, outdated: true) == .restart)
+        #expect(decide(.enabled, outdated: false) == .nothing)
+        // Not running at all is a re-register, and a remote runner is left alone.
+        if case .reregister = decide(.enabled, runs: false, outdated: true) {} else { Issue.record("expected a re-register") }
+        #expect(decide(.enabled, outdated: true, onThisMac: false) == .nothing)
+        let now = Date()
+        #expect(RunnerLoginItem.stale(started: now.addingTimeInterval(-3600), replaced: now))
+        #expect(!RunnerLoginItem.stale(started: now, replaced: now.addingTimeInterval(-3600)))
+        #expect(!RunnerLoginItem.stale(started: now, replaced: now), "the same moment is not stale")
+        // launchctl's own words for obid (#692): an SMAppService job names its program relative to the app.
+        let printed = "gui/501/com.deskree.oby.obid = {\n\tstate = running\n\tprogram identifier = Contents/Helpers/obid (mode: 1)\n\tpid = 4242\n}"
+        let found = try #require(RunnerLoginItem.running(printed, bundle: "/Applications/Oby.app"))
+        #expect(found.program == "/Applications/Oby.app/Contents/Helpers/obid" && found.pid == 4242)
+        #expect(RunnerLoginItem.running("program = /usr/local/bin/obid\npid = 7")?.program == "/usr/local/bin/obid")
+        #expect(RunnerLoginItem.running(printed.replacingOccurrences(of: "pid = 4242", with: "")) == nil, "no pid, no restart")
+        // This test process and a file written now: outdated exactly when it started before the file, and never in Debug.
+        let file = FileManager.default.temporaryDirectory.appending(path: "obid-\(UUID().uuidString)")
+        try Data().write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let mine = "program = \(file.path)\npid = \(pid)"
+        let stale = RunnerLoginItem.stale(started: try #require(RunnerLoginItem.started(pid)), replaced: try #require(RunnerLoginItem.changed(file.path)))
+        #expect(RunnerLoginItem.outdated(mine, debug: false) == stale)
+        #expect(!RunnerLoginItem.outdated(mine, debug: true))
+        #expect(!RunnerLoginItem.outdated(nil, debug: false))
+    }
+
     /// A team or kind of certificate is recorded at every launch; only a change from one on record counts.
     @Test func signingChangesAreRecorded() throws {
         let suite = "oby-login-item-\(UUID().uuidString)"
