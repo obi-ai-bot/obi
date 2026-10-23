@@ -119,6 +119,10 @@ pub enum Event {
     /// Its thinking, or a summary of its reasoning, when the tool reports it, and how long it
     /// took when the tool says.
     Thought { text: String, seconds: Option<f64> },
+    /// It began thinking (`ended` false) or stopped (`ended` true), when the tool says so but
+    /// not what it thought: Claude Code's partial messages carry no thinking text, only that a
+    /// thinking block started and stopped.
+    Thinking { ended: bool },
     /// Its to-do list, whole, each time it changes (Codex's and Cursor's; Claude Code's are tool
     /// calls).
     Plan(Vec<crate::transcript::Todo>),
@@ -255,6 +259,8 @@ pub async fn turn_on(
     let mut background: Vec<String> = Vec::new();
     // Its turn ended with some of them still running: it waits for them.
     let mut idle = false;
+    // The partial message's thinking block, by its index, while it's open.
+    let mut thinking: Option<u64> = None;
     loop {
         conn.holding = idle && !background.is_empty();
         let message = match conn.next().await {
@@ -391,7 +397,18 @@ pub async fn turn_on(
             }
             Some("stream_event") => {
                 let event = &message["event"];
-                if event["type"] == "content_block_delta"
+                if event["type"] == "content_block_start"
+                    && event["content_block"]["type"] == "thinking"
+                {
+                    thinking = event["index"].as_u64();
+                    on_event(Event::Thinking { ended: false });
+                } else if event["type"] == "content_block_stop"
+                    && thinking.is_some()
+                    && event["index"].as_u64() == thinking
+                {
+                    thinking = None;
+                    on_event(Event::Thinking { ended: true });
+                } else if event["type"] == "content_block_delta"
                     && event["delta"]["type"] == "text_delta"
                     && let Some(text) = event["delta"]["text"].as_str()
                 {

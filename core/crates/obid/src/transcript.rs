@@ -137,6 +137,8 @@ struct Live {
     declined: Option<String>,
     /// Claude Code's `TaskCreate`/`TaskUpdate` list, in the order the tasks were made.
     tasks: Vec<Todo>,
+    /// The `thought` entry of the thinking going on now, and when it began.
+    thinking: Option<(u64, Instant)>,
 }
 
 pub struct Transcripts {
@@ -258,13 +260,43 @@ impl Transcripts {
                     .unwrap_or_default(),
                 None => said(live, "said", words),
             },
-            Event::Thought { text, seconds } => {
-                let mut entries = said(live, "thought", text);
-                for entry in &mut entries {
-                    entry.seconds = *seconds;
-                }
-                entries
+            Event::Thinking { ended: false } => {
+                let mut entry = entry(live, "thought", None, "Thinking".into());
+                entry.state = Some("running".into());
+                live.thinking = Some((entry.n, Instant::now()));
+                vec![entry]
             }
+            Event::Thinking { ended: true } => live
+                .thinking
+                .take()
+                .and_then(|(n, began)| {
+                    let mut entry = live.now.get(&n)?.clone();
+                    entry.state = Some("done".into());
+                    entry.seconds = Some(tenths(began));
+                    Some(vec![entry])
+                })
+                .unwrap_or_default(),
+            // Its words, when the tool gives them: in the thought it just had, while that's the
+            // latest entry and has none yet, else an entry of their own.
+            Event::Thought { text, seconds } => match live.now.get(&live.last) {
+                Some(last)
+                    if last.kind == "thought" && last.text.is_none() && !text.trim().is_empty() =>
+                {
+                    let mut entry = last.clone();
+                    let words = crate::detail::masked(text);
+                    entry.summary = crate::brain::briefing::line(&words, WORDS);
+                    entry.text = Some(words);
+                    entry.seconds = seconds.or(entry.seconds);
+                    vec![entry]
+                }
+                _ => {
+                    let mut entries = said(live, "thought", text);
+                    for entry in &mut entries {
+                        entry.seconds = *seconds;
+                    }
+                    entries
+                }
+            },
             Event::Plan(todos) => vec![plan(live, todos.clone())],
             Event::Session(_) | Event::Step(_) | Event::Usage(_) | Event::Tokens(_) => vec![],
         };
@@ -388,6 +420,14 @@ impl Transcripts {
                     entry
                 })
                 .collect();
+            // Thinking it never stopped: it thought for as long as it went on.
+            if let Some((n, began)) = live.thinking.take()
+                && let Some(mut entry) = live.now.get(&n).cloned()
+            {
+                entry.state = Some("done".into());
+                entry.seconds = Some(tenths(began));
+                ended.push(entry);
+            }
             ended.sort_by_key(|e| e.n);
             words.extend(ended);
             words
@@ -1338,6 +1378,45 @@ mod tests {
         crate::secrets::known().forget("vault stream-test");
         assert!(!out.contains(a) && !out.contains(b), "{out}");
         assert!(out.contains("[vault: stream-test]"), "{out}");
+    }
+
+    #[test]
+    fn thinking_shows_while_it_goes_on_with_no_words() {
+        let t = transcripts("thinking");
+        let began = t.rec("j", &Event::Thinking { ended: false });
+        assert_eq!(
+            (
+                began[0].kind.as_str(),
+                began[0].summary.as_str(),
+                began[0].state.as_deref()
+            ),
+            ("thought", "Thinking", Some("running"))
+        );
+        assert_eq!(began[0].text, None);
+        let ended = t.rec("j", &Event::Thinking { ended: true });
+        assert_eq!(
+            (ended[0].n, ended[0].state.as_deref()),
+            (began[0].n, Some("done"))
+        );
+        assert!(ended[0].seconds.is_some());
+        // Words that come for it afterwards fill it, rather than making a second thought.
+        let words = t.rec(
+            "j",
+            &Event::Thought {
+                text: "Maybe the scan.".into(),
+                seconds: None,
+            },
+        );
+        assert_eq!(words[0].n, began[0].n);
+        assert_eq!(words[0].text.as_deref(), Some("Maybe the scan."));
+        assert_eq!(words[0].seconds, ended[0].seconds);
+        // A turn that ends mid-thought ends the thought too.
+        let again = t.rec("j", &Event::Thinking { ended: false });
+        let closed = t.end_turn("j");
+        assert_eq!(
+            (closed[0].n, closed[0].state.as_deref()),
+            (again[0].n, Some("done"))
+        );
     }
 
     #[test]
