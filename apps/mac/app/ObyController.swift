@@ -18,8 +18,11 @@ final class IslandController {
     let talkKey = TalkKey()
     let stopAllKey = StopAllKey()
     private var pill: TalkPillPanel?
-    /// Handing kept hook deliveries to obid (#1315), while it runs.
+    /// Handing kept hook deliveries to obid (#1315): the 5-minute loop, a try running now, and the
+    /// queue key registered last.
     private var collecting: Task<Void, Never>?
+    private var handing = false
+    private var registeredKey: String?
     private var observingAvailability = false
     /// Every repository the user pushed to lately: names the voice listens for. Fetched when you
     /// first talk, and again each time until it works.
@@ -47,35 +50,40 @@ final class IslandController {
         remote.onConnected = { [weak self] in self?.collectKept() }
     }
 
-    /// Deliveries the control plane kept while this Mac or its obid was away (#1315): whenever obid
-    /// comes up (at launch, after a restart or sleep) or the tunnel does, obid's queue key is
-    /// registered and what was kept handed over; again every 5 minutes while some still wait. Only
-    /// with remote access set up and obid on this Mac.
+    /// Deliveries the control plane kept while this Mac or its obid was away (#1315): at once
+    /// whenever obid comes up (at launch, after a restart or sleep) or the tunnel does, and every
+    /// 5 minutes after, since the Worker also keeps what came while obid answered 5xx with the Mac
+    /// awake. Only while remote access is on, with obid on this Mac.
     func collectKept() {
-        guard collecting == nil else { return }
-        collecting = Task { [weak self] in
-            while let self, !Task.isCancelled {
-                if await handOverKept() { break }
-                try? await Task.sleep(for: .seconds(300))
+        if collecting == nil {
+            collecting = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(300))
+                    await self?.handOverKept()
+                }
             }
-            self?.collecting = nil
         }
+        Task { await handOverKept() }
     }
 
-    /// One try: true when nothing (more) waits, or this obid or control plane has no queue yet.
-    private func handOverKept() async -> Bool {
-        guard remote.hostname != nil, feed.local, let obid = feed.runner, let signer = try? remote.signer() else { return true }
+    /// One try, one at a time: obid's queue key registered when it isn't yet, then what was kept.
+    /// An obid or control plane with no queue yet (404) is left alone.
+    private func handOverKept() async {
+        guard !handing, remote.on, remote.hostname != nil, feed.local, let obid = feed.runner,
+              let signer = try? remote.signer() else { return }
+        handing = true
+        defer { handing = false }
         do {
-            try await HookQueue.register(plane: remote.plane, signer: signer, obid: obid)
+            let key = try await obid.queueKey()
+            if key != registeredKey {
+                try await remote.plane.setQueueKey(key, signer)
+                registeredKey = key
+            }
             try await HookQueue.collect(plane: remote.plane, signer: signer, obid: obid)
-            return true
         } catch let old as RunnerError where old.status == 404 {
-            return true
         } catch let old as ControlPlane.Failure where old.status == 404 {
-            return true
         } catch {
             Logger.remote.error("kept deliveries: \(error.localizedDescription, privacy: .public)")
-            return false
         }
     }
 

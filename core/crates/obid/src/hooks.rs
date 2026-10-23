@@ -2,7 +2,7 @@
 //! a hook's address on Oby's control plane, which passes each delivery through the Mac's tunnel to
 //! the gateway's `POST /v1/hooks/{id}/deliver`. obid makes every check itself, whatever the Worker
 //! did: the hook, the size, the rate, the sender's signature with the secret only obid holds
-//! (in the vault as `oby.hook.<name>`), and a body seen in the last 24 hours. A delivery is data
+//! (in the vault as `oby.hook.<name>`), and a body seen in the last 3 days. A delivery is data
 //! from the moment it arrives; what it becomes (an offer, a read) is its source's handler's, and
 //! nothing here reads the body but the signature check. The registry's routes are loopback only.
 //!
@@ -30,7 +30,11 @@ pub const BODY_MAX: usize = 1024 * 1024;
 /// At most this many deliveries a minute to one hook.
 const PER_MINUTE: usize = 120;
 /// How long a body's digest is kept, so the same delivery again is a duplicate.
-const DUPLICATE_SECONDS: i64 = 24 * 3600;
+/// Three days and a little, as long as the control plane keeps a delivery (#1315), so a kept one
+/// can't be handed over again as new.
+const DUPLICATE_SECONDS: i64 = 72 * 3600 + 2 * SKEW_SECONDS;
+/// The longest the control plane keeps a delivery while the Mac is away (#1315).
+const KEPT_SECONDS: i64 = 72 * 3600;
 /// The sources a hook may have, each with how it proves itself.
 pub const SOURCES: &[&str] = &[
     "github",
@@ -102,7 +106,7 @@ pub struct Hooks {
     hooks: Mutex<Vec<Hook>>,
     vault: Arc<crate::vault::Vault>,
     events: crate::events::Events,
-    /// Per hook: the digests of bodies accepted in the last 24 hours, and when.
+    /// Per hook: the digests of bodies accepted in the last 3 days, and when.
     seen: Mutex<Digests>,
     /// Per hook: when its deliveries of the last minute came.
     rate: Mutex<HashMap<String, Vec<i64>>>,
@@ -343,7 +347,7 @@ impl Hooks {
         true
     }
 
-    /// Whether `body` was accepted on `id` in the last 24 hours; if not, it is now.
+    /// Whether `body` was accepted on `id` in the last 3 days; if not, it is now.
     fn duplicate(&self, id: &str, body: &[u8], now: i64) -> bool {
         let digest: [u8; 32] = obi_protocol::keys::sha256(body);
         let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
@@ -1245,6 +1249,18 @@ async fn queued(State(shared): State<Arc<Shared>>, body: axum::body::Bytes) -> R
         .decode(given.sealed.trim_end_matches('='))
         .unwrap_or_default();
     match shared.hooks.open_kept(&given.hook, &sealed) {
+        // Only what the control plane could have kept: from the last 72 hours, never the future.
+        Ok(Some((received, _, _)))
+            if received < time::now() - KEPT_SECONDS - SKEW_SECONDS
+                || received > time::now() + SKEW_SECONDS =>
+        {
+            shared.hooks.note(&given.hook, "unreadable");
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "That kept delivery's time isn't one the control plane keeps.",
+            )
+            .into_response()
+        }
         Ok(Some((received, headers, bytes))) => {
             handle(&shared, &given.hook, headers, bytes.into(), Some(received)).await
         }
@@ -1499,7 +1515,10 @@ mod tests {
         // A restart doesn't forget it: the same body is still a duplicate.
         let home = hooks.file.parent().unwrap().to_owned();
         let restarted = Hooks::open(&home, hooks.vault.clone(), crate::events::Events::new());
-        assert_eq!(restarted.deliver(ID, &good, body).0, StatusCode::OK);
+        assert_eq!(
+            restarted.deliver(ID, &good, body, time::now()).0,
+            StatusCode::OK
+        );
         let big = vec![b'x'; BODY_MAX + 1];
         assert_eq!(
             hooks

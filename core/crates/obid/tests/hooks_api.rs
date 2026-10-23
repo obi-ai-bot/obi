@@ -1075,6 +1075,9 @@ fn a_box_that_doesnt_open_is_refused() {
         seal(&stranger, ID, now(), headers.clone(), &body),
         seal(&queue, &"d".repeat(32), now(), headers.clone(), &body),
         "not-a-box".to_owned(),
+        // A time the control plane never keeps: in the future, or past its 72 hours.
+        seal(&queue, ID, now() + 3600, headers.clone(), &body),
+        seal(&queue, ID, now() - 80 * 3600, headers.clone(), &body),
     ] {
         let refused = hand_over(&obid, ID, &sealed);
         assert_eq!(refused.status, 422, "{}", refused.text);
@@ -1120,6 +1123,16 @@ fn a_late_offer_says_when_it_arrived() {
         Some(&json!({"answer": "Look into it, and from now on for api"})),
     );
     assert_eq!(saved.status, 200, "{}", saved.text);
+    // Saved on the owner's signed tap (#776).
+    let remember = within(10, "the rule's confirm", || {
+        call(&obid, "GET", "/v1/inbox", None)
+            .body
+            .as_array()?
+            .iter()
+            .find(|i| i["kind"] == "confirm")
+            .cloned()
+    });
+    assert_eq!(confirm(&obid, remember["id"].as_str().unwrap()).status, 200);
     // Two hours late: an offer, left to the owner.
     let came = now() - 2 * 3600;
     assert_eq!(

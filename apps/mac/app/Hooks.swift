@@ -150,10 +150,16 @@ enum HookQueue {
             for item in items {
                 do {
                     try await obid.handOver(item)
-                } catch let refused as RunnerError where (refused.status ?? 500) < 500 {
+                } catch let refused as RunnerError where (refused.status ?? 500) < 500 && refused.status != 429 {
+                    // Refused for good (a wrong signature, a box that doesn't open); a 429 or a
+                    // 5xx is obid busy or away: kept for the next try.
                     Logger.remote.notice("obid refused a kept delivery: \(refused.localizedDescription, privacy: .public)")
                 }
-                try await plane.removeKept(item.id, signer)
+                do {
+                    try await plane.removeKept(item.id, signer)
+                } catch let gone as ControlPlane.Failure where gone.status == 404 {
+                    // The sweep, or its hook's removal, took it already.
+                }
             }
             if items.isEmpty || left == 0 { return }
         }

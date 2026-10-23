@@ -83,13 +83,14 @@ struct HooksTests {
     @Test func keptDeliveriesAreHandedToObidThenRemoved() async throws {
         let hook = "abcdefghij0123456789abcdefghij01"
         let kept = (1...3).map { #"{"id": "k\#($0)", "hook": "\#(hook)", "receivedAt": "2026-10-23T03:12:00.000Z", "sealed": "BOX\#($0)"}"# }
-        let plane = Plane([(204, ""), (200, #"{"items": [\#(kept.joined(separator: ","))], "left": 0}"#), (204, ""), (204, "")])
+        // The first one's removal finds it gone already (the sweep): collecting goes on.
+        let plane = Plane([(204, ""), (200, #"{"items": [\#(kept.joined(separator: ","))], "left": 0}"#), (404, #"{"error": "This Mac has no such kept delivery."}"#), (204, "")])
         let obid = RunnerStub { request in
             switch (request.method, request.json?["sealed"] as? String) {
             case ("GET", _): (200, #"{"key": "BKEY"}"#)
             case (_, "BOX1"): (202, #"{"accepted": true}"#)
             case (_, "BOX2"): (401, #"{"error": "That signature doesn't match."}"#)
-            default: (503, #"{"error": "obid can't check deliveries now."}"#)
+            default: (429, #"{"error": "Too many deliveries to this hook."}"#)
             }
         }
         let control = ControlPlane(base: URL(string: "https://oby-control.test")!, transport: plane.transport)
@@ -100,7 +101,7 @@ struct HooksTests {
         #expect(plane.requests.map { "\($0.httpMethod ?? "") \($0.url?.path() ?? "")" } == [
             "PUT /v1/installations/self/queue-key", "GET /v1/installations/self/hooks/queue",
             "DELETE /v1/installations/self/hooks/queue/k1", "DELETE /v1/installations/self/hooks/queue/k2",
-        ], "the one obid couldn't take stays kept")
+        ], "the one obid couldn't take yet (429) stays kept")
         let registered = try #require(plane.requests.first?.httpBody)
         #expect(String(decoding: registered, as: UTF8.self) == #"{"key":"BKEY"}"#)
         #expect(plane.requests.allSatisfy { $0.value(forHTTPHeaderField: "Oby-Signature") != nil })
