@@ -38,6 +38,7 @@ const APP_SOURCES: &[&str] = &[
     "apps/shared/TetrixStatus.swift",
     "apps/shared/GitHubWorkModel.swift",
     "apps/shared/SlackStatus.swift",
+    "apps/shared/SentryStatus.swift",
 ];
 
 /// What Package.swift and the Xcode project compile Oby's Swift with.
