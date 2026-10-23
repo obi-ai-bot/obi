@@ -1,0 +1,27 @@
+#!/bin/sh
+# A stand-in for cloudflared (crate::tunnel, #896): writes what it was started with to
+# $HOME/seen (one block a start), prints an ERR line holding the token (obid must take it out of its
+# log) and that it connected, then runs until it's told to stop or obid, its parent, is gone.
+# $HOME/fail makes it fail at once instead.
+token_file=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--token-file" ] && token_file="$a"
+  prev="$a"
+done
+{
+  printf 'start\nargs:'
+  printf ' %s' "$@"
+  printf '\n'
+  env | sed 's/^/env: /'
+  printf 'end\n'
+} >> "$HOME/seen"
+if [ -f "$HOME/fail" ]; then
+  echo "2026-10-22T00:00:00Z ERR Couldn't start tunnel" >&2
+  exit 1
+fi
+echo "2026-10-22T00:00:00Z ERR checking with token $(cat "$token_file")" >&2
+echo "2026-10-22T00:00:00Z INF Registered tunnel connection connIndex=0" >&2
+trap 'exit 0' TERM
+parent=$PPID
+while kill -0 "$parent" 2>/dev/null; do sleep 0.2; done

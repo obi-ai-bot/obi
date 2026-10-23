@@ -46,8 +46,8 @@ final class IslandController {
     func start() {
         availability.startMonitoring()
         observeAvailability()
-        // Remote access was on: the tunnel runs again, as a child of this login item.
-        remote.start()
+        // Remote access: obid runs the tunnel (#896); a token an older Oby kept goes to obid once.
+        Task { await remote.start() }
         // What needs you on this Mac's jobs is an alert, as the runner's are (RunnerFeed.post); a click opens the window on it.
         desk.onFinish = { job in
             if job.waitsForYou { Self.alert(job.doneLine, id: job.id, local: job.id) }

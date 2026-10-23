@@ -58,6 +58,7 @@ pub mod teammates;
 pub mod tetrix;
 pub mod token;
 pub mod transcript;
+pub mod tunnel;
 pub mod usage;
 pub mod vault;
 pub mod watch;
@@ -338,6 +339,11 @@ pub async fn serve(
     );
     let watch = watch::Watch::open(&config.home, events.clone());
     let listen = listen::Listen::open(&config.home, events.clone());
+    let tunnel = tunnel::Tunnel::open(
+        &config.home,
+        vault::shared().expect("the vault is installed first"),
+        events.clone(),
+    );
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -367,6 +373,7 @@ pub async fn serve(
         listen,
         push: pushes,
         stopping: stopping_rx.clone(),
+        tunnel: tunnel.clone(),
     });
     let app = api::router(shared.clone());
 
@@ -404,6 +411,8 @@ pub async fn serve(
     // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
     jobs.resume();
     link.start();
+    // The tunnel phones reach this Mac through, when the owner turned remote access on (#896).
+    tunnel.spawn(stopping_rx.clone());
     github.spawn(stopping_rx.clone());
     // Job alerts to Android phones through FCM (crate::push).
     push::spawn(shared.clone());

@@ -193,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // The tunnel is Oby's child: it ends with Oby (apps/mac/app/RemoteAccess.swift).
+        // The tunnel is obid's (#896): it keeps running; only the app's check-ins stop.
         island.remote.stop()
         island.desk.quit()
     }
