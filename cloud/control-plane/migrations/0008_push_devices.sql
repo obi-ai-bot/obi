@@ -8,3 +8,27 @@ CREATE TABLE push_devices (
   topic TEXT NOT NULL,
   sandbox INTEGER NOT NULL
 );
+
+-- How many phones there are, kept by the two triggers, so a registration reads one row rather
+-- than counting the table (a count would read every row, and D1's free plan reads 5 M a day).
+CREATE TABLE push_device_count (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  n INTEGER NOT NULL
+);
+INSERT INTO push_device_count (id, n) VALUES (1, 0);
+CREATE TRIGGER push_devices_added AFTER INSERT ON push_devices
+BEGIN
+  UPDATE push_device_count SET n = n + 1 WHERE id = 1;
+END;
+CREATE TRIGGER push_devices_removed AFTER DELETE ON push_devices
+BEGIN
+  UPDATE push_device_count SET n = n - 1 WHERE id = 1;
+END;
+
+-- The APNs provider token every isolate uses for its 40 minutes (Apple refuses tokens made too
+-- often), kept only sealed: AES-256-GCM under a key made from PUSH_SECRET_KEY (src/apns.ts).
+CREATE TABLE apns_provider_token (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  made_at INTEGER NOT NULL,
+  sealed TEXT NOT NULL
+);

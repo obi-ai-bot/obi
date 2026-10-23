@@ -7,7 +7,10 @@
   "name": "oby-control",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
-  "observability": { "enabled": true },
+  // Workers Logs keep what the code logs, and no invocation logs: those record every request's
+  // URL, headers and address, which would tie a Mac's signed calls (its Oby-Key) to the pushes it
+  // sends the push relay from the same address (#398).
+  "observability": { "enabled": true, "logs": { "invocation_logs": false } },
   // Every minute: spent nonces, old rate-limit windows and deliveries kept 72 hours go, installations with no endpoint
   // after a day, installations idle for 30 days with their tunnels, and tunnels not kept
   // connected (src/app.ts, `sweep`).
@@ -40,6 +43,8 @@
     // Cloudflare account. Copy this block, rename it and put your own values in to run yours.
     "deskree": {
       "name": "oby-control",
+      // As at the top: no invocation logs.
+      "observability": { "enabled": true, "logs": { "invocation_logs": false } },
       // The Worker's own hostname, a first-level name under the zone so Universal SSL covers it.
       "routes": [{ "pattern": "oby-control.deskree.com", "custom_domain": true }],
       "vars": {
