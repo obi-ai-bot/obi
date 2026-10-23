@@ -21,6 +21,8 @@ import { addressBucket, canonicalKey, networkBucket, newId, opaqueLabel, randomB
 
 export interface Deps {
   tunnels: TunnelAPI;
+  /// How a hook's delivery goes on to the Mac (`fetch`); a test's stand-in sees what would be sent.
+  forward?: (url: string, init: RequestInit) => Promise<Response>;
   /// Apple's and Google's public keys, for their identity tokens.
   apple: KeyCache;
   google: KeyCache;
@@ -98,7 +100,30 @@ export const LIMITS = {
   endpointsEverywhere: { max: 300, windowSeconds: 60 * 60 } satisfies Limit,
   removalsEverywhere: { max: 120, windowSeconds: 60 * 60 } satisfies Limit,
   tokenReadsEverywhere: { max: 300, windowSeconds: 5 * 60 } satisfies Limit,
+  hooksMadePerInstallation: { max: 20, windowSeconds: 24 * 60 * 60 } satisfies Limit,
+  deliveriesPerHookMinute: { max: 60, windowSeconds: 60 } satisfies Limit,
+  deliveriesPerHookDay: { max: 2000, windowSeconds: 24 * 60 * 60 } satisfies Limit,
 };
+/// The most hooks one installation has at once.
+export const HOOKS_PER_INSTALLATION = 20;
+/// The biggest delivery passed on; a bigger one is refused, read only this far.
+export const HOOK_BODY_MAX = 1024 * 1024;
+/// How long a delivery waits for the Mac.
+export const HOOK_WAIT_MS = 10_000;
+/// The only headers a delivery carries on to the Mac: the content's type and the senders' own
+/// signatures and ids (GitHub's; Oby's generic one; Grafana's, Alertmanager's token header,
+/// PagerDuty's for #1311 and #1312). Never a cookie, `Authorization` or one of Cloudflare's.
+export const HOOK_HEADERS = [
+  "Content-Type",
+  "X-Hub-Signature-256",
+  "X-GitHub-Event",
+  "X-GitHub-Delivery",
+  "X-Oby-Signature-256",
+  "X-Oby-Token",
+  "X-Grafana-Alerting-Signature",
+  "X-Grafana-Alerting-Timestamp",
+  "X-PagerDuty-Signature",
+];
 /// What the Mac signs, before the body's bytes: the version, then one field a line.
 export const SIGNED_PREFIX = "oby-control-v1";
 
@@ -180,6 +205,15 @@ async function route(request: Request, env: Env, deps: Deps, now: () => Date): P
   if (path === "/v1/installations/self/endpoint" && method === "POST") return createEndpoint(request, env, deps, now);
   if (path === "/v1/installations/self/endpoint" && method === "DELETE") return removeEndpoint(request, env, deps, now);
   if (path === "/v1/installations/self/endpoint/token" && method === "GET") return endpointToken(request, env, deps, now);
+  if (path === "/v1/installations/self/hooks" && method === "POST") return createHook(request, env, now);
+  if (path === "/v1/installations/self/hooks" && method === "GET") return listHooks(request, env, now);
+  const hook = /^\/v1\/installations\/self\/hooks\/([a-z0-9]{32})$/.exec(path);
+  if (hook?.[1] && method === "DELETE") return removeHook(request, env, now, hook[1]);
+  const delivery = /^\/h\/([^/]+)$/.exec(path);
+  if (delivery?.[1]) {
+    if (method !== "POST") throw new Reply(405, "A hook takes POST only.", { Allow: "POST" });
+    return deliver(request, env, deps, now, delivery[1]);
+  }
   throw new Reply(404, "No such route.");
 }
 
@@ -585,11 +619,118 @@ async function tearDown(db: D1Database, tunnels: TunnelAPI, endpoint: EndpointRo
   await db.prepare("DELETE FROM endpoints WHERE installation_id = ?1").bind(endpoint.installation_id).run();
 }
 
-/// The installation and its endpoint; the endpoint at Cloudflare first, so a refusal keeps both.
+/// The installation, its hooks and its endpoint; the endpoint at Cloudflare first, so a refusal
+/// keeps all three.
 async function remove(db: D1Database, tunnels: TunnelAPI, row: InstallationRow): Promise<void> {
   const endpoint = await endpointOf(db, row.id);
   if (endpoint) await tearDown(db, tunnels, endpoint);
-  await db.prepare("DELETE FROM installations WHERE id = ?1").bind(row.id).run();
+  await db.batch([
+    db.prepare("DELETE FROM hooks WHERE installation_id = ?1").bind(row.id),
+    db.prepare("DELETE FROM installations WHERE id = ?1").bind(row.id),
+  ]);
+}
+
+// MARK: Hooks (#1128)
+
+interface HookRow {
+  id: string;
+  installation_id: string;
+  created_at: string;
+}
+
+function publicHook(request: Request, row: HookRow) {
+  return { id: row.id, url: `${new URL(request.url).origin}/h/${row.id}`, createdAt: row.created_at };
+}
+
+/// A new hook address for this Mac: an unguessable id (about 165 bits), at most
+/// HOOKS_PER_INSTALLATION at once and 20 made a day.
+async function createHook(request: Request, env: Env, now: () => Date): Promise<Response> {
+  const row = await signedInstallation(request, env, now);
+  const count = (await env.DB.prepare("SELECT count(*) AS n FROM hooks WHERE installation_id = ?1").bind(row.id).first<{ n: number }>())?.n ?? 0;
+  if (count >= HOOKS_PER_INSTALLATION) throw new Reply(409, `This Mac has ${HOOKS_PER_INSTALLATION} hooks already. Remove one first.`);
+  await limit(env.DB, `hooks:installation:${row.id}`, LIMITS.hooksMadePerInstallation, now(), "This Mac made too many hooks today.");
+  const hook: HookRow = { id: opaqueLabel(32), installation_id: row.id, created_at: iso(now()) };
+  await env.DB.prepare("INSERT INTO hooks (id, installation_id, created_at) VALUES (?1, ?2, ?3)").bind(hook.id, hook.installation_id, hook.created_at).run();
+  return json({ hook: publicHook(request, hook) }, 201);
+}
+
+async function listHooks(request: Request, env: Env, now: () => Date): Promise<Response> {
+  const row = await signedInstallation(request, env, now);
+  const hooks = await env.DB.prepare("SELECT * FROM hooks WHERE installation_id = ?1 ORDER BY created_at").bind(row.id).all<HookRow>();
+  return json({ hooks: hooks.results.map((hook) => publicHook(request, hook)) });
+}
+
+async function removeHook(request: Request, env: Env, now: () => Date, id: string): Promise<Response> {
+  const row = await signedInstallation(request, env, now);
+  const gone = await env.DB.prepare("DELETE FROM hooks WHERE id = ?1 AND installation_id = ?2").bind(id, row.id).run();
+  if (!gone.meta.changes) throw new Reply(404, "This Mac has no such hook.");
+  return new Response(null, { status: 204 });
+}
+
+/// A sender's delivery: checked for what needs no secret (the hook, the size, the rate), then passed
+/// to the Mac's gateway with the body as it came and only HOOK_HEADERS. obid checks the
+/// signature with the secret only it holds. The sender gets obid's status with a fixed body of the
+/// Worker's own, so nothing obid says reaches it; nothing of a delivery is kept or logged.
+async function deliver(request: Request, env: Env, deps: Deps, now: () => Date, id: string): Promise<Response> {
+  const hook = /^[a-z0-9]{32}$/.test(id) ? await env.DB.prepare("SELECT * FROM hooks WHERE id = ?1").bind(id).first<HookRow>() : null;
+  if (!hook) throw new Reply(404, "No such hook.");
+  const declared = Number(request.headers.get("Content-Length") ?? "0");
+  if (declared > HOOK_BODY_MAX) throw new Reply(413, "That delivery is too large.");
+  const body = await boundedBody(request, HOOK_BODY_MAX);
+  if (!body) throw new Reply(413, "That delivery is too large.");
+  await limit(env.DB, `deliveries:minute:${id}`, LIMITS.deliveriesPerHookMinute, now(), "Too many deliveries to this hook.");
+  await limit(env.DB, `deliveries:day:${id}`, LIMITS.deliveriesPerHookDay, now(), "Too many deliveries to this hook today.");
+  const endpoint = await endpointOf(env.DB, hook.installation_id);
+  if (!endpoint) throw new Reply(503, "That Oby isn't reachable now.");
+  const headers = new Headers();
+  for (const name of HOOK_HEADERS) {
+    const value = request.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  const forward = deps.forward ?? ((url: string, init: RequestInit) => fetch(url, init));
+  let status: number;
+  try {
+    const answer = await forward(`https://${endpoint.hostname}/v1/hooks/${id}/deliver`, {
+      method: "POST",
+      headers,
+      body,
+      redirect: "manual",
+      signal: AbortSignal.timeout(HOOK_WAIT_MS),
+    });
+    status = answer.status;
+  } catch {
+    throw new Reply(503, "That Oby isn't reachable now.");
+  }
+  // Cloudflare's own answers for a tunnel that's down (502, 530 and the like) are the Mac away.
+  if (status >= 500 || status < 200 || (status >= 300 && status < 400)) throw new Reply(503, "That Oby isn't reachable now.");
+  console.log(`hook ${id}: ${status}`);
+  return json({ ok: status < 300 }, status);
+}
+
+/// The request's body, read as a stream and cut off past `max` bytes (null then): never buffered
+/// whole when it's too large.
+async function boundedBody(request: Request, max: number): Promise<Uint8Array | null> {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel();
+      return null;
+    }
+    parts.push(value);
+  }
+  const body = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) {
+    body.set(part, at);
+    at += part.byteLength;
+  }
+  return body;
 }
 
 // MARK: The sweep
@@ -604,12 +745,14 @@ export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; re
   const now = (deps.now ?? (() => new Date()))();
   const seconds = Math.floor(now.getTime() / 1000);
   const unusedBefore = iso(new Date(now.getTime() - UNUSED_HOURS * 3_600_000));
-  const [, , , unused] = await env.DB.batch([
+  const [, , , , unused] = await env.DB.batch([
     env.DB.prepare("DELETE FROM nonces WHERE expires_at < ?1").bind(seconds),
     env.DB.prepare("DELETE FROM sign_ins WHERE expires_at < ?1").bind(seconds),
     // Every window is an hour or less: a day-old one counts nothing.
     env.DB.prepare("DELETE FROM rate_limits WHERE window_start < ?1").bind(seconds - 86_400),
-    // Never made an endpoint: one whose endpoint was reclaimed stays (`endpoint_at`).
+    // Never made an endpoint: one whose endpoint was reclaimed stays (`endpoint_at`). Its hooks
+    // go first.
+    env.DB.prepare("DELETE FROM hooks WHERE installation_id IN (SELECT id FROM installations WHERE created_at < ?1 AND endpoint_at IS NULL AND NOT EXISTS (SELECT 1 FROM endpoints e WHERE e.installation_id = installations.id))").bind(unusedBefore),
     env.DB.prepare("DELETE FROM installations WHERE created_at < ?1 AND endpoint_at IS NULL AND NOT EXISTS (SELECT 1 FROM endpoints e WHERE e.installation_id = installations.id)").bind(unusedBefore),
   ]);
   let removed = 0;

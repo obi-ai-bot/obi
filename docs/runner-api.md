@@ -1822,6 +1822,28 @@ The Cloudflare Tunnel phones reach this Mac through from anywhere (docs/remote-a
 - **cloudflared** is the app's own, `Contents/MacOS/cloudflared` beside obid's `Contents/Helpers/obid`. obid runs `cloudflared tunnel --no-autoupdate run --token-file home/tunnel/token`: the file is 0600 in a 0700 folder every job's box hides, and its environment is only `PATH=/usr/bin:/bin` and `HOME` (that folder). The token is never in an argument or the environment. It isn't in a job's box: like `gh`, it's obid's own helper. Its log is read for "Registered tunnel connection" (connected) and `ERR` lines, which obid logs with every secret it holds taken out. When it exits, obid starts it again, waiting 1, 2, 4… seconds up to a minute. A cloudflared a killed obid left running is stopped when obid starts again (`home/tunnel/pid`). Tests point obid at a stand-in with `OBID_CLOUDFLARED`.
 - `GET /v1/status` has `tunnel`: `{"state": "off" | "starting" | "connected" | "failed", "detail": null | "why"}`, and a `tunnel` event with the same says when it changes.
 
+### obid only: webhooks
+
+Outside systems reach obid through a hook (#1128): an address on Oby's control plane (docs/remote-access.md, `POST /h/{id}`), which passes each delivery through the Mac's tunnel to the gateway, and a secret only obid holds. There's no screen for hooks: a monitoring tool's row in Settings › Connectors makes its hook (#1311, #1312), calling the control plane for the address first and then obid; if obid refuses, the address goes again (apps/mac/app/Hooks.swift).
+
+**The registry**, `home/hooks.json` (0600): each hook's `id`, `name`, `source`, `repo`, `url`, `createdAt` and `lastDelivery` (`{"at", "result"}`, `result` one of `accepted`, `duplicate`, `bad signature`, `too large`, `too many`), never its secret, which is in the vault as `oby.hook.<name>`. Loopback only, with obid's API token: none of these is on the gateway's allowlist.
+
+- **`GET /v1/hooks`** answers the list.
+- **`POST /v1/hooks`** with `{"id", "url", "name", "source", "secret", "repo"}` keeps one: `201` and the hook, or `422` with why. `id` is the control plane's (32 lower-case letters and digits) and `url` its `https://…/h/<id>`; `name` up to 32 lower-case letters, digits or dashes, unique (`409`); `source` `github` or `generic` (#1311 and #1312 add theirs); `secret` 32 to 512 printable characters the vault accepts; `repo`, optional, one of obid's `repos`.
+- **`DELETE /v1/hooks/{id}`** forgets the hook and its secret: `204`, `404` for no such hook.
+- A `hooks` event carries the list when it changes; it's held back from paired phones' streams.
+
+**`POST /v1/hooks/{id}/deliver`**, on the gateway's own router beside `/v1/pairing`, with no device token. The tunnel's hostname is public, so it makes every check itself, whatever the Worker did, in this order:
+
+1. an unknown hook is `404`;
+2. a body over 1 MiB is `413`, before it's read whole;
+3. more than 120 a minute to one hook is `429`;
+4. the sender's signature, before anything in the body is read: `github` is `X-Hub-Signature-256: sha256=<hex of HMAC-SHA256(secret, body)>`, as GitHub documents it; `generic` is the same in `X-Oby-Signature-256`. Compared in constant time. Missing or wrong is `401`; a vault that can't be read is `503`;
+5. a body accepted on that hook in the last 24 hours is `200` `{"duplicate": true}` and nothing more, so a captured delivery can't be replayed into work;
+6. otherwise `202` `{"accepted": true}`, recorded as `accepted`, and handed to its source's handler (#1129, #1130, #1311, #1312; none yet). GitHub's `ping` is accepted.
+
+The body is never logged, and nothing here writes it anywhere.
+
 ### obid only: GitHub work
 
 What GitHub wants from the owner, so Oby can show it and do it for them: the open issues assigned to them, the open pull requests waiting for their review (asked of them or of a team they're on), and their own open pull requests. obid reads it with its own `gh` login, as the Lead reads the board: `gh` signs in with its own login (gh's device sign-in from the Mac, or a token the owner gave gh's own store), and obid never reads, holds or passes a token (no file, argument, environment variable, log or event of obid's has one). No webhooks: obid is local and self-hostable, so it asks.

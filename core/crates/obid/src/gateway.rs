@@ -429,10 +429,11 @@ struct Through {
     api: Router,
 }
 
-/// The gateway's router: redeeming, and every allowed route forwarded to `api`.
+/// The gateway's router: redeeming, hooks' deliveries, and every allowed route forwarded to `api`.
 pub fn router(shared: Arc<Shared>, api: Router) -> Router {
     Router::new()
         .route("/v1/pairing", post(redeem))
+        .route("/v1/hooks/{id}/deliver", post(deliver))
         .fallback(forward)
         .with_state(Through { shared, api })
 }
@@ -479,6 +480,17 @@ async fn redeem(State(through): State<Through>, request: Request) -> Response {
         Ok(redeemed) => axum::Json(redeemed).into_response(),
         Err((status, message)) => error(status, message),
     }
+}
+
+/// `POST /v1/hooks/{id}/deliver`, on the gateway only and with no device token: a webhook the
+/// control plane passes on (crate::hooks), which makes every check itself.
+async fn deliver(
+    State(through): State<Through>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    request: Request,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    crate::hooks::deliver(&through.shared, &id, parts.headers, body).await
 }
 
 /// Every other request: an allowed route with a paired device's token goes to the API, as obid's
@@ -641,7 +653,7 @@ async fn scrubbed(
 
 /// Events about logins and the watcher, which only the Mac's own Settings uses: Tetrix's,
 /// Slack's and Sentry's sign-ins, and the watcher's rules and runs (what people wrote, quoted).
-const MAC_ONLY_EVENTS: &[&str] = &["tetrix", "slack", "sentry", "watch", "listen"];
+const MAC_ONLY_EVENTS: &[&str] = &["tetrix", "slack", "sentry", "hooks", "watch", "listen"];
 
 /// `text`, a piece of the event stream, without the frames of [`MAC_ONLY_EVENTS`]. The stream
 /// comes a frame at a time, each ending with a blank line.
@@ -775,6 +787,12 @@ mod tests {
         assert!(!allows(&Method::GET, "/v1/sentry"));
         assert!(!allows(&Method::PUT, "/v1/sentry"));
         assert!(!allows(&Method::PATCH, "/v1/sentry/projects/api"));
+        // Hooks are made and forgotten on the Mac; only their deliveries come in, on a route of
+        // the gateway's own (`deliver`), never through `allows`.
+        assert!(!allows(&Method::GET, "/v1/hooks"));
+        assert!(!allows(&Method::POST, "/v1/hooks"));
+        assert!(!allows(&Method::DELETE, "/v1/hooks/abc"));
+        assert!(!allows(&Method::POST, "/v1/hooks/abc/deliver"));
         assert!(!allows(&Method::POST, "/v1/slack/sign-in"));
         assert!(!allows(&Method::PATCH, "/v1/watch"));
         assert!(!allows(&Method::POST, "/v1/watch/run"));

@@ -32,6 +32,7 @@ pub mod git;
 pub mod github;
 pub mod github_login;
 pub mod github_work;
+pub mod hooks;
 pub mod job;
 pub mod jobs;
 pub mod limits;
@@ -345,6 +346,11 @@ pub async fn serve(
         events.clone(),
     );
     link.use_sentry(sentry.clone());
+    let hooks = hooks::Hooks::open(
+        &config.home,
+        vault::shared().expect("the vault is installed first"),
+        events.clone(),
+    );
     let watch = watch::Watch::open(&config.home, events.clone());
     let listen = listen::Listen::open(&config.home, events.clone());
     let tunnel = tunnel::Tunnel::open(
@@ -378,6 +384,7 @@ pub async fn serve(
         github_work: github.clone(),
         slack,
         sentry,
+        hooks,
         watch,
         listen,
         push: pushes,
