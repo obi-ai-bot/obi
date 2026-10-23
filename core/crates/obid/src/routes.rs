@@ -322,10 +322,13 @@ pub async fn wait(
         .into_response())
 }
 
-/// `GET /v1/events`: every change as it happens, and a `: ping` comment every 15 seconds.
+/// `GET /v1/events`: every change as it happens, and a `: ping` comment every 15 seconds. A paired
+/// device following it has Oby open: Oby's messages aren't pushed meanwhile (crate::push).
 pub async fn events(
     State(shared): State<Arc<Shared>>,
+    device: Option<axum::Extension<crate::gateway::PairedDevice>>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    let following = device.map(|_| shared.push.followed());
     let receiver = shared.events.subscribe();
     let transcripts = shared.events.subscribe_transcripts();
     let stream = stream::select(
@@ -338,7 +341,12 @@ pub async fn events(
             .event(event.name)
             .data(event.data.to_string())))
     });
-    let stream = stream.take_until(stopping(shared.stopping.clone()));
+    let stream = stream
+        .take_until(stopping(shared.stopping.clone()))
+        // Kept as long as the stream is.
+        .inspect(move |_| {
+            let _ = &following;
+        });
     Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))

@@ -571,6 +571,61 @@ fn revoking_a_device_drops_its_push_token() {
     assert_eq!(kept, json!([]));
 }
 
+/// An iPhone's registration with Deskree's push relay is kept with the paired device that handed
+/// it over, its push secret out of obid's log, and goes when the device is revoked.
+#[test]
+fn revoking_a_device_drops_its_iphone_relay_registration() {
+    let folder = Folder::new("gateway-relay");
+    let obid = started(&folder);
+    let token = paired(&obid);
+    let secret = "relay-push-secret-of-this-iphone-0123";
+    // The test iPhone's X25519 public half (the one crate::push's CryptoKit vector uses).
+    let public = "IWlFcnjzHXlyLYTNMzTi8Jn5yrH6_QwEDMtloT3gQiY";
+    let apns = |relay: &str| {
+        json!({"apns": {"pushId": "push-id-1", "pushSecret": secret, "sealKey": public,
+                        "relay": relay}})
+    };
+    let refused = through(
+        &obid,
+        Some(&token),
+        "POST",
+        "/v1/notifications",
+        Some(&apns("http://relay.example")),
+    );
+    assert_eq!(refused.status, 422, "{}", refused.text);
+    let answer = through(
+        &obid,
+        Some(&token),
+        "POST",
+        "/v1/notifications",
+        Some(&apns("https://oby-control.deskree.com/")),
+    );
+    assert_eq!(answer.status, 200, "{}", answer.text);
+    assert_eq!(answer.body, json!({"push": true}));
+    let id = call(&obid, "GET", "/v1/pairing/devices", None).body[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let file = obid.home.join("push/relay.json");
+    let kept: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(
+        kept,
+        json!([{"pushId": "push-id-1", "pushSecret": secret, "sealKey": public,
+                "relay": "https://oby-control.deskree.com", "device": id}])
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let revoked = call(&obid, "DELETE", &format!("/v1/pairing/devices/{id}"), None);
+    assert_eq!(revoked.status, 204, "{}", revoked.text);
+    let kept: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(kept, json!([]));
+    assert!(!obid.log().contains(secret), "{}", obid.log());
+}
+
 /// A channel listener's review waiting for Approve, in obid's home before it starts.
 fn seed_listener_review(config: &Value) {
     let config = obid::config::Config::parse(&config.to_string()).unwrap();
