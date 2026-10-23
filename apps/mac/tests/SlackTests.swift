@@ -55,8 +55,11 @@ struct SlackTests {
         let later = WatchNotice(kind: "pluginEvent", id: "ev-x-3", title: "Alert", text: "x", options: ["Look into it", "Dismiss"], created: now,
                                 later: now.addingTimeInterval(3600), source: "grafana")
         let watch = WatchNotice(id: "w1", title: "t", text: "x", options: ["Look into it"], created: now)
-        let all = [offer, note, later, watch]
-        #expect(GroupPane.offers(all, kind: .issues, now: now).map(\.id) == ["ev-sentry-1"])
+        let ticket = WatchNotice(kind: "pluginEvent", id: "ev-x-4", title: "Ticket assigned: ENG-1", text: "x", options: ["Fix it", "Dismiss"], created: now, source: "linear")
+        let settled = WatchNotice(kind: "pluginEvent", id: "ev-x-5", title: "Alert", text: "x", options: ["Look into it", "Dismiss"], created: now,
+                                  done: now, source: "grafana")
+        let all = [offer, note, later, watch, ticket, settled]
+        #expect(GroupPane.offers(all, kind: .issues, now: now).map(\.id) == ["ev-sentry-1", "ev-x-4"])
         #expect(GroupPane.offers(all, kind: .tasks, now: now).isEmpty && GroupPane.offers(all, kind: .review, now: now).isEmpty)
     }
 

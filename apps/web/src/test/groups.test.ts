@@ -74,6 +74,11 @@ describe('by type', () => {
     expect(askLabel({ kind: 'pluginEvent', source: 'alertmanager' })).toBe('Prometheus');
     expect(askLabel({ kind: 'pluginEvent', source: 'alerts' })).toBe('From the alerts plug-in');
     expect(askLabel({ kind: 'pluginEvent' })).toBe('From a plug-in');
+    // Put off, an offer is the inbox's, as on the Mac.
+    const later = state({ inbox: [
+      item({ id: 'd', job: '', kind: 'pluginEvent', title: 'Sentry: API-8', options: ['Look into it', 'Dismiss'], plugin: { id: 'sentry' }, state: 'later' }),
+    ] });
+    expect(typesOn(later).map((t) => t.id)).toEqual(['inbox']);
   });
 
   it('a group’s count is its open tasks; its orange dot counts what needs you', () => {

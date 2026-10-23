@@ -62,8 +62,10 @@ export const askLabel = (ask: Pick<Ask, 'kind' | 'source'>): string =>
   ask.kind === 'pluginEvent' && ask.source
     ? SOURCE_LABEL[ask.source] ?? `From the ${ask.source} plug-in`
     : ASK_LABEL[ask.kind] ?? ask.kind;
-// an offer to look into an alert or fix a ticket: Issues' work, as Sangam's design lists an outside incident
-const isOffer = (i: InboxItem) => i.kind === 'pluginEvent' && i.options.some((o) => o === 'Look into it' || o === 'Fix it');
+// an open offer to look into an alert or fix a ticket: Issues' work, as Sangam's design lists an
+// outside incident; put off, it's the inbox's (as on the Mac)
+const isOffer = (i: InboxItem) =>
+  i.kind === 'pluginEvent' && i.state !== 'later' && i.options.some((o) => o === 'Look into it' || o === 'Fix it');
 
 // A job as the screens show it. created and finished are minutes ago.
 export type JobView = {
@@ -311,7 +313,7 @@ export const firstTab = (s: Live, type: string): Tab => {
 // who has it, as one line: "Claude Code · Personal · oby"
 export function metaOf(t: Task) {
   const j = t.job;
-  if (!j.agent) return j.ask ? askLabel(j.ask) : 'Inbox';
+  if (!j.agent) return j.ask?.kind === 'pluginEvent' ? askLabel(j.ask) : ASK_LABEL[j.ask?.kind ?? ''] ?? 'Inbox';
   const repo = j.repo.includes('/') ? j.repo.split('/')[1] : j.repo;
   return [AGENTS[j.agent]?.name ?? j.agent, j.account, repo].filter(Boolean).join(' · ');
 }

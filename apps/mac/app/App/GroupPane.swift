@@ -71,10 +71,13 @@ struct GroupPane: View {
                 }
                 let cards = WorkList.items(ranked, in: tab)
                 if tab == .todo {
+                    // Connect GitHub stays on top; the offers come next, then GitHub's items.
+                    let signedOut = connect == .signedOut
+                    if signedOut { ConnectGitHubCard(line: Self.connectLine, connect: onConnectGitHub) }
                     ForEach(offers) { InlineNotice(notice: $0, feed: feed) }
-                    GitHubToDo(kind: kind, work: feed.gitHubWork, columns: columns,
-                               connect: connect == .signedOut ? ConnectGitHubCard(line: Self.connectLine, connect: onConnectGitHub) : nil,
+                    GitHubToDo(kind: kind, work: feed.gitHubWork, columns: columns, connect: nil,
                                loading: gitHub && feed.gitHubWork == nil && !feed.gitHubListed && !feed.down,
+                               others: offers.count + (signedOut ? 1 : 0),
                                start: { try await feed.startGitHubWork($0.id) }, later: { feed.gitHubLater.insert($0.id) })
                 }
                 // A routine waiting for its next run says when (Sangam's tasks.ts).
