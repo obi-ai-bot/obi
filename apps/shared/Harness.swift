@@ -19,6 +19,8 @@ nonisolated struct TurnExtras: Equatable, Sendable {
     var artifacts: [ArtifactRef] = []
     /// It's the turn a job adds to its conversation when it ends (#351), not an answer to words.
     var ended = false
+    /// It's a routine's run saying it started, skipped or missed (obid only, #395), not an answer.
+    var routine = false
 }
 
 /// One version of an artifact, as a turn or a job names it.

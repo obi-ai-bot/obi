@@ -96,17 +96,20 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
     /// On a listener's finished review (`watch.review`): exactly what Approve posts on GitHub, the
     /// review an agent wrote, after obid's secret scan. Shown as plain text, never as Markdown.
     var review: String?
+    /// How obid sorted it (#1123): `needs_you`, `fyi`, `ignore`, or `pending` while its model sorts it;
+    /// nil from a runner that doesn't sort. Only what needs the owner alerts.
+    var triage: String?
 
-    private enum Keys: String, CodingKey { case kind, id, job, title, text, options, created, done, later, watch, plugin }
+    private enum Keys: String, CodingKey { case kind, id, job, title, text, options, created, done, later, watch, plugin, triage }
     private struct Place: Decodable { var source: String?; var url: String?; var pr: PR?; var review: String? }
     private struct PR: Decodable { var url: String? }
     private struct Plugin: Decodable { var id: String?; var quoted: Quoted? }
     private struct Quoted: Decodable { var url: String? }
 
     init(kind: String = "watch", id: String, job: String = "", title: String, text: String, options: [String] = ["Dismiss"], created: Date,
-         done: Date? = nil, later: Date? = nil, url: URL? = nil, source: String = "slack", review: String? = nil) {
+         done: Date? = nil, later: Date? = nil, url: URL? = nil, source: String = "slack", review: String? = nil, triage: String? = nil) {
         (self.kind, self.id, self.job, self.title, self.text, self.options) = (kind, id, job, title, text, options)
-        (self.created, self.done, self.later, self.url, self.source, self.review) = (created, done, later, url, source, review)
+        (self.created, self.done, self.later, self.url, self.source, self.review, self.triage) = (created, done, later, url, source, review, triage)
     }
 
     init(from decoder: any Decoder) throws {
@@ -128,6 +131,7 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
         let issue = sentry ? plugin?.quoted?.url.flatMap { Self.link($0, on: ["sentry.io"]) } : nil
         url = (place?.pr?.url ?? place?.url).flatMap { Self.link($0) } ?? issue
         review = place?.review
+        triage = try? keys.decodeIfPresent(String.self, forKey: .triage)
     }
 
     /// `text` as a link the card may open: https, no login, on one of `hosts` (slack.com or github.com)
@@ -154,10 +158,14 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
     }
 
     /// Whether a notification shows for it: open, not put off, from the last hour (an older one is a
-    /// replay after a reconnect), and not shown already.
+    /// replay after a reconnect), not shown already, and needing the owner (or not sorted yet).
     static func shows(_ notice: WatchNotice, told: Set<String>, now: Date = .now) -> Bool {
-        notice.waiting(at: now) && notice.created > now.addingTimeInterval(-3600) && !told.contains(notice.id)
+        notice.waiting(at: now) && notice.created > now.addingTimeInterval(-3600) && !told.contains(notice.id) && notice.needsYou
     }
+
+    /// It needs the owner: obid sorted it so, or doesn't sort (nil). Not while it's `pending` (it alerts
+    /// once sorted `needs_you`), and not for a sort this app doesn't know.
+    var needsYou: Bool { triage == nil || triage == "needs_you" }
 }
 
 #if os(macOS)

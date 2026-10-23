@@ -342,8 +342,11 @@ final class IslandController {
             Task { @MainActor [weak self] in
                 guard let self, model.turn == .thinking, !model.listening else { return }
                 if case .thinking = desk.talk { watchThinking(); return }
-                // A reply is `replied`'s to settle, and it has been by now.
-                if case .question(_, let question) = desk.talk { Self.alert("Oby asks: \(question.text)", id: "talk") }
+                // A reply is `replied`'s to settle, and it has been by now. On obid the feed alerts
+                // Oby's question with its turn (#862); this Mac's own desk has one thread.
+                if case .question(let said, let question) = desk.talk, !feed.local {
+                    RunnerFeed.post(Alerts.answer(said, in: nil, title: "Oby", question: (said, question)))
+                }
                 setTurn(nil)
             }
         }
