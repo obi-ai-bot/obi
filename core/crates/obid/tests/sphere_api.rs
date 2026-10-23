@@ -932,9 +932,12 @@ async fn the_inbox_lists_answers_and_tells_every_app() {
                 "state",
                 "text",
                 "title",
+                "triage",
                 "why"
             ]
         );
+        // Another Obi's request is the owner's to decide (crate::triage).
+        assert_eq!(shown["triage"], "needs_you");
         assert_eq!(
             shown["details"],
             json!([
