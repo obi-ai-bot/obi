@@ -223,7 +223,9 @@ pub struct Config {
     /// The agents and their accounts as they are now: the configuration's, with what the API
     /// changed laid over them (crate::accounts). Every copy of the configuration shares them.
     pub agents: crate::accounts::Live,
-    pub repos: Vec<Repo>,
+    /// The repositories jobs work in: the configuration's, with those jobs added (written back to
+    /// the file), and GitHub's that gh can push to (crate::repos). Every copy shares them.
+    pub repos: crate::repos::Repos,
     pub allow_file_remotes: bool,
     /// The plug-ins obid ships (`plugins/<id>`), installed into `home/plugins/<id>` at start when
     /// missing, disabled (docs/ARCHITECTURE.md 5.3, step 1): `bundledPlugins`, or when it is left
@@ -301,7 +303,7 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })?;
-        Config::parse(&text).map_err(|e| match e {
+        let config = Config::parse(&text).map_err(|e| match e {
             Problem::Parse(source) => ConfigError::Parse {
                 path: path.to_path_buf(),
                 source,
@@ -310,7 +312,9 @@ impl Config {
                 path: path.to_path_buf(),
                 problem,
             },
-        })
+        })?;
+        config.repos.open(path);
+        Ok(config)
     }
 
     /// Checks a configuration given as JSON text.
@@ -592,7 +596,7 @@ impl Config {
             home: file.home,
             owner: file.owner,
             agents: crate::accounts::Live::new(file.agents),
-            repos: file.repos,
+            repos: crate::repos::Repos::new(file.repos),
             allow_file_remotes: file.allow_file_remotes,
             bundled_plugins: file.bundled_plugins.unwrap_or_else(default_bundled_plugins),
             web: file.web.unwrap_or_else(default_web),
@@ -828,7 +832,7 @@ mod tests {
                 payer: None,
             }]
         );
-        assert_eq!(config.repos[0].check.as_deref(), Some("node --test"));
+        assert_eq!(config.repos.get()[0].check.as_deref(), Some("node --test"));
         assert!(!config.allow_file_remotes);
         assert!(!config.telemetry);
     }

@@ -969,7 +969,13 @@ pub async fn run(
     let deadline = Instant::now() + shared.config.turn_budget;
     let goal = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
     let mut turn = LeadTurn::new(&goal, said, control);
-    let known: Vec<String> = shared.config.repos.iter().map(|r| r.repo.clone()).collect();
+    let known: Vec<String> = shared
+        .config
+        .repos
+        .get()
+        .iter()
+        .map(|r| r.repo.clone())
+        .collect();
     let board = match read_board(BOARD_TITLE, &known).await {
         Ok(board) => board,
         Err(why) => {

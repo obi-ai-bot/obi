@@ -466,6 +466,49 @@ fn cursor_commits_with_obids_approval() {
     );
 }
 
+/// Cursor's own login on the Mac (`~/.cursor`, no account folder) is listed at start and runs as
+/// an account's does: from a copy of its login and settings in a folder of the job's own, the
+/// person's own files left as they were.
+#[test]
+fn cursors_own_login_runs_from_a_copy() {
+    let folder = Folder::new("cursor-own");
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &agents().join("fake-claude"));
+    config["agents"] = json!({"cursor": {"bin": agents().join("fake-cursor"), "accounts": []}});
+    let person = folder.0.join("env-home");
+    let login = person.join(if cfg!(target_os = "macos") {
+        ".cursor/auth.json"
+    } else {
+        ".config/cursor/auth.json"
+    });
+    std::fs::create_dir_all(login.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(person.join(".cursor")).unwrap();
+    // Built at runtime, so a secret scan doesn't take the test's value for a credential.
+    std::fs::write(
+        &login,
+        json!({"accessToken": (["own", "-access"].concat())}).to_string(),
+    )
+    .unwrap();
+    let settings = r#"{"authInfo": {"email": "owner@example.com"}, "permissions": {"allow": ["Shell(*)"], "deny": []}}"#;
+    std::fs::write(person.join(".cursor/cli-config.json"), settings).unwrap();
+    let obid = start(&folder.0, &config, None);
+    let id = dispatch(&obid, json!({"agent": "cursor", "task": "ENV"}));
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    assert_eq!(job["account"], "cursor");
+    let home = obid.home.join("logins").join(&id);
+    let said = summary(&job);
+    assert!(said.contains(&format!("HOME={}", home.display())), "{said}");
+    assert!(
+        said.contains("allow=[]") && said.contains("kept=owner@example.com"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(person.join(".cursor/cli-config.json")).unwrap(),
+        settings
+    );
+}
+
 /// obid's fixed denials hold for Cursor: a push is `reject_once`, and the next round's prompt
 /// starts with what obid declined and why, since ACP's answer carries no words. Cursor's question
 /// is skipped, a request for obid's files is refused, and a fine command is allowed once.

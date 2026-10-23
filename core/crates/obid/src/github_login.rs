@@ -339,6 +339,10 @@ async fn start(shared: &Arc<Shared>, gh: &Path) -> Result<Arc<SignIn>, String> {
             }
         }
         let signed = exited.is_some_and(|s| s.success());
+        if signed {
+            // What the new login can push to, now rather than within the hour.
+            shared.config.repos.nudge();
+        }
         tracing::info!(
             "GitHub sign-in ended {}",
             if signed {

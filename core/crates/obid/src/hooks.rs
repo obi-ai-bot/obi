@@ -1282,6 +1282,7 @@ async fn repos(State(shared): State<Arc<Shared>>) -> Json<Value> {
         shared
             .config
             .repos
+            .get()
             .iter()
             .map(|r| r.repo.clone())
             .collect::<Vec<_>>()
@@ -1300,7 +1301,13 @@ async fn add(State(shared): State<Arc<Shared>>, body: axum::body::Bytes) -> Resp
         )
         .into_response();
     };
-    let repos: Vec<String> = shared.config.repos.iter().map(|r| r.repo.clone()).collect();
+    let repos: Vec<String> = shared
+        .config
+        .repos
+        .get()
+        .iter()
+        .map(|r| r.repo.clone())
+        .collect();
     match shared.hooks.add(&given, &repos) {
         Ok(hook) => (StatusCode::CREATED, Json(json!(hook))).into_response(),
         Err(error) => error.into_response(),

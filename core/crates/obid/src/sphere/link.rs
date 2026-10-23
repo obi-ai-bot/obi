@@ -662,7 +662,7 @@ impl Link {
     /// crate::rules applies standing rules before it's kept.
     pub fn plugin_event_offer(&self, event: &obi_plugin_api::PluginEvent) -> Item {
         let repo = &event.event.subject.repo;
-        let known = self.config.repos.iter().any(|r| &r.repo == repo);
+        let known = self.config.repos.get().iter().any(|r| &r.repo == repo);
         inbox::plugin_event_item(event, known, time::now())
     }
 
@@ -3397,7 +3397,7 @@ impl Link {
             inbox::action::REMEMBER_RULE => {
                 let rule: Decision = serde_json::from_value(confirmed.payload["rule"].clone())
                     .map_err(|_| api(StatusCode::CONFLICT, "That rule's plan was lost."))?;
-                let known = self.config.repos.iter().any(|r| r.repo == rule.repo);
+                let known = self.config.repos.get().iter().any(|r| r.repo == rule.repo);
                 if !known
                     || !matches!(
                         rule.kind.as_str(),

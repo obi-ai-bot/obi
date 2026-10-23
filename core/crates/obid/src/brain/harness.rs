@@ -1560,16 +1560,30 @@ pub(super) fn orientation(shared: &Shared) -> String {
     let repos: Vec<String> = shared
         .config
         .repos
+        .get()
         .iter()
         .map(|r| format!("{} (repos/{})", r.repo, r.repo))
         .collect();
-    if repos.is_empty() {
-        return ORIENTATION.to_owned();
+    // GitHub's that gh can push to: a job may start in any, though the room has no checkout of them.
+    let github: Vec<String> = shared
+        .config
+        .repos
+        .github()
+        .into_iter()
+        .take(crate::repos::MOST_TOLD)
+        .map(|r| r.repo)
+        .collect();
+    let mut orientation = ORIENTATION.to_owned();
+    if !repos.is_empty() {
+        orientation += &format!("\n\nThe owner's repositories: {}.", repos.join(", "));
     }
-    format!(
-        "{ORIENTATION}\n\nThe owner's repositories: {}.",
-        repos.join(", ")
-    )
+    if !github.is_empty() {
+        orientation += &format!(
+            "\n\nOther GitHub repositories the owner can push to, where a job may start too (no checkout in repos/): {}.",
+            github.join(", ")
+        );
+    }
+    orientation
 }
 
 /// One run of the agent for the turn (Codex's `app-server` with `codex`'s options, else Claude
@@ -2052,7 +2066,7 @@ fn step_text(name: &str, input: &Value) -> String {
 /// with no spare at its commit waits for one. A repository that can't be checked out is left out,
 /// and logged.
 async fn checkouts(shared: &Arc<Shared>, place: &Place, live: &(dyn Fn() -> bool + Sync)) {
-    for repo in &shared.config.repos {
+    for repo in &shared.config.repos.get() {
         // A cancelled turn doesn't keep extracting (a big tree takes time).
         if !live() {
             break;
@@ -2272,7 +2286,7 @@ pub fn forget_logins_left(home: &Path) {
 /// At obid's start: what a stop left in the spares' folders goes (all but the spares), and each
 /// repository's spare tree is made.
 pub fn prepare_rooms(shared: &Arc<Shared>) {
-    for repo in &shared.config.repos {
+    for repo in &shared.config.repos.get() {
         let root = spares(shared, &repo.repo);
         for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
             if !entry.file_name().to_string_lossy().starts_with("spare-") {

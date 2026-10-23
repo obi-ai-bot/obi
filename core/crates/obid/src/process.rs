@@ -100,15 +100,18 @@ pub fn sandbox_env(
 /// 2026-10-17: every Bash command failed with EPERM), so it's the run's own temporary folder.
 pub const CLAUDE_TMPDIR: &str = "CLAUDE_CODE_TMPDIR";
 
-/// The `PATH` processes get: obid's own, then what the login shell adds (AGENTS.md, "PATH"), so a
-/// tool installed for the person is found even when obid was started with a short `PATH`.
+/// The `PATH` processes get: obid's own, then what the login shell adds (AGENTS.md, "PATH"), then
+/// where CLIs are installed that only an interactive shell (`.zshrc`) adds ([`usual_folders`]), so
+/// a tool installed for the person is found even when obid was started with a short `PATH`.
 pub fn tools_path() -> OsString {
     static PATH: OnceLock<OsString> = OnceLock::new();
     PATH.get_or_init(|| {
         let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
             .map(|p| std::env::split_paths(&p).collect())
             .unwrap_or_default();
-        for dir in login_shell_path() {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let usual = home.as_deref().map(usual_folders).unwrap_or_default();
+        for dir in login_shell_path().into_iter().chain(usual) {
             if !dirs.contains(&dir) {
                 dirs.push(dir);
             }
@@ -121,6 +124,49 @@ pub fn tools_path() -> OsString {
         std::env::join_paths(dirs).unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into())
     })
     .clone()
+}
+
+/// Where the person's CLIs usually are when their `PATH` is set in `.zshrc`, which a login shell
+/// that isn't interactive never reads: `~/.local/bin` (Claude Code's installer), `~/.bun/bin`,
+/// nvm's default node (npm's `-g` installs) and `/opt/homebrew/bin`. Only those that are folders.
+fn usual_folders(home: &Path) -> Vec<PathBuf> {
+    [
+        Some(home.join(".local/bin")),
+        Some(home.join(".bun/bin")),
+        nvm_default_bin(home),
+        Some(PathBuf::from("/opt/homebrew/bin")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|dir| dir.is_dir())
+    .collect()
+}
+
+/// nvm's default node's `bin`: the newest `~/.nvm/versions/node/v*` that `~/.nvm/alias/default`
+/// names (`22`, `22.11`, `v22.11.0`). ponytail: any other alias (`node`, `lts/*`, `lts/jod`) takes
+/// the newest installed; follow nvm's alias files if someone's default is an older LTS.
+fn nvm_default_bin(home: &Path) -> Option<PathBuf> {
+    let nvm = home.join(".nvm");
+    let alias = std::fs::read_to_string(nvm.join("alias/default")).unwrap_or_default();
+    let wanted = alias.trim().trim_start_matches('v');
+    let numbered = wanted.starts_with(|c: char| c.is_ascii_digit());
+    let versions = nvm.join("versions/node");
+    std::fs::read_dir(&versions)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let number = name.strip_prefix('v')?;
+            let parts: Vec<u64> = number
+                .split('.')
+                .map(|p| p.parse().ok())
+                .collect::<Option<_>>()?;
+            let matches =
+                !numbered || number == wanted || number.starts_with(&format!("{wanted}."));
+            matches.then_some((parts, name))
+        })
+        .max()
+        .map(|(_, name)| versions.join(name).join("bin"))
 }
 
 /// The login shell's `PATH`: the shell from the password database (it can differ from `$SHELL`),
@@ -227,6 +273,43 @@ pub fn describe(status: std::process::ExitStatus) -> String {
     match status.code() {
         Some(code) => format!("exit status {code}"),
         None => "ended".into(),
+    }
+}
+
+#[cfg(test)]
+mod usual_folders_tests {
+    use super::*;
+
+    /// A CLI the login shell's `PATH` misses is looked for where installers put it, nvm's default
+    /// node among them: the newest version its alias names.
+    #[test]
+    fn clis_set_up_in_zshrc_are_found_where_installers_put_them() {
+        let home = std::env::temp_dir().join(format!("obid-usual-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        for dir in [
+            ".local/bin",
+            ".nvm/versions/node/v20.1.0/bin",
+            ".nvm/versions/node/v22.3.0/bin",
+            ".nvm/versions/node/v22.11.0/bin",
+            ".nvm/versions/node/v23.0.0/bin",
+            ".nvm/alias",
+        ] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        std::fs::write(home.join(".nvm/alias/default"), "22\n").unwrap();
+        let found = usual_folders(&home);
+        assert_eq!(found[0], home.join(".local/bin"));
+        assert_eq!(found[1], home.join(".nvm/versions/node/v22.11.0/bin"));
+        // No ~/.bun/bin here: only folders that are there.
+        assert!(!found.contains(&home.join(".bun/bin")));
+        for (alias, version) in [("v22.3.0", "v22.3.0"), ("22.1", ""), ("lts/*", "v23.0.0")] {
+            std::fs::write(home.join(".nvm/alias/default"), alias).unwrap();
+            let bin = nvm_default_bin(&home);
+            let wanted = (!version.is_empty())
+                .then(|| home.join(".nvm/versions/node").join(version).join("bin"));
+            assert_eq!(bin, wanted, "{alias}");
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
 

@@ -160,9 +160,9 @@ async fn dispatch(
                 shared
                     .config
                     .repos
-                    .iter()
-                    .find(|r| r.repo == d.repo)
-                    .and_then(|r| r.check.as_deref()),
+                    .find(&d.repo)
+                    .and_then(|r| r.check)
+                    .as_deref(),
                 asked.said,
             ),
             files,

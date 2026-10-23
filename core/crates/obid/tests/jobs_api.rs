@@ -541,6 +541,98 @@ fn a_build_job_commits_and_ends_done() {
     assert_eq!(by_id, job);
 }
 
+/// A fresh obid, no repository in its configuration: gh lists the GitHub repositories its login
+/// can push to (`GET /v1/repos`), a job starts in one, and that job adds it to the configuration
+/// file, every other key kept. A repository neither listed nor GitHub's is still refused. (git's
+/// own `insteadOf` sends the GitHub URL to the fixture's remote, as a test can't reach GitHub.)
+#[test]
+fn a_fresh_obid_works_in_the_github_repositories_gh_can_push_to() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = Folder::new("github-repos");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bin = folder.0.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("gh"),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1 $2\" in\n  \"api user/repos\"*) printf 'obi-e2e/fixture-app\\tmain\\nobi-e2e/other\\tdev\\n' ;;\n  *) exit 1 ;;\nesac\n",
+            folder.0.join("gh-calls").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir_all(folder.0.join("env-home")).unwrap();
+    std::fs::write(
+        folder.0.join("env-home/.gitconfig"),
+        format!(
+            "[url \"file://{}\"]\n\tinsteadOf = https://github.com/obi-e2e/fixture-app.git\n",
+            remote.display()
+        ),
+    )
+    .unwrap();
+    let mut config = config(&folder.0, &remote);
+    config["repos"] = json!([]);
+    let obid = start_with(&folder.0, &config, Some(&bin));
+
+    let give_up_at = Instant::now() + Duration::from_secs(30);
+    let listed = loop {
+        let answer = request(&obid, "GET", "/v1/repos", None);
+        assert_eq!(answer.status, 200, "{}", answer.text);
+        if answer.body["repos"]
+            .as_array()
+            .is_some_and(|r| !r.is_empty())
+        {
+            break answer.body;
+        }
+        assert!(Instant::now() < give_up_at, "gh's repositories never came");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(
+        listed,
+        json!({"repos": [
+            {"repo": "obi-e2e/fixture-app", "defaultBranch": "main", "listed": false},
+            {"repo": "obi-e2e/other", "defaultBranch": "dev", "listed": false}
+        ]})
+    );
+    let calls = std::fs::read_to_string(folder.0.join("gh-calls")).unwrap();
+    assert!(calls.contains("--paginate"), "{calls}");
+    assert!(calls.contains("permissions.push"), "{calls}");
+
+    let unknown = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/elsewhere", "kind": "fix", "task": "Look around"}),
+    );
+    assert_eq!(unknown.status, 422, "{}", unknown.text);
+    assert!(
+        unknown.text.contains("isn't a repository obid knows"),
+        "{}",
+        unknown.text
+    );
+
+    let answer = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "Look around"}),
+    );
+    assert_eq!(answer.status, 201, "{}", answer.text);
+    assert_eq!(answer.body["base"], "main");
+    let id = answer.body["id"].as_str().unwrap().to_owned();
+    let path = folder.0.join("config.json");
+    let written: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        written["repos"],
+        json!([{"repo": "obi-e2e/fixture-app", "remote": "https://github.com/obi-e2e/fixture-app.git", "defaultBranch": "main"}])
+    );
+    assert_eq!(written["owner"], "wellington");
+    assert_eq!(written["agents"], config["agents"]);
+    obid::config::Config::load(&path).expect("obid starts with what it wrote");
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(
+        request(&obid, "GET", "/v1/repos", None).body["repos"][0],
+        json!({"repo": "obi-e2e/fixture-app", "defaultBranch": "main", "listed": true})
+    );
+}
+
 /// A fix that commits nothing is done, as Claude Code is when its model stops: the agent's summary
 /// says why, and `reason` that nothing was published. It needs nothing, so it can't be dismissed.
 #[test]

@@ -485,7 +485,12 @@ impl Feed {
     }
 
     fn known(&self) -> Vec<String> {
-        self.config.repos.iter().map(|r| r.repo.clone()).collect()
+        self.config
+            .repos
+            .get()
+            .iter()
+            .map(|r| r.repo.clone())
+            .collect()
     }
 
     /// Reads every [`EVERY`] seconds (or once a rate limit's wait is over) until obid stops.
@@ -757,10 +762,12 @@ pub async fn start_work(
             ));
         }
     };
-    if !config.repos.iter().any(|r| r.repo == repo) {
+    if config.repos.find(repo).is_none() {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            format!("obid doesn't work in {repo} yet: add it to repos in obid's configuration."),
+            format!(
+                "obid doesn't work in {repo} yet: add it to repos in obid's configuration, or sign gh in to an account that can push to it."
+            ),
         ));
     }
     // One start at a time, from the feed and the inbox alike: a second tap waits for the first

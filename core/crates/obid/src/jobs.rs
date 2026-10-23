@@ -994,7 +994,13 @@ impl Jobs {
     async fn tidy_clones(self: Arc<Self>) {
         loop {
             tokio::time::sleep(TIDY_EVERY).await;
-            let repos: Vec<String> = self.config.repos.iter().map(|r| r.repo.clone()).collect();
+            let repos: Vec<String> = self
+                .config
+                .repos
+                .get()
+                .iter()
+                .map(|r| r.repo.clone())
+                .collect();
             for repo in repos {
                 match self.tidy_clone(&repo).await {
                     Ok(true) => tracing::info!("{repo}: obid's clone tidied (git gc --auto)"),
@@ -2088,8 +2094,9 @@ impl Jobs {
             .map_err(|e| e.0)
     }
 
-    fn repo(&self, repo: &str) -> Option<&Repo> {
-        self.config.repos.iter().find(|r| r.repo == repo)
+    /// A repository obid knows: a listed one, or one of GitHub's that gh can push to (crate::repos).
+    fn repo(&self, repo: &str) -> Option<Repo> {
+        self.config.repos.find(repo)
     }
 
     /// Makes a job the owner described whole, queued.
@@ -2107,8 +2114,7 @@ impl Jobs {
     ) -> Result<(Repo, Tool, crate::config::Account, Option<Vec<String>>), Refused> {
         let repo = self
             .repo(&new.repo)
-            .ok_or_else(|| Refused(format!("{} isn't a repository obid knows.", new.repo)))?
-            .clone();
+            .ok_or_else(|| Refused(format!("{} isn't a repository obid knows.", new.repo)))?;
         if !crate::job::KINDS.contains(&new.kind.as_str()) {
             return Err(Refused(format!(
                 "kind is one of {}.",
@@ -2171,7 +2177,7 @@ impl Jobs {
         let id = self.new_id();
         let mut job = Job::new(
             id.clone(),
-            new.repo.clone(),
+            repo.repo.clone(),
             new.kind.clone(),
             new.task.clone(),
             tool.id().into(),
@@ -2274,6 +2280,10 @@ impl Jobs {
             }
             state.jobs.insert(job.id.clone(), job.clone());
         }
+        // The first job in one of GitHub's repositories makes it one of obid's (crate::repos).
+        if let Err(why) = self.config.repos.keep(&repo) {
+            tracing::warn!("{why}");
+        }
         let job = self.insert(job);
         self.schedule();
         Ok(job)
@@ -2284,7 +2294,8 @@ impl Jobs {
     pub fn start_obi_review(self: &Arc<Self>, request: ObiReview) -> Result<Job, Refused> {
         let body: ReviewRequest = serde_json::from_value(request.body.clone())
             .map_err(|e| Refused(format!("The request isn't a review_request: {e}")))?;
-        if self.repo(&body.repo).is_none() {
+        // Another Obi's request: only in a repository obid lists, never one of GitHub's it doesn't.
+        if !self.config.repos.get().iter().any(|r| r.repo == body.repo) {
             return Err(Refused(format!(
                 "{} isn't a repository obid knows.",
                 body.repo
@@ -2875,7 +2886,7 @@ impl Jobs {
         ];
         logins.extend(config_dir.clone());
         let home = match (tool, &config_dir) {
-            (Some(Tool::Cursor), Some(_)) => self.login_path(&job.id),
+            (Some(Tool::Cursor), _) => self.login_path(&job.id),
             _ => temp.clone(),
         };
         permissions::Bounds {
@@ -3484,9 +3495,10 @@ impl Jobs {
     pub fn default_branch(&self, repo: &str) -> Option<String> {
         self.config
             .repos
-            .iter()
+            .get()
+            .into_iter()
             .find(|r| r.repo == repo)
-            .map(|r| r.default_branch.clone())
+            .map(|r| r.default_branch)
     }
 
     /// obid's clone of `repo`, with its default branch fetched now, for the brain's lookups
@@ -3495,7 +3507,8 @@ impl Jobs {
         let config = self
             .config
             .repos
-            .iter()
+            .get()
+            .into_iter()
             .find(|r| r.repo == repo)
             .ok_or_else(|| format!("{repo} isn't a known repository"))?;
         let preparing = self.preparing(repo);
@@ -4065,11 +4078,22 @@ impl Jobs {
                 }
                 spec.accounts.push(login);
             }
+            // Cursor's own login (`~/.cursor`), copied as an account's is: never the person's folder.
             (None, Tool::Cursor) => {
-                return Err(format!(
-                    "Cursor · {} has no folder of its own (configDir), so Cursor didn't start.",
-                    account.name
-                ));
+                let login = self.login_path(&job.id);
+                let home = login_home().ok_or_else(|| {
+                    "obid can't find the home Cursor's own login is in.".to_owned()
+                })?;
+                copy_cursor(
+                    &home.join(cursor_login_file()),
+                    &home.join(".cursor/cli-config.json"),
+                    &home,
+                    &login,
+                )
+                .map_err(|e| format!("obid can't copy Cursor's login for this job: {e}"))?;
+                acp::cursor::warn_if_long(&login);
+                extra.extend(acp::cursor::environment(&login));
+                spec.accounts.push(login);
             }
             (None, _) => {
                 // The tool's own login, without the person's real folders: obid copies the login
@@ -7090,26 +7114,69 @@ pub(crate) fn login_home() -> Option<PathBuf> {
         .or_else(|| homes.into_iter().next())
 }
 
-/// Whether `account` has a login a boxed run can use (#626): its login file is there, in its
-/// `configDir` or else in `home` (Claude Code's `.credentials.json`, Codex's `auth.json`), the file
-/// [`copy_login`] would copy, or Claude Code's item in the macOS Keychain, which obid copies in its
-/// place ([`keychain_login`]). obid only looks whether it exists here. Cursor's login is found out
-/// when it runs (`crate::acp`).
-pub(crate) fn signed_in(tool: Tool, account: &crate::config::Account, home: Option<&Path>) -> bool {
-    let (folder, file) = match tool {
-        Tool::Claude => (".claude", ".credentials.json"),
-        Tool::Codex => (".codex", "auth.json"),
-        Tool::Cursor => return true,
+/// The file `account`'s login is in, in its `configDir` or else the tool's own in `home`: Claude
+/// Code's `.credentials.json`, Codex's `auth.json`, Cursor's [`cursor_login_file`] (a Cursor
+/// account's folder is its `HOME`). The file a run's copy is made from.
+fn login_file(
+    tool: Tool,
+    account: &crate::config::Account,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    let (own, file) = match tool {
+        Tool::Claude => (".claude/.credentials.json", ".credentials.json"),
+        Tool::Codex => (".codex/auth.json", "auth.json"),
+        Tool::Cursor => (cursor_login_file(), cursor_login_file()),
     };
-    let path = match (&account.config_dir, home) {
-        (Some(dir), _) => dir.join(file),
-        (None, Some(home)) => home.join(folder).join(file),
-        (None, None) => return false,
-    };
-    // A regular file only, as copy_login takes it; or, on macOS, Claude Code's own Keychain item,
-    // which obid copies in its place (keychain_login).
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
+    match (&account.config_dir, home) {
+        (Some(dir), _) => Some(dir.join(file)),
+        (None, Some(home)) => Some(home.join(own)),
+        (None, None) => None,
+    }
+}
+
+/// Whether `account`'s login is on this Mac: its [`login_file`] (a regular file only, as the
+/// copies take it), or Claude Code's item in the macOS Keychain, which obid copies in its place
+/// ([`keychain_login`]). Whether a run can use it is [`signed_in`].
+pub(crate) fn has_login(tool: Tool, account: &crate::config::Account, home: Option<&Path>) -> bool {
+    login_file(tool, account, home)
+        .is_some_and(|path| std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()))
         || (tool == Tool::Claude && keychain_has(account.config_dir.as_deref()))
+}
+
+/// Whether `account` has a login a boxed run can use (#626): [`has_login`], and for Codex an access
+/// token that doesn't end within 5 minutes ([`codex_copy_ready`]: a copy can't refresh it), for
+/// Cursor an access token or API key in its file (all a run's copy keeps). Claude Code's is only
+/// looked for.
+pub(crate) fn signed_in(tool: Tool, account: &crate::config::Account, home: Option<&Path>) -> bool {
+    has_login(tool, account, home)
+        && match (tool, login_file(tool, account, home)) {
+            (Tool::Codex, Some(file)) => codex_copy_ready(&file, &account.name).is_ok(),
+            (Tool::Cursor, Some(file)) => cursor_has_token(&file),
+            _ => true,
+        }
+}
+
+/// What the apps show beside an account whose login is there but can't run: Codex's access token
+/// ends within 5 minutes, and only Codex itself refreshes it.
+pub(crate) fn login_note(
+    tool: Tool,
+    account: &crate::config::Account,
+    home: Option<&Path>,
+) -> Option<&'static str> {
+    (tool == Tool::Codex && has_login(tool, account, home) && !signed_in(tool, account, home))
+        .then_some("Run codex once")
+}
+
+/// Whether Cursor's login file holds what a run's copy keeps ([`cursor_without_refresh`]): an
+/// access token or an API key.
+fn cursor_has_token(file: &Path) -> bool {
+    let login: Value = std::fs::read(file)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    ["accessToken", "apiKey"]
+        .iter()
+        .any(|key| login[key].as_str().is_some_and(|t| !t.is_empty()))
 }
 
 /// The name Claude Code gives its login in the macOS Keychain for a `CLAUDE_CONFIG_DIR` (none: its
@@ -8044,27 +8111,51 @@ pub(crate) fn copy_account_folder(tool: Tool, account: &Path, login: &Path) -> s
         // Only its login: never the account's `config.toml`, whose MCP servers would start inside
         // the box with whatever tokens they carry (agents have no code-host login).
         Tool::Codex => copy_account_login(tool, account, login),
-        Tool::Cursor => {
-            let file = cursor_login_file();
-            if let Some(copy) = read(file).and_then(|bytes| cursor_without_refresh(&bytes, account))
-            {
-                let mut folder = login.to_path_buf();
-                for part in Path::new(file)
-                    .parent()
-                    .into_iter()
-                    .flat_map(Path::components)
-                {
-                    folder.push(part);
-                    not_a_link(&folder).map_err(std::io::Error::other)?;
-                    store::make_private_dir(&folder)?;
-                }
-                write_login(&login.join(file), &copy)?;
-            }
-            // Never its `mcp.json` (MCP servers starting inside the box, with their tokens).
-            once("cli-config.json", read("cli-config.json"))?;
-            acp::cursor::rewrite_config(login)
-        }
+        Tool::Cursor => copy_cursor(
+            &account.join(cursor_login_file()),
+            &account.join("cli-config.json"),
+            account,
+            login,
+        ),
     }
+}
+
+/// A Cursor job's own folder (`login`, its `HOME`) from the login file `from` and the settings
+/// `settings` (`cli-config.json`), an account's or Cursor's own (`~/.cursor`): the login as only its
+/// access token and API key ([`cursor_without_refresh`]), again before every start; once, the
+/// settings, then obid's over them ([`acp::cursor::rewrite_config`]); never its `mcp.json` (MCP
+/// servers starting inside the box, with their tokens). `account` names the login's secrets.
+fn copy_cursor(from: &Path, settings: &Path, account: &Path, login: &Path) -> std::io::Result<()> {
+    not_a_link(login).map_err(std::io::Error::other)?;
+    store::make_private_dir(login)?;
+    // A regular file, as it is.
+    let read = |from: &Path| -> Option<Vec<u8>> {
+        std::fs::symlink_metadata(from)
+            .is_ok_and(|m| m.is_file())
+            .then(|| std::fs::read(from).ok())
+            .flatten()
+    };
+    let file = cursor_login_file();
+    if let Some(copy) = read(from).and_then(|bytes| cursor_without_refresh(&bytes, account)) {
+        let mut folder = login.to_path_buf();
+        for part in Path::new(file)
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+        {
+            folder.push(part);
+            not_a_link(&folder).map_err(std::io::Error::other)?;
+            store::make_private_dir(&folder)?;
+        }
+        write_login(&login.join(file), &copy)?;
+    }
+    let config = login.join("cli-config.json");
+    if std::fs::symlink_metadata(&config).is_err()
+        && let Some(bytes) = read(settings)
+    {
+        write_login(&config, &bytes)?;
+    }
+    acp::cursor::rewrite_config(login)
 }
 
 /// The tool's own login, copied from `home` into the job's `login` folder, for an account with no
