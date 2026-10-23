@@ -68,6 +68,9 @@ pub struct NewHook {
 
 pub struct Hooks {
     file: PathBuf,
+    /// `home/hooks-seen.json` (0600): the digests of accepted bodies, so a restart doesn't let one
+    /// be replayed.
+    seen_file: PathBuf,
     hooks: Mutex<Vec<Hook>>,
     vault: Arc<crate::vault::Vault>,
     events: crate::events::Events,
@@ -122,12 +125,30 @@ impl Hooks {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
+        let seen_file = home.join("hooks-seen.json");
+        let seen: HashMap<String, Vec<(String, i64)>> = std::fs::read(&seen_file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let seen = seen
+            .into_iter()
+            .map(|(id, kept)| {
+                let kept = kept
+                    .into_iter()
+                    .filter_map(|(digest, at)| {
+                        Some((hex::decode(digest).ok()?.try_into().ok()?, at))
+                    })
+                    .collect();
+                (id, kept)
+            })
+            .collect();
         Arc::new(Hooks {
             file,
+            seen_file,
             hooks: Mutex::new(hooks),
             vault,
             events,
-            seen: Mutex::default(),
+            seen: Mutex::new(seen),
             rate: Mutex::default(),
         })
     }
@@ -242,15 +263,25 @@ impl Hooks {
         Ok(true)
     }
 
+    /// Notes what a delivery came to. Only an accepted one, or a result unlike the last, is written
+    /// and sent: a flood of unsigned posts costs one write, not one each.
     fn note(&self, id: &str, result: &str) {
         let mut hooks = self.lock();
         let Some(hook) = hooks.iter_mut().find(|h| h.id == id) else {
             return;
         };
+        let changed = result == "accepted"
+            || hook
+                .last_delivery
+                .as_ref()
+                .is_none_or(|last| last.result != result);
         hook.last_delivery = Some(Delivery {
             at: time::format(time::now()),
             result: result.into(),
         });
+        if !changed {
+            return;
+        }
         let next = hooks.clone();
         if let Err(e) = self.save(&next) {
             tracing::warn!("{e}");
@@ -279,6 +310,24 @@ impl Hooks {
             return true;
         }
         kept.push((digest, now));
+        // Only a signed delivery gets here, so this is written as often as the senders send.
+        let written: HashMap<&String, Vec<(String, i64)>> = seen
+            .iter()
+            .map(|(id, kept)| {
+                (
+                    id,
+                    kept.iter().map(|(d, at)| (hex::encode(d), *at)).collect(),
+                )
+            })
+            .collect();
+        if let Err(e) = serde_json::to_vec(&written)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                crate::store::write_private(&self.seen_file, &bytes).map_err(|e| e.to_string())
+            })
+        {
+            tracing::warn!("obid couldn't keep the hooks' seen deliveries: {e}");
+        }
         false
     }
 
@@ -364,7 +413,17 @@ pub async fn deliver(
         )
             .into_response();
     };
-    let (status, answer) = shared.hooks.deliver(id, &headers, &bytes);
+    // The checks read the vault and write files: off the async workers.
+    let (hooks, id) = (shared.hooks.clone(), id.to_owned());
+    let (status, answer) =
+        tokio::task::spawn_blocking(move || hooks.deliver(&id, &headers, &bytes))
+            .await
+            .unwrap_or_else(|_| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error": "obid can't check deliveries now."}),
+                )
+            });
     (status, Json(answer)).into_response()
 }
 
@@ -451,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn github_and_generic_signatures_are_checked_in_constant_time() {
+    fn github_and_generic_signatures_are_checked() {
         let body = br#"{"zen":"Keep it logically awesome."}"#;
         assert!(signed(&secret(), body, Some(&sign(&secret(), body))));
         assert!(!signed(
@@ -554,6 +613,10 @@ mod tests {
         );
         let again = hooks.deliver(ID, &good, body);
         assert_eq!(again, (StatusCode::OK, json!({"duplicate": true})));
+        // A restart doesn't forget it: the same body is still a duplicate.
+        let home = hooks.file.parent().unwrap().to_owned();
+        let restarted = Hooks::open(&home, hooks.vault.clone(), crate::events::Events::new());
+        assert_eq!(restarted.deliver(ID, &good, body).0, StatusCode::OK);
         let big = vec![b'x'; BODY_MAX + 1];
         assert_eq!(
             hooks.deliver(ID, &headers(&sign(&secret(), &big)), &big).0,

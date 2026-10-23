@@ -94,14 +94,18 @@ enum HookSetup {
         do {
             return try await obid.addHook(id: address.id, url: address.url, name: name, source: source, secret: secret, repo: repo)
         } catch {
-            try? await plane.removeHook(address.id, signer)
+            // In a task of its own, so a cancelled caller doesn't leave the address behind.
+            await Task { try? await plane.removeHook(address.id, signer) }.value
             throw error
         }
     }
 
-    /// obid forgets it and its secret first, then the control plane its address.
+    /// obid forgets it and its secret first, then the control plane its address. One obid no longer
+    /// has (an earlier try got that far) goes on to the address.
     static func remove(id: String, plane: ControlPlane, signer: ControlPlane.Signer, obid: Runner) async throws {
-        try await obid.removeHook(id)
+        do {
+            try await obid.removeHook(id)
+        } catch let gone as RunnerError where gone.status == 404 {}
         try await plane.removeHook(id, signer)
     }
 }

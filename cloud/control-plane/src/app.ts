@@ -679,7 +679,12 @@ async function deliver(request: Request, env: Env, deps: Deps, now: () => Date, 
   const body = await boundedBody(request, HOOK_BODY_MAX);
   if (!body) throw new Reply(413, "That delivery is too large.");
   await limit(env.DB, `deliveries:minute:${id}`, LIMITS.deliveriesPerHookMinute, now(), "Too many deliveries to this hook.");
-  await limit(env.DB, `deliveries:day:${id}`, LIMITS.deliveriesPerHookDay, now(), "Too many deliveries to this hook today.");
+  // The day's allowance is spent only by deliveries obid doesn't refuse as unsigned (below), so a
+  // stranger's junk can't use it up for the real sender.
+  const day = `deliveries:day:${id}`;
+  if ((await countedSoFar(env.DB, day, LIMITS.deliveriesPerHookDay, now())) >= LIMITS.deliveriesPerHookDay.max) {
+    throw new Reply(429, "Too many deliveries to this hook today. Try again tomorrow.");
+  }
   const endpoint = await endpointOf(env.DB, hook.installation_id);
   if (!endpoint) throw new Reply(503, "That Oby isn't reachable now.");
   const headers = new Headers();
@@ -703,6 +708,7 @@ async function deliver(request: Request, env: Env, deps: Deps, now: () => Date, 
   }
   // Cloudflare's own answers for a tunnel that's down (502, 530 and the like) are the Mac away.
   if (status >= 500 || status < 200 || (status >= 300 && status < 400)) throw new Reply(503, "That Oby isn't reachable now.");
+  if (status !== 401) await takeOne(env.DB, day, LIMITS.deliveriesPerHookDay, now());
   console.log(`hook ${id}: ${status}`);
   return json({ ok: status < 300 }, status);
 }

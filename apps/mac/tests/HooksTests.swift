@@ -51,6 +51,16 @@ struct HooksTests {
         #expect(given["url"] as? String == "https://oby-control.test/h/abcdefghij0123456789abcdefghij01")
     }
 
+    /// Removing a hook obid no longer has (an earlier try got that far) still removes its address.
+    @Test func removingAHookObidForgotStillRemovesItsAddress() async throws {
+        let plane = Plane([(204, "")])
+        let obid = RunnerStub { _ in (404, #"{"error": "There's no such hook."}"#) }
+        try await HookSetup.remove(id: "abcdefghij0123456789abcdefghij01",
+                                   plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: plane.transport),
+                                   signer: signer, obid: obid.runner)
+        #expect(plane.requests.map { "\($0.httpMethod ?? "") \($0.url?.path() ?? "")" } == ["DELETE /v1/installations/self/hooks/abcdefghij0123456789abcdefghij01"])
+    }
+
     @Test func aHookObidRefusesIsRemovedFromTheControlPlane() async throws {
         let plane = Plane([(201, Self.made), (204, "")])
         let obid = RunnerStub { _ in (422, #"{"error": "name is up to 32 lower-case letters, digits or dashes."}"#) }

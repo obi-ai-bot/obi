@@ -1826,7 +1826,7 @@ The Cloudflare Tunnel phones reach this Mac through from anywhere (docs/remote-a
 
 Outside systems reach obid through a hook (#1128): an address on Oby's control plane (docs/remote-access.md, `POST /h/{id}`), which passes each delivery through the Mac's tunnel to the gateway, and a secret only obid holds. There's no screen for hooks: a monitoring tool's row in Settings › Connectors makes its hook (#1311, #1312), calling the control plane for the address first and then obid; if obid refuses, the address goes again (apps/mac/app/Hooks.swift).
 
-**The registry**, `home/hooks.json` (0600): each hook's `id`, `name`, `source`, `repo`, `url`, `createdAt` and `lastDelivery` (`{"at", "result"}`, `result` one of `accepted`, `duplicate`, `bad signature`, `too large`, `too many`), never its secret, which is in the vault as `oby.hook.<name>`. Loopback only, with obid's API token: none of these is on the gateway's allowlist.
+**The registry**, `home/hooks.json` (0600): each hook's `id`, `name`, `source`, `repo`, `url`, `createdAt` and `lastDelivery` (`{"at", "result"}`, `result` one of `accepted`, `duplicate`, `bad signature`, `too large`, `too many`), never its secret, which is in the vault as `oby.hook.<name>`. Loopback only, with obid's API token: none of these is on the gateway's allowlist. A refused delivery's `lastDelivery` is written to the file (and sent as a `hooks` event) only when its result changes, so a flood of unsigned posts is one write.
 
 - **`GET /v1/hooks`** answers the list.
 - **`POST /v1/hooks`** with `{"id", "url", "name", "source", "secret", "repo"}` keeps one: `201` and the hook, or `422` with why. `id` is the control plane's (32 lower-case letters and digits) and `url` its `https://…/h/<id>`; `name` up to 32 lower-case letters, digits or dashes, unique (`409`); `source` `github` or `generic` (#1311 and #1312 add theirs); `secret` 32 to 512 printable characters the vault accepts; `repo`, optional, one of obid's `repos`.
@@ -1839,7 +1839,7 @@ Outside systems reach obid through a hook (#1128): an address on Oby's control p
 2. a body over 1 MiB is `413`, before it's read whole;
 3. more than 120 a minute to one hook is `429`;
 4. the sender's signature, before anything in the body is read: `github` is `X-Hub-Signature-256: sha256=<hex of HMAC-SHA256(secret, body)>`, as GitHub documents it; `generic` is the same in `X-Oby-Signature-256`. Compared in constant time. Missing or wrong is `401`; a vault that can't be read is `503`;
-5. a body accepted on that hook in the last 24 hours is `200` `{"duplicate": true}` and nothing more, so a captured delivery can't be replayed into work;
+5. a body accepted on that hook in the last 24 hours is `200` `{"duplicate": true}` and nothing more, so a captured delivery can't be replayed into work; the digests are kept in `home/hooks-seen.json` (0600), so a restart doesn't forget them;
 6. otherwise `202` `{"accepted": true}`, recorded as `accepted`, and handed to its source's handler (#1129, #1130, #1311, #1312; none yet). GitHub's `ping` is accepted.
 
 The body is never logged, and nothing here writes it anywhere.

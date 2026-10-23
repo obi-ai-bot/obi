@@ -5,7 +5,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { HOOK_BODY_MAX, sweep } from "../src/app";
-import { DAY, Mac, testApp } from "./helpers";
+import { DAY, HOUR, Mac, testApp } from "./helpers";
 
 /// What the Worker would send the Mac, and what the Mac answers (202 by default).
 function gateway(status = 202) {
@@ -34,7 +34,7 @@ describe("hooks", () => {
     expect(made.status).toBe(201);
     const id = made.body.hook.id as string;
     expect(id).toMatch(/^[a-z0-9]{32}$/);
-    expect(made.body.hook.url).toBe(`https://oby-control.tetrix.pro/h/${id}`);
+    expect(made.body.hook.url).toBe(`https://oby-control.oby.test/h/${id}`);
     const listed = await app.call(mac, "GET", "/v1/installations/self/hooks");
     expect(listed.body.hooks.map((h: { id: string }) => h.id)).toEqual([id]);
     expect((await app.call(mac, "DELETE", `/v1/installations/self/hooks/${id}`)).status).toBe(204);
@@ -121,6 +121,29 @@ describe("hooks", () => {
     const away = await app.raw("POST", `/h/${id}`, "{}");
     expect(away.status).toBe(503);
     expect(away.body.error).toBe("That Oby isn't reachable now.");
+  });
+
+  it("counts only what obid doesn't refuse as unsigned against a hook's day", async () => {
+    const mac = gateway(401);
+    const app = testApp({ forward: mac.forward });
+    const { mac: key } = await withEndpoint(app);
+    const id = (await app.call(key, "POST", "/v1/installations/self/hooks")).body.hook.id as string;
+    await app.counted(`deliveries:day:${id}`, 1999);
+    for (let i = 0; i < 3; i++) expect((await app.raw("POST", `/h/${id}`, "{}")).status).toBe(401);
+    mac.answers(202);
+    expect((await app.raw("POST", `/h/${id}`, "{}")).status).toBe(202);
+    expect((await app.raw("POST", `/h/${id}`, "{}")).status).toBe(429);
+  });
+
+  it("the sweep takes the hooks of an installation that never made an endpoint", async () => {
+    const app = testApp();
+    const mac = await Mac.make();
+    await app.register(mac);
+    expect((await app.call(mac, "POST", "/v1/installations/self/hooks")).status).toBe(201);
+    app.time.advance(25 * HOUR);
+    await sweep(env, app.deps);
+    expect((await env.DB.prepare("SELECT count(*) AS n FROM hooks").first<{ n: number }>())?.n).toBe(0);
+    expect((await env.DB.prepare("SELECT count(*) AS n FROM installations").first<{ n: number }>())?.n).toBe(0);
   });
 
   it("limits each hook to 60 deliveries a minute, and an installation to 20 hooks", async () => {
