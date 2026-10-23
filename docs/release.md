@@ -59,6 +59,8 @@ Hand the `.p12` and its password, the `.p8`, the Key ID, the Issuer ID and the T
    ```
 
    `.env.local` at the repository root (gitignored) with `OBY_R2_ACCOUNT_ID`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` works too.
+
+   With wrangler, a login that sees more than one Cloudflare account won't pick one by itself, so `release.sh` hands it the bucket's account as `CLOUDFLARE_ACCOUNT_ID`, from `OBY_R2_ACCOUNT_ID` (the environment, `.env.local`, or the keychain item `oby-r2`/`account-id` above). It checks this before building anything: with several accounts and none chosen, it stops and says so. The account id isn't a secret, but it stays out of git.
 6. **Both architectures.** Homebrew's `rust` builds Apple Silicon only, and a release needs obid for both. Install `rustup` from Homebrew (`brew install rustup`), then `$(brew --prefix rustup)/bin/rustup toolchain install stable --profile minimal -t aarch64-apple-darwin,x86_64-apple-darwin`, and link its `cargo`, `rustc` and `rustup` into `~/.cargo/bin`, which the Bundle obid phase looks in first. Leave `~/.cargo/bin` off your shell's PATH if you build obid day to day with Homebrew's `rust`.
 7. **Optional:** `brew install create-dmg` for a DMG with a background (`apps/icon/dmg-background.png`, when it exists). Without it, the DMG is plain: Oby.app and an Applications link.
 
@@ -72,7 +74,7 @@ scripts/release.sh 0.2.0
 
 In order, it:
 
-0. **Runs the checks**, `swift test` and the Mac app's `MacTests`, side by side through [`scripts/tested.sh`](../scripts/tested.sh), skipping each one that already passed on this Mac on the same files (see "Tests a release skips"). `--full` runs both whatever the records say. Nothing is built unless they pass.
+0. **Runs the checks**, `swift test` and the Mac app's `MacTests`, one after the other (side by side, the load timed tests out on 0.3.0) through [`scripts/tested.sh`](../scripts/tested.sh), skipping each one that already passed on this Mac on the same files (see "Tests a release skips"). `--full` runs both whatever the records say. Nothing is built unless they pass.
 1. **Bumps the version**, once it has checked that the checkout is still clean and `HEAD` hasn't moved since it started. `MARKETING_VERSION` becomes `0.2.0` and `CURRENT_PROJECT_VERSION` the git commit count including the bump commit, so build numbers only grow; both in `apps/Oby.xcodeproj`, committed as `chore(release): Oby 0.2.0 (N)`.
 2. **Archives the `Oby` scheme** (Release) and exports it with Developer ID ([`apps/ExportOptions-DeveloperID.plist`](../apps/ExportOptions-DeveloperID.plist), `teamID` filled from `OBY_TEAM_ID`), on warm caches (see "Warm builds"). Then it checks that the checkout is still clean at the bump commit, the version, that the app and obid hold arm64 and x86_64 (`lipo`), every signature (`codesign --deep --strict`), and `obi-vm` (see "The guest image"), and scans the app with gitleaks before anything leaves the Mac.
 3. **Notarizes the app** (`xcrun notarytool submit --keychain-profile oby-notary --wait`), staples the ticket, validates it and checks it with `spctl`. While Apple works, it scans the commits since the last `v*` tag with gitleaks, and gathers the release notes and the published appcast.
@@ -83,6 +85,8 @@ In order, it:
 8. **Tags `v0.2.0`.**
 
 Each step prints how long the release has run (`==> [m:ss]`). Everything lands in `build/release/` (gitignored), with `swift-test.log`, `mac-tests.log`, `archive.log`, `export.log`, `notarize-app.log` and `notarize-dmg.log` when something fails. If the release stops part way, it stops what it started in the background (the checks, a notarization) and detaches any DMG it mounted. The script prints no credential and never runs with `set -x`.
+
+If a release stops at the upload (its DMG and appcast are built, notarized and signed in `build/release/`), `scripts/release.sh 0.2.0 --from-upload`, on the release's own `chore(release)` commit, publishes them with the same checks: the DMG, its public copy compared with it, the appcast, the tag. It refuses without that commit, the files, an appcast entry for the version, or a DMG Gatekeeper accepts.
 
 Then push the commit and the tag: `git push origin HEAD v0.2.0`. Shipped Obys pick the update up within 6 hours; **Check for Updates…** gets it now.
 
