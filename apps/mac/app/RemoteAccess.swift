@@ -48,6 +48,13 @@ final class RemoteAccess {
     private(set) var busy = false
     /// What went wrong last, for Settings to show; nil once something works.
     private(set) var problem: String?
+    /// The account this Mac signed in with, as the control plane said last (kept in the defaults).
+    private(set) var account: ControlPlane.Account?
+    /// What the control plane signs in with, Google's first (`GET /v1/auth`): every provider until
+    /// it has said, so an old control plane still offers both.
+    private(set) var providers = ControlPlane.Provider.allCases
+    /// The Google Workspaces a members-only control plane is for ("deskree.com"); empty: anyone.
+    private(set) var workspaces: [String] = []
 
     @ObservationIgnored private let plane: ControlPlane
     @ObservationIgnored private let secrets: any VaultStore
@@ -70,6 +77,7 @@ final class RemoteAccess {
         self.host = host
         on = defaults.bool(forKey: "remote.enabled")
         hostname = defaults.string(forKey: "remote.hostname")
+        account = defaults.string(forKey: "remote.provider").map { ControlPlane.Account(provider: $0, domain: defaults.string(forKey: "remote.domain")) }
         host.onState = { [weak self] state in self?.tunnel = state }
     }
 
@@ -78,11 +86,31 @@ final class RemoteAccess {
     static let needsThisMac = "Remote access reaches Oby's engine on this Mac: choose This Mac in Settings › Runner first."
 
     /// Turning on needs a sign-in first: this Mac has no hostname (never set up, forgotten, or
-    /// away 30 days), so Settings offers the providers' buttons instead of the switch.
+    /// away 30 days), so Settings offers the providers' buttons, and the switch waits.
     var signsInFirst: Bool { !on && hostname == nil }
 
-    /// Settings' buttons when `signsInFirst`, in order: Apple's, then Google's.
-    static let signInButtons = ControlPlane.Provider.allCases.map { (title: "Sign in with \($0.name)", provider: $0) }
+    /// Settings' "Signed in with": "Google · deskree.com", or "Apple".
+    var accountName: String? {
+        guard let account else { return nil }
+        let name = ControlPlane.Provider(rawValue: account.provider)?.name ?? account.provider.capitalized
+        return account.domain.map { "\(name) · \($0)" } ?? name
+    }
+
+    /// Asks the control plane what it signs in with, for Settings' buttons. Offline, or an older
+    /// control plane: both stay, and a refusal says why.
+    func loadSignInOptions() async {
+        guard let options = try? await plane.signInOptions() else { return }
+        let offered = ControlPlane.Provider.allCases.filter { options.providers.contains($0.rawValue) }
+        if !offered.isEmpty { providers = offered }
+        workspaces = options.workspaces
+    }
+
+    private func keep(_ account: ControlPlane.Account?) {
+        guard let account else { return }
+        self.account = account
+        defaults.set(account.provider, forKey: "remote.provider")
+        defaults.set(account.domain, forKey: "remote.domain")
+    }
 
     /// Settings' one line about the tunnel.
     var status: String {
@@ -154,12 +182,14 @@ final class RemoteAccess {
     func checkIn() async {
         do {
             let mine = try await plane.installation(try signer())
+            keep(mine.account)
             if mine.endpoint?.hostname != hostname { await lost() }
         } catch let failure as ControlPlane.Failure where failure.status == 410 {
             try? await host.stop()
             hostname = nil
+            account = nil
             on = false
-            for key in ["remote.hostname", "remote.enabled"] { defaults.removeObject(forKey: key) }
+            for key in ["remote.hostname", "remote.enabled", "remote.provider", "remote.domain"] { defaults.removeObject(forKey: key) }
             problem = "This Mac was away from remote access for 30 days. Sign in again to turn it on."
         } catch {
             // Offline, or the control plane is down: the next check-in tries again.
@@ -182,7 +212,7 @@ final class RemoteAccess {
     /// know the key, gets its hostname and tunnel token, and runs the tunnel. Again later (after a
     /// reinstall, or the keychain lost the token) it's the same installation and hostname, as long
     /// as the key is the same, with no sign-in.
-    func turnOn(with provider: ControlPlane.Provider = .apple) async {
+    func turnOn(with provider: ControlPlane.Provider = .google) async {
         var evicted: String?
         await attempt {
             try host.ready()
@@ -227,10 +257,11 @@ final class RemoteAccess {
                 }
             }
             for key in [Self.keyKey, Self.tokenKey] { try secrets.remove(key) }
-            for key in ["remote.hostname", "remote.enabled"] { defaults.removeObject(forKey: key) }
+            for key in ["remote.hostname", "remote.enabled", "remote.provider", "remote.domain"] { defaults.removeObject(forKey: key) }
             checkIns?.cancel()
             checkIns = nil
             hostname = nil
+            account = nil
             on = false
         }
     }
@@ -239,7 +270,7 @@ final class RemoteAccess {
     /// `provider`. Returns the name of the Mac the account gave up to make room, if it did.
     private func registered(_ signer: ControlPlane.Signer, with provider: ControlPlane.Provider) async throws -> String? {
         do {
-            _ = try await plane.installation(signer)
+            keep(try await plane.installation(signer).account)
             return nil
         } catch let failure as ControlPlane.Failure where failure.status == 410 {
             // Not registered: sign in first.
@@ -252,6 +283,7 @@ final class RemoteAccess {
             throw Shell.Failure(message: "Sign in with \(provider.name) didn't finish. Try again.")
         }
         let registration = try await plane.register(signer, name: Host.current().localizedName ?? "Mac", signIn: (state: signIn.state, code: code))
+        keep(registration.installation.account)
         return registration.evicted?.name
     }
 

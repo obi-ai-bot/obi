@@ -42,7 +42,7 @@ export class CloudflareSetupError extends Error {}
 interface Envelope<T> {
   success?: boolean;
   result?: T;
-  errors?: { code?: number; message?: string }[];
+  errors?: { code?: number; message?: string; error_chain?: { code?: number; message?: string }[] }[];
 }
 
 export class CloudflareAPI implements TunnelAPI {
@@ -50,7 +50,8 @@ export class CloudflareAPI implements TunnelAPI {
     private readonly token: string,
     private readonly account: string,
     private readonly zone: string,
-    private readonly fetcher: typeof fetch = fetch,
+    // Bound: workerd refuses `fetch` called as another object's method ("Illegal invocation").
+    private readonly fetcher: typeof fetch = (input, init) => fetch(input, init),
   ) {}
 
   async createTunnel(name: string, secret: string): Promise<{ id: string }> {
@@ -121,7 +122,11 @@ export class CloudflareAPI implements TunnelAPI {
       // Not JSON: the status says enough.
     }
     if (!response.ok || envelope.success === false) {
-      const said = envelope.errors?.map((error) => error.message).filter(Boolean).join("; ") || `HTTP ${response.status}`;
+      // Cloudflare's own codes too (6003 and its chain say which header it refused); never the request.
+      const said =
+        envelope.errors
+          ?.map((error) => [error.code, error.message, ...(error.error_chain ?? []).map((link) => `${link.code} ${link.message}`)].filter(Boolean).join(" "))
+          .join("; ") || `HTTP ${response.status}`;
       throw new CloudflareError(`Couldn't ${step}: ${said}`);
     }
     return envelope.result as T;
@@ -131,8 +136,12 @@ export class CloudflareAPI implements TunnelAPI {
 /// The API from the Worker's secrets; without them, one that says so when first used, so
 /// installations still work in `wrangler dev`.
 export function tunnelsFromEnv(env: Env): TunnelAPI {
-  if (env.CF_API_TOKEN && env.CF_ACCOUNT_ID && env.CF_ZONE_ID) {
-    return new CloudflareAPI(env.CF_API_TOKEN, env.CF_ACCOUNT_ID, env.CF_ZONE_ID);
+  // A pasted secret can carry a newline, spaces or a "Bearer " of its own: Cloudflare refuses that
+  // header ("Invalid request headers").
+  const clean = (value?: string) => (value ?? "").trim().replace(/^Bearer\s+/i, "");
+  const [token, account, zone] = [clean(env.CF_API_TOKEN), clean(env.CF_ACCOUNT_ID), clean(env.CF_ZONE_ID)];
+  if (token && account && zone) {
+    return new CloudflareAPI(token, account, zone);
   }
   const missing = (): never => {
     throw new CloudflareSetupError("CF_API_TOKEN, CF_ACCOUNT_ID and CF_ZONE_ID aren't all set: wrangler secret put each, or put them in .dev.vars.");
