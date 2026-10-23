@@ -129,12 +129,17 @@ struct ConnectorsTests {
         #expect(on.state == .connected && on.way == .button("Disconnect…", .disconnectSlack))
         #expect(on.also == .button("Watcher: Send Slack Messages", .setWatchLive(true)))
         #expect(on.how.hasSuffix("Dmitry watcher: a dry run, it tells you in Oby and only writes down the Slack message."))
+        #expect(on.more == .button("Reviews: Tell Authors on Slack", .setTellAuthors(true)))
+        let telling = Connectors.slack(SlackStatus(connected: true, tellAuthors: true), watch: nil, place: "This Mac", local: true)
+        #expect(telling.more == .button("Reviews: Don't Tell Authors", .setTellAuthors(false)))
+        #expect(telling.how.contains("to the author of a pull request once your review of it is posted"))
+        #expect(first.more == nil, "only once connected")
         let live = WatchStatus(rules: .init(name: "Dmitry watcher", live: true, enabled: true))
         #expect(Connectors.slack(SlackStatus(connected: true), watch: live, place: "This Mac", local: true).also
                 == .button("Watcher: Dry Run Only", .setWatchLive(false)))
 
         let remote = Connectors.slack(SlackStatus(), watch: nil, place: "tetrix-lab", local: false)
-        #expect(remote.also == nil && remote.way == .steps("Connect or disconnect it on tetrix-lab itself, with Oby there."))
+        #expect(remote.also == nil && remote.more == nil && remote.way == .steps("Connect or disconnect it on tetrix-lab itself, with Oby there."))
     }
 
     /// Connect takes only what looks like each kind of token.

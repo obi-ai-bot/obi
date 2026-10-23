@@ -15,11 +15,13 @@ nonisolated struct SlackStatus: Decodable, Equatable, Sendable {
     var socket = false
     /// Why obid was signed out, in its words, or nil.
     var error: String?
+    /// Whether a posted review's author is told on Slack, as the owner (on unless turned off).
+    var tellAuthors = false
 
-    private enum Keys: String, CodingKey { case connected, team, socket, error }
+    private enum Keys: String, CodingKey { case connected, team, socket, error, tellAuthors }
 
-    init(connected: Bool = false, team: String? = nil, socket: Bool = false, error: String? = nil) {
-        (self.connected, self.team, self.socket, self.error) = (connected, team, socket, error)
+    init(connected: Bool = false, team: String? = nil, socket: Bool = false, error: String? = nil, tellAuthors: Bool = false) {
+        (self.connected, self.team, self.socket, self.error, self.tellAuthors) = (connected, team, socket, error, tellAuthors)
     }
 
     init(from decoder: any Decoder) throws {
@@ -28,12 +30,14 @@ nonisolated struct SlackStatus: Decodable, Equatable, Sendable {
         team = try? keys.decodeIfPresent(String.self, forKey: .team)
         socket = (try? keys.decodeIfPresent(Bool.self, forKey: .socket)) ?? false
         error = try? keys.decodeIfPresent(String.self, forKey: .error)
+        tellAuthors = (try? keys.decodeIfPresent(Bool.self, forKey: .tellAuthors)) ?? false
     }
 
     /// The row's tooltip: how it's connected, or what connecting takes.
     var how: String {
         if connected {
-            return "Connected to \(team ?? "your workspace") with your Slack app's tokens. Oby reads messages for the watcher and writes only to you."
+            return "Connected to \(team ?? "your workspace") with your Slack app's tokens. Oby reads messages for the watcher and writes to you"
+                + (tellAuthors ? ", and, as you, to the author of a pull request once your review of it is posted." : ".")
                 + (socket ? " The channel listener's app-level token is set." : " No app-level token: the channel listener is off.")
         }
         return error ?? "You paste your Slack app's two tokens once (OAuth & Permissions › OAuth Tokens). obid keeps them in its vault."
@@ -172,6 +176,12 @@ extension Runner {
     func connectSlack(user: String, bot: String, app: String?) async throws -> SlackStatus {
         struct Body: Encodable { var user: String; var bot: String; var app: String? }
         return try await call("PUT", "v1/slack", body: Body(user: user, bot: bot, app: app))
+    }
+
+    /// Whether a posted review's author is told on Slack, as the owner.
+    func setSlackTellAuthors(_ on: Bool) async throws -> SlackStatus {
+        struct Body: Encodable { var tellAuthors: Bool }
+        return try await call("PATCH", "v1/slack", body: Body(tellAuthors: on))
     }
 
     /// obid forgets the Slack tokens: the watcher reads only GitHub until they're pasted again.

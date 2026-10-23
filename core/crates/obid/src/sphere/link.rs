@@ -806,6 +806,97 @@ impl Link {
         }
     }
 
+    /// After the owner's review was posted: its author is told on Slack, in the background
+    /// (crate::listen::tell_author), and what was sent is in the job's `outgoing`.
+    fn tell_author(self: &Arc<Self>, review: &Item) {
+        let Some(slack) = self.jobs.slack().filter(|s| s.tells_authors()) else {
+            return;
+        };
+        let pr = review.watch.as_deref().map(|w| &w["pr"]);
+        let (Some(repo), Some(number)) = (
+            pr.and_then(|p| p["repo"].as_str()).map(str::to_owned),
+            pr.and_then(|p| p["number"].as_u64()),
+        ) else {
+            return;
+        };
+        let verdict = review
+            .watch
+            .as_deref()
+            .and_then(|w| w["verdict"].as_str())
+            .unwrap_or("comment")
+            .to_owned();
+        let link = self.clone();
+        let job = review.job.clone();
+        tokio::spawn(async move {
+            let author = crate::listen::pr_author(&repo, number).await;
+            match crate::listen::tell_author(&slack, &job, &repo, number, &verdict, author).await {
+                Some(crate::listen::Told::Sent(person)) => {
+                    link.jobs.sent_on_slack(&job, &person.id)
+                }
+                Some(crate::listen::Told::Ask(item)) => link.add_items(vec![*item]),
+                None => {}
+            }
+        });
+    }
+
+    /// Send, or Send and Remember (`answer`), on a review's author's item claimed as done: Oby's
+    /// message to the person it names, as the owner; Send and Remember also keeps who they are.
+    async fn send_to_author(&self, open: Item, answer: &str) -> Result<Value, ApiError> {
+        let watch = open.watch.as_deref().cloned().unwrap_or_default();
+        let (person, pr) = (&watch["slack"], &watch["pr"]);
+        let named = (
+            person["user"].as_str(),
+            person["name"].as_str(),
+            person["login"].as_str(),
+            pr["repo"].as_str(),
+            pr["number"].as_u64(),
+        );
+        let sent = match (named, self.jobs.slack()) {
+            ((Some(user), Some(name), Some(login), Some(repo), Some(number)), Some(slack)) => slack
+                .send_as_owner(
+                    user,
+                    &crate::slack::review_message(
+                        repo,
+                        number,
+                        watch["verdict"].as_str().unwrap_or("comment"),
+                    ),
+                )
+                .await
+                .map(|_| {
+                    let person = crate::slack::Person {
+                        id: user.to_owned(),
+                        name: name.to_owned(),
+                    };
+                    if answer == crate::listen::SEND_AND_REMEMBER
+                        && let Err(why) = slack.remember(login, person)
+                    {
+                        tracing::warn!("{why}");
+                    }
+                    user.to_owned()
+                }),
+            (_, None) => Err(crate::slack::NOT_CONNECTED.to_owned()),
+            _ => Err("the item names nobody to send it to".to_owned()),
+        };
+        match sent {
+            Ok(user) => {
+                self.jobs.sent_on_slack(&open.job, &user);
+                let mut item = open;
+                item.done = Some(time::now());
+                item.answer = Some(answer.to_owned());
+                self.lock().inbox.insert(item.id.clone(), item.clone());
+                self.save_item(&item);
+                Ok(item.to_json())
+            }
+            Err(why) => {
+                self.lock().inbox.insert(open.id.clone(), open.clone());
+                Err(api(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Nothing was sent: {why}."),
+                ))
+            }
+        }
+    }
+
     /// Items obid made (crate::listen): each one that never was in the inbox, open or done.
     pub fn add_items(&self, items: Vec<Item>) {
         let mut changed = Vec::new();
@@ -3854,6 +3945,7 @@ impl Link {
                     item.answer = Some(crate::listen::APPROVE.into());
                     self.lock().inbox.insert(item.id.clone(), item.clone());
                     self.save_item(&item);
+                    self.tell_author(&item);
                     Ok(item.to_json())
                 }
                 Err(why) => {
@@ -3875,6 +3967,33 @@ impl Link {
                     ))
                 }
             };
+        }
+        // A review's author on Slack (crate::listen::tell_author): Send, or Send and Remember,
+        // claims the item under the lock (done), then sends as the owner with no lock held; a send
+        // that fails leaves it open again.
+        let telling = {
+            let mut state = self.lock();
+            let sending = matches!(&given, Given::Answer(a)
+                if a == crate::listen::SEND || a == crate::listen::SEND_AND_REMEMBER);
+            let item = state
+                .inbox
+                .get(id)
+                .filter(|i| {
+                    sending
+                        && i.done.is_none()
+                        && i.kind == "listen"
+                        && i.options.iter().any(|o| o == crate::listen::SEND)
+                })
+                .cloned();
+            if item.is_some()
+                && let Some(kept) = state.inbox.get_mut(id)
+            {
+                kept.done = Some(time::now());
+            }
+            item
+        };
+        if let (Some(open), Given::Answer(answer)) = (telling, &given) {
+            return self.send_to_author(open, answer).await;
         }
         // An offer of GitHub work: its start reads GitHub first, with no lock held, so its start
         // answer claims the item under the lock (done), as Start does: nothing settles it

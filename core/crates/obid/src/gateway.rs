@@ -783,6 +783,7 @@ mod tests {
             "event: job\ndata: {\"id\":\"j1\"}\n\nevent: inbox\ndata: {\"id\":\"i1\"}\n\n"
         );
         assert!(!allows(&Method::GET, "/v1/slack"));
+        assert!(!allows(&Method::PATCH, "/v1/slack"));
         // Sentry's login and its projects are the Mac's alone (crate::sentry).
         assert!(!allows(&Method::GET, "/v1/sentry"));
         assert!(!allows(&Method::PUT, "/v1/sentry"));

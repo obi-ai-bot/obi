@@ -343,6 +343,7 @@ pub async fn serve(
         vault::shared().expect("the vault is installed first"),
         events.clone(),
     );
+    jobs.use_slack(slack.clone());
     let sentry = sentry::Sentry::open(
         &config.home,
         vault::shared().expect("the vault is installed first"),

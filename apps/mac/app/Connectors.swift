@@ -45,6 +45,8 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
         case disconnectSlack
         /// `PATCH /v1/watch`: the watcher's Slack message on, or back to a dry run.
         case setWatchLive(Bool)
+        /// `PATCH /v1/slack`: whether a posted review's author is told on Slack.
+        case setTellAuthors(Bool)
         /// Asks for Sentry's address, the organization and a token, and gives them to obid (`PUT /v1/sentry`).
         case connectSentry
         /// `DELETE /v1/sentry`: obid forgets the Sentry token.
@@ -77,6 +79,8 @@ nonisolated struct Connector: Identifiable, Equatable, Sendable {
     var way: Way?
     /// A second button after `way`'s: "Another Tetrix…".
     var also: Way? = nil
+    /// A third, in a connected row's context menu: Slack's "Reviews: Don't Tell Authors".
+    var more: Way? = nil
     /// The SF Symbol in front of it, where it has no brand mark.
     var symbol = "link"
     /// Its brand's mark in the asset catalog (Brands/, from Sangam's brands.tsx).
@@ -315,12 +319,16 @@ nonisolated enum Connectors {
 
     /// Slack, held by obid for its watcher with the owner's own Slack app's tokens, pasted once.
     /// Only obid on this Mac gets buttons, as for Tetrix. Connected, the watcher's Slack message is
-    /// turned on or back to a dry run here.
+    /// turned on or back to a dry run here, and telling a posted review's author on or off.
     static func slack(_ status: SlackStatus, watch: WatchStatus?, place: String, local: Bool) -> Connector {
         let how = [status.how, watch?.line].compactMap { $0 }.joined(separator: "\n")
         let row = { (state: Connector.State, way: Connector.Way?, also: Connector.Way?) in
             Connector(id: "slack", name: "Slack", about: SlackStatus.about, place: place, how: how, state: state,
-                      way: way, also: also, brand: "slack")
+                      way: way, also: also, more: local && status.connected
+                          ? .button(status.tellAuthors ? "Reviews: Don't Tell Authors" : "Reviews: Tell Authors on Slack",
+                                    .setTellAuthors(!status.tellAuthors))
+                          : nil,
+                      brand: "slack")
         }
         guard local else {
             return row(status.connected ? .connected : .available,
