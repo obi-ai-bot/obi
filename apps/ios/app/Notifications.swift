@@ -1,3 +1,4 @@
+import CryptoKit
 import LocalAuthentication
 import OSLog
 import UIKit
@@ -168,13 +169,15 @@ final class Notifications: NSObject, UIApplicationDelegate, UNUserNotificationCe
 
 /// Deskree's push relay (cloud/control-plane, `/v1/push/devices`): Apple's push key is Deskree's,
 /// so the relay keeps this iPhone's APNs token and forwards obid's sealed alerts to it, never
-/// reading them. obid gets the relay's `pushId` and `pushSecret` and the sealing key's public half,
-/// never the token.
+/// reading them. obid gets the relay's `pushId`, a `pushKey` made from the `pushSecret`, and the
+/// sealing key's public half; never the token or the `pushSecret`, which only re-registers and
+/// unregisters this iPhone.
 enum PushRelay {
     /// What obid gets (`POST /v1/notifications`, `apns`).
     struct HandOver: Codable, Equatable {
         var pushId: String
-        var pushSecret: String
+        /// What obid signs its pushes to the relay with (`pushKey(_:)`).
+        var pushKey: String
         /// The X25519 public key obid seals to, raw, base64url.
         var sealKey: String
         var relay: String
@@ -212,8 +215,14 @@ enum PushRelay {
             registration = new
         }
         guard let registration else { throw RunnerError(message: "The push relay registered nothing.") }
-        return HandOver(pushId: registration.pushId, pushSecret: registration.pushSecret,
+        return HandOver(pushId: registration.pushId, pushKey: try pushKey(registration.pushSecret),
                         sealKey: try SealedPush.publicKey(), relay: url.absoluteString)
+    }
+
+    /// base64url(HMAC-SHA256 of "oby push key v1" under the `pushSecret`'s 32 bytes).
+    nonisolated static func pushKey(_ pushSecret: String) throws -> String {
+        guard let secret = Data(base64url: pushSecret) else { throw RunnerError(message: "The push relay's pushSecret isn't base64url.") }
+        return Data(HMAC<SHA256>.authenticationCode(for: Data("oby push key v1".utf8), using: SymmetricKey(data: secret))).base64url
     }
 
     private static func post(_ apns: String, replacing old: Registration?, to relay: URL) async throws -> Registration {
@@ -226,8 +235,8 @@ enum PushRelay {
                                                          pushId: old?.pushId, pushSecret: old?.pushSecret))
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        // The relay no longer knows the old one: a new registration.
-        if old != nil, (400..<500).contains(status) { return try await post(apns, replacing: nil, to: relay) }
+        // The relay no longer knows the old one: a new registration. A 422 is a token Apple refused.
+        if old != nil, [401, 403, 404].contains(status) { return try await post(apns, replacing: nil, to: relay) }
         guard (200..<300).contains(status) else { throw RunnerError(message: "The push relay answered \(status).", status: status) }
         let answer = try JSONDecoder().decode(Answer.self, from: data)
         return Registration(pushId: answer.pushId, pushSecret: answer.pushSecret, apns: apns)

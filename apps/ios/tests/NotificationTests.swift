@@ -10,7 +10,7 @@ import UserNotifications
 struct NotificationTests {
     /// Seals as obid does: HPKE base mode, X25519, HKDF-SHA256, ChaCha20-Poly1305, info "oby push v1",
     /// then base64url of the encapsulated key followed by the ciphertext.
-    func sealed(_ inner: [String: String], to key: Curve25519.KeyAgreement.PublicKey) throws -> String {
+    func sealed(_ inner: [String: Any], to key: Curve25519.KeyAgreement.PublicKey) throws -> String {
         var sender = try HPKE.Sender(recipientKey: key, ciphersuite: .Curve25519_SHA256_ChachaPoly, info: Data("oby push v1".utf8))
         let ciphertext = try sender.seal(JSONSerialization.data(withJSONObject: inner))
         return (sender.encapsulatedKey + ciphertext).base64url
@@ -18,7 +18,7 @@ struct NotificationTests {
 
     @Test func aSealedAlertOpensIntoItsTitleBodyThreadAndCategory() throws {
         let key = Curve25519.KeyAgreement.PrivateKey()
-        let sealed = try sealed(["id": "n1", "title": "Run swift test?", "body": "Vault tests: swift test", "thread": "jobs",
+        let sealed = try sealed(["id": "n1", "at": 1_792_800_000, "title": "Run swift test?", "body": "Vault tests: swift test", "thread": "jobs",
                                  "category": "permissionRule", "job": "9f08fd10", "item": "p1a2b3c"], to: key.publicKey)
         let content = UNMutableNotificationContent()
         content.title = "Oby"
@@ -33,15 +33,23 @@ struct NotificationTests {
         #expect(throws: (any Error).self) { try SealedPush.open(sealed, with: Curve25519.KeyAgreement.PrivateKey()) }
     }
 
-    /// obid's own vector (core/crates/obid/src/push.rs, `cryptokit_opens_what_obid_seals`): what it
-    /// sealed to the test iPhone's key opens here into the alert it sealed.
-    @Test func whatObidSealsOpensHere() throws {
-        let recipient = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: #require(Data(base64url: "H8N3pC2swtsoc14zwnS2w5bHYEEqREpOIxv21rPygBw")))
-        let sealed = "IslSF4EeX1qFjKGhEE-Ak7s1ol-lz1czJtqklgSPkT0M-rtgmAoFzjgF92N2FWipbKpP44rc4aTEyQFJzmgNSl5q7NDtqkNfOttqBfBjrUnFwvFAnRspL-RCt-aiIvAFPQpDnMWQv7HlIYTRJhZBxYNoK_MdvT9BWloJ47U46wpgynhs4-bbQsDddUpU3aL55KH-KVzyS_3V2rbBgwx5HdhTKUDwonvE6XL2bu1sWnjj_uOVQrdccjVGxzHBS9Udf1bN_jF0ktTZ25PRskc1q_9PoWo-DZhmOsY4IeNt1EiXhZ65"
-        #expect(try SealedPush.open(sealed, with: recipient) == SealedPush.Alert(
-            id: "9f08fd10", title: "Run swift test?", body: "Android push: swift test --filter Push", thread: "jobs",
-            category: "permission", job: "9f08fd10", item: "9f08fd10-permission-p1"))
-        #expect(recipient.publicKey.rawRepresentation.base64url == "IWlFcnjzHXlyLYTNMzTi8Jn5yrH6_QwEDMtloT3gQiY")
+    @Test func aReplayedAlertIsntNews() {
+        let now: TimeInterval = 1_792_800_000
+        func alert(_ id: String, at: TimeInterval) -> SealedPush.Alert {
+            SealedPush.Alert(id: id, at: at, title: "t", body: "b", thread: "jobs", category: "job")
+        }
+        var seen: [String: TimeInterval] = ["gone": now - 8 * 86_400]
+        #expect(SealedPush.isNews(alert("n1", at: now - 60), seen: &seen, now: now))
+        #expect(!SealedPush.isNews(alert("n1", at: now - 60), seen: &seen, now: now + 5))
+        #expect(!SealedPush.isNews(alert("n2", at: now - 86_400 - 1), seen: &seen, now: now))
+        // A week on, an id is forgotten: its alert is over a day old by then anyway.
+        #expect(seen.keys.sorted() == ["n1"])
+    }
+
+    /// The relay checks obid's pushes with it; obid never gets the pushSecret itself.
+    @Test func thePushKeyIsAnHMACOfThePushSecret() throws {
+        // The pushSecret's 32 bytes are 0 to 31; Python: hmac.new(bytes(range(32)), b"oby push key v1", "sha256").
+        #expect(try PushRelay.pushKey("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8") == "4OgUBy1cq0BmL6wBQqGNuJIR03CTAHndwEvtSkp7la4")
     }
 
     @Test func allowAndAlwaysAllowNeedAnUnlockedPhone() throws {

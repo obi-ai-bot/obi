@@ -10,7 +10,10 @@ import UserNotifications
 nonisolated enum SealedPush {
     /// What obid seals: the alert's words, its thread and category, and what a tap opens.
     struct Alert: Decodable, Equatable {
+        /// Unique per alert: one already shown isn't shown again (`isNews`).
         var id: String
+        /// When obid sealed it, in Unix seconds.
+        var at: TimeInterval
         var title: String
         var body: String
         var thread: String
@@ -29,6 +32,17 @@ nonisolated enum SealedPush {
         var recipient = try HPKE.Recipient(privateKey: key, ciphersuite: .Curve25519_SHA256_ChachaPoly, info: info,
                                            encapsulatedKey: Data(data.prefix(32)))
         return try JSONDecoder().decode(Alert.self, from: recipient.open(data.dropFirst(32)))
+    }
+
+    /// Whether an opened alert is news: sealed within a day, and not shown already. A replayed one
+    /// (by the relay, or by anyone holding obid's pushKey) isn't. `seen` is id → when it was shown,
+    /// kept a week and at most 500.
+    static func isNews(_ alert: Alert, seen: inout [String: TimeInterval], now: TimeInterval = Date.now.timeIntervalSince1970) -> Bool {
+        seen = seen.filter { now - $0.value < 7 * 86_400 }
+        guard abs(now - alert.at) < 86_400, seen[alert.id] == nil else { return false }
+        seen[alert.id] = now
+        if seen.count > 500, let oldest = seen.min(by: { $0.value < $1.value }) { seen[oldest.key] = nil }
+        return true
     }
 
     /// Puts the opened alert in place of the relay's generic "Open Oby to see it."
