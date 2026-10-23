@@ -1575,15 +1575,13 @@ fn past_100_open_events_the_oldest_are_settled() {
     for n in 6..=105 {
         assert!(open_ids.contains(&id(&format!("burst-{n}"))), "burst-{n}");
     }
-    // The inbox lists open items oldest first, in the order they came, within each sort
-    // (crate::triage): burst-7 assigned issue 7 again while assigned-7 was open, so it's
-    // `ignore`, listed last.
+    // The inbox lists open items oldest first: in the order they came. burst-7 assigned issue 7
+    // again while assigned-7 was open, but that one is settled now: it's no longer a duplicate
+    // (`ignore`), and lists in its place (crate::triage).
     assert_eq!(open[0]["id"], id("burst-6"));
-    assert_eq!(open[98]["id"], id("burst-105"));
-    assert_eq!(
-        (&open[99]["id"], &open[99]["triage"]),
-        (&id("burst-7"), &json!("ignore"))
-    );
+    assert_eq!(open[99]["id"], id("burst-105"));
+    assert_eq!(open[1]["id"], id("burst-7"));
+    assert_ne!(open[1]["triage"], "ignore");
     assert!(obid.stop().success());
 }
 
