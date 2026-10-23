@@ -366,8 +366,9 @@ final class SphereModel {
     /// Who this Mac's Oby acts for (obid's `owner`).
     var owner: String? { membership?.owner }
     /// The operator token's keychain item, on the Mac that deployed the Obysphere server (obi-sphere's
-    /// scripts/deploy.mjs). Every other Mac creates an Obysphere by signing in with Google, when the
-    /// server lets its Workspace (sphere-api.md section 3.1).
+    /// scripts/deploy.mjs), its account the server's host: a token only ever goes to the server it was
+    /// made for. Every other Mac creates an Obysphere by signing in with Google, when the server lets
+    /// its Workspace (sphere-api.md section 3.1).
     nonisolated static let operatorToken = KeychainVault(service: "obi-sphere-operator-token", label: "obi-sphere operator token")
     /// The team link the admin made last, kept so Settings can copy it again (its secret is shown once).
     nonisolated static let teamLinks = KeychainVault(service: "com.deskree.oby.sphere-link", label: "Oby Obysphere link")
@@ -468,12 +469,12 @@ final class SphereModel {
         let server = SphereServer(base: url)
         let body: [String: Any] = ["sphere": sphere, "name": name, "admin": ["owner": owner, "owner_key": key.publicKey]]
         var made = false
-        if let account = try Self.operatorToken.names().first, let operatorToken = try Self.operatorToken.value(account) {
+        if let host = url.host(), let operatorToken = try Self.operatorToken.value(host) {
             do {
                 _ = try await server.call("POST", "spheres", bearer: operatorToken, json: body)
                 made = true
             } catch let error as RunnerError where error.status == 401 {
-                // That token is for another server: sign in instead.
+                // The server's token was rotated since: sign in instead.
             }
         }
         if !made {
