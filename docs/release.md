@@ -12,7 +12,7 @@ Teammates install the DMG once, without a Gatekeeper warning, and from then on t
 | --- | --- | --- |
 | `OBY_TEAM_ID` | `3UV9W5SV7W` (Deskree) | Every target's `DEVELOPMENT_TEAM`. Switching every app to the Deskree team is this one line. |
 | `OBY_MAC_BUNDLE_ID` | `com.deskree.oby` | The Mac app (`.tests` for MacTests). |
-| `OBY_IPHONE_BUNDLE_ID` | `com.deskree.oby` | The iPhone app (one App ID with the Mac app's; `.watchkitapp` and `.watchkitapp.widget` for the Watch) (`.activity` for the Live Activity, `.tests` for iOSTests). See [apps/ios/app/README.md](../apps/ios/app/README.md). |
+| `OBY_IPHONE_BUNDLE_ID` | `com.deskree.oby.ios` | The iPhone app (an App ID of its own, so Xcode Cloud sees an iOS-only product; `.watchkitapp` and `.watchkitapp.widget` for the Watch) (`.activity` for the Live Activity, `.tests` for iOSTests). See [apps/ios/app/README.md](../apps/ios/app/README.md). |
 | `OBY_APPCAST_URL` | `https://downloads.oby.deskree.com/appcast.xml` | Where the Mac app looks for updates (`SUFeedURL`). Hosting is this one setting. |
 | `OBY_CONTROL_PLANE_URL` | `https://oby-control.deskree.com` | The control plane remote access signs in with (`ObyControlPlaneURL`). A self-hosted one's URL goes here ([remote-access.md, Run your own control plane](remote-access.md#run-your-own-control-plane)). |
 | `OBY_SPARKLE_PUBLIC_KEY` | `rcgwHqm6…YP34=` (generated 2026-10-20) | Sparkle's EdDSA public key (`SUPublicEDKey`). Its private half is in the release Mac's login keychain; every update must be signed with it, so export a copy (`generate_keys -x <file>`) to a safe place. |

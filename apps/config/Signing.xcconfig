@@ -8,7 +8,7 @@
 OBY_TEAM_ID = 3UV9W5SV7W
 
 OBY_MAC_BUNDLE_ID = com.deskree.oby
-OBY_IPHONE_BUNDLE_ID = com.deskree.oby
+OBY_IPHONE_BUNDLE_ID = com.deskree.oby.ios
 
 // Where the Mac app looks for updates (apps/mac/app/Info.plist, SUFeedURL): the appcast scripts/release.sh
 // writes and uploads. "//" starts a comment in an xcconfig, so the empty $() keeps the URL whole.
