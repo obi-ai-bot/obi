@@ -42,7 +42,7 @@ pub async fn start(
             .unwrap_or_default()
     });
     let repo = mapped.as_deref().unwrap_or(text("repo"));
-    if !config.repos.iter().any(|r| r.repo == repo) {
+    if config.repos.find(repo).is_none() {
         return Err(refused(
             StatusCode::CONFLICT,
             format!("obid doesn't work in {repo:?}: there's nothing to start."),

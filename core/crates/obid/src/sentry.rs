@@ -903,6 +903,7 @@ fn answer(shared: &Shared) -> Json<Value> {
         shared
             .config
             .repos
+            .get()
             .iter()
             .map(|r| r.repo.clone())
             .collect::<Vec<_>>()
@@ -974,7 +975,13 @@ async fn set_project(
         Some(Value::String(r)) => Some(Some(r.clone())),
         Some(_) => return wrong(),
     };
-    let repos: Vec<String> = shared.config.repos.iter().map(|r| r.repo.clone()).collect();
+    let repos: Vec<String> = shared
+        .config
+        .repos
+        .get()
+        .iter()
+        .map(|r| r.repo.clone())
+        .collect();
     match shared.sentry.set_project(&slug, follow, repo, &repos).await {
         Ok(()) => answer(&shared).into_response(),
         Err(error) => error.into_response(),

@@ -58,6 +58,158 @@ fn alive(pid: i32) -> bool {
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }
 
+/// The tools' own logins on the Mac that a test's obid finds: Claude Code's login file, Codex's
+/// (its access token ending `ends` seconds from now) with a stand-in `codex` on the PATH, and
+/// Cursor's login file. The folder of the stand-in.
+fn logins_on_the_mac(folder: &Path, ends: u64) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = folder.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("codex"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let home = folder.join("env-home");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(home.join(".claude/.credentials.json"), "{}").unwrap();
+    codex_login(&home, ends);
+    let cursor = home.join(if cfg!(target_os = "macos") {
+        ".cursor/auth.json"
+    } else {
+        ".config/cursor/auth.json"
+    });
+    std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    // Built at runtime, so a secret scan doesn't take the test's values for credentials.
+    std::fs::write(
+        &cursor,
+        json!({"accessToken": (["fake", "-access"].concat())}).to_string(),
+    )
+    .unwrap();
+    bin
+}
+
+/// Codex's own login in `home`, its access token ending `ends` seconds from now.
+fn codex_login(home: &Path, ends: u64) {
+    use base64::Engine;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(json!({"exp": now + ends}).to_string());
+    let login = json!({"tokens": {"access_token": format!("e30.{claims}.c2ln"), "refresh_token": (["r", "1"].concat())}});
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::write(home.join(".codex/auth.json"), login.to_string()).unwrap();
+}
+
+/// The tools' own logins listed as accounts: id, `signedIn`, `label`.
+fn own(obid: &Obid) -> Vec<(String, Value, Value)> {
+    accounts(obid)
+        .into_iter()
+        .filter(|a| ["default", "codex", "cursor"].contains(&a["id"].as_str().unwrap()))
+        .map(|a| {
+            (
+                a["id"].as_str().unwrap().to_owned(),
+                a["signedIn"].clone(),
+                a["label"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// The tools' own logins obid found and only offers (`availableLogins`): agent, id.
+fn offered(obid: &Obid) -> Vec<(String, String)> {
+    call(obid, "GET", "/v1/status", None).body["availableLogins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["agent"].as_str().unwrap().to_owned(),
+                a["id"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn ids(obid: &Obid) -> Vec<String> {
+    own(obid).into_iter().map(|(id, _, _)| id).collect()
+}
+
+/// On a fresh obid, the tools' own logins on the Mac are accounts for each tool with none, each with
+/// the status a run would meet (Codex's `Run codex once` while its token ends within 5 minutes); a
+/// tool with an account only gets its own login offered. Each is listed once; one the owner removed
+/// stays removed across a restart, offered again, until it's asked back.
+#[test]
+fn a_fresh_obid_lists_the_logins_already_on_the_mac() {
+    let folder = Folder::new("accounts-own");
+    let remote = folder.0.join("remote.git");
+    let mut config = config(&folder.0, &remote, &agent("fake-claude"));
+    config["agents"]["cursor"] = json!({"bin": agent("fake-cursor"), "accounts": []});
+    let bin = logins_on_the_mac(&folder.0, 60);
+    let mut obid = start(&folder.0, &config, Some(&bin));
+    assert_eq!(
+        own(&obid),
+        [
+            ("codex".into(), json!(false), json!("Run codex once")),
+            ("cursor".into(), json!(true), json!(null)),
+        ]
+    );
+    // Claude Code has an account (the configuration's `stub`): its own login is only offered.
+    assert_eq!(offered(&obid), [("claude".into(), "default".into())]);
+    // Codex ran once: its login can run again.
+    codex_login(&folder.0.join("env-home"), 3600);
+    assert_eq!(own(&obid)[0], ("codex".into(), json!(true), json!(null)));
+
+    let removed = call(&obid, "DELETE", "/v1/accounts/cursor", None);
+    assert_eq!(removed.status, 204, "{}", removed.text);
+    assert!(obid.stop().success());
+    let mut obid = start(&folder.0, &config, Some(&bin));
+    assert_eq!(ids(&obid), ["codex"]);
+    assert_eq!(
+        offered(&obid),
+        [
+            ("claude".into(), "default".into()),
+            ("cursor".into(), "cursor".into())
+        ]
+    );
+    for agent in ["cursor", "claude"] {
+        let back = add(&obid, json!({"agent": agent, "default": true}));
+        assert_eq!(back.status, 201, "{}", back.text);
+        assert_eq!(back.body["signedIn"], true);
+    }
+    assert!(offered(&obid).is_empty());
+    assert!(obid.stop().success());
+    let obid = start(&folder.0, &config, Some(&bin));
+    assert_eq!(ids(&obid), ["default", "codex", "cursor"]);
+}
+
+/// An obid that ran before keeps its accounts as they are: the logins it finds on the Mac are only
+/// offered, and listed on the owner's word.
+#[test]
+fn an_obid_that_ran_before_only_offers_the_logins_on_the_mac() {
+    let folder = Folder::new("accounts-offered");
+    let remote = folder.0.join("remote.git");
+    let mut config = config(&folder.0, &remote, &agent("fake-claude"));
+    config["agents"]["cursor"] = json!({"bin": agent("fake-cursor"), "accounts": []});
+    let bin = logins_on_the_mac(&folder.0, 3600);
+    std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+        .create(folder.0.join("home/jobs"))
+        .unwrap();
+    let obid = start(&folder.0, &config, Some(&bin));
+    assert!(own(&obid).is_empty(), "{:?}", own(&obid));
+    assert_eq!(
+        offered(&obid),
+        [
+            ("claude".into(), "default".into()),
+            ("codex".into(), "codex".into()),
+            ("cursor".into(), "cursor".into())
+        ]
+    );
+    let codex = add(&obid, json!({"agent": "codex", "default": true}));
+    assert_eq!(codex.status, 201, "{}", codex.text);
+    assert_eq!(ids(&obid), ["codex"]);
+    assert_eq!(offered(&obid).len(), 2);
+}
+
 #[test]
 fn accounts_are_added_renamed_and_removed_and_kept_across_restarts() {
     let folder = Folder::new("accounts-crud");
@@ -598,7 +750,7 @@ fn the_default_login_is_never_signed_in_by_obid() {
 }
 
 /// Removing a tool's own login isn't for good: `{"agent", "default": true}` lists it again, as it
-/// was. Only once removed, and never for Cursor, which has none outside an account.
+/// was. Only once removed: Cursor's own login, never listed here, doesn't come back.
 #[test]
 fn a_removed_default_login_comes_back() {
     let folder = Folder::new("accounts-restore");
@@ -621,7 +773,7 @@ fn a_removed_default_login_comes_back() {
     }
     assert_eq!(
         add(&obid, json!({"agent": "cursor", "default": true})).status,
-        422
+        409
     );
     let back = add(&obid, json!({"agent": "codex", "default": true}));
     assert_eq!(back.status, 201, "{}", back.text);

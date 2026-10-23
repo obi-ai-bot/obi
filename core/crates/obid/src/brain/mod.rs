@@ -409,7 +409,7 @@ pub(super) fn context(shared: &Shared, conversation: &str, turns: &[Turn], nonce
         jobs: shared.jobs.list(usize::MAX),
         inbox: shared.link.waiting_items(now),
         accounts: told,
-        repos: config.repos.iter().map(|r| r.repo.clone()).collect(),
+        repos: config.repos.names(),
         max_running: shared.jobs.max_running(),
         default_mode: shared.jobs.default_mode().as_str(),
         failures: briefing::week(
@@ -421,7 +421,7 @@ pub(super) fn context(shared: &Shared, conversation: &str, turns: &[Turn], nonce
     };
     Context {
         accounts,
-        repos: config.repos.iter().map(|r| r.repo.clone()).collect(),
+        repos: config.repos.names(),
         briefing: Some(briefing.text()),
         quoted: briefing.quoted(),
         jobs: briefing.stoppable(),
@@ -465,7 +465,7 @@ pub(super) async fn own(
         .unwrap_or_default();
     briefing::own_instructions(
         &shared.config.home,
-        &shared.config.repos,
+        &shared.config.repos.get(),
         &[said, &briefing],
     )
     .await

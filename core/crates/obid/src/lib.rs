@@ -46,6 +46,7 @@ pub mod policy;
 pub mod process;
 pub mod publish;
 pub mod push;
+pub mod repos;
 pub mod review;
 pub mod routes;
 pub mod routines;
@@ -256,6 +257,8 @@ pub async fn serve(
     // and what sign-ins cut short by the last stop left behind.
     config.agents.open(&config.home);
     accounts::sweep(&config.home);
+    // The tools' own logins on this Mac, listed as accounts unless the owner removed them.
+    accounts::adopt_own_logins(&config.agents, &config.home);
     github_login::sweep(&config.home);
     // What an older obid's boxes could have left in the accounts' folders (#655), said once.
     jobs::check_account_folders(&config.agents.get());
@@ -434,6 +437,8 @@ pub async fn serve(
     // The tunnel phones reach this Mac through, when the owner turned remote access on (#896).
     tunnel.spawn(stopping_rx.clone());
     github.spawn(stopping_rx.clone());
+    // GitHub's repositories gh can push to, now and every hour (crate::repos).
+    repos::spawn(shared.clone());
     // Job alerts to Android phones through FCM (crate::push).
     push::spawn(shared.clone());
     // The worktrees' cleanup pass, in the background: never before the first answer.

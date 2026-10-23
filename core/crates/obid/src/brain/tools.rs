@@ -839,7 +839,13 @@ fn rules(shared: &Shared) -> String {
 /// oby_rule: a standing rule the conversation proposes waits for the owner's Confirm in the inbox
 /// (`remember_rule`): it widens what Oby does with no tap.
 fn propose_rule(shared: &Shared, session: &Session, args: Value) -> Result<String, String> {
-    let repos: Vec<String> = shared.config.repos.iter().map(|r| r.repo.clone()).collect();
+    let repos: Vec<String> = shared
+        .config
+        .repos
+        .get()
+        .iter()
+        .map(|r| r.repo.clone())
+        .collect();
     let mut rule = crate::rules::proposed(&args, &repos)?;
     rule.conversation = Some(session.conversation.clone());
     let words = crate::rules::words(&rule);

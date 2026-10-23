@@ -429,8 +429,8 @@ async fn supervise(shared: &Arc<Shared>, job: &Job) -> bool {
             &turn,
             taken,
             &format!(
-                "Oby can't decide by itself here: no {} account is signed in for conversations.",
-                tool.name()
+                "Oby can't decide by itself here: {}.",
+                shared.jobs.none_signed_in(tool).trim_end_matches('.')
             ),
         );
         return true;

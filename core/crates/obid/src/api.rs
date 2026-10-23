@@ -147,6 +147,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         )
         .route("/v1/accounts/{id}/reserve", post(crate::accounts::reserve))
         .route("/v1/github", get(crate::github_login::get))
+        .route("/v1/repos", get(crate::repos::list))
         .route(
             "/v1/github/sign-in",
             post(crate::github_login::sign_in).delete(crate::github_login::end_sign_in),
@@ -587,6 +588,9 @@ async fn method_not_allowed() -> ApiError {
 pub struct Status {
     pub runner: RunnerJson,
     pub accounts: Vec<AccountJson>,
+    /// The tools' own logins obid found on this Mac that aren't accounts: `{agent, id, name}`, each
+    /// listed on the owner's word (`POST /v1/accounts` `{"agent", "default": true}`).
+    pub available_logins: Vec<serde_json::Value>,
     pub models: Models,
     pub max_running: u32,
     pub running: u32,
@@ -753,8 +757,9 @@ pub fn account_json(
         agent: tool.id(),
         name: account.name.clone(),
         payer: account.payer.clone(),
-        label: None,
-        // Whether its login file is there (#626); Cursor's is found out when it runs.
+        // Why a login that's there can't run: Codex's token is ending.
+        label: crate::jobs::login_note(tool, account, home.as_deref()).map(str::to_owned),
+        // Whether its login is there and a run can use it (#626).
         signed_in: crate::jobs::signed_in(tool, account, home.as_deref()),
         five_hour: usage.five_hour_at(now),
         seven_day: usage.seven_day_at(now),
@@ -781,6 +786,13 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
             engine: "obid",
         },
         accounts,
+        available_logins: shared
+            .config
+            .agents
+            .available()
+            .into_iter()
+            .map(|(tool, own)| serde_json::json!({"agent": tool.id(), "id": own.id, "name": own.name}))
+            .collect(),
         models: Models::defaults(),
         max_running: shared.jobs.max_running() as u32,
         running: shared.jobs.running() as u32,

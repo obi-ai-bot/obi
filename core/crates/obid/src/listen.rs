@@ -1731,7 +1731,13 @@ fn real(shared: &Shared) -> Real<'_> {
 }
 
 fn known(shared: &Shared) -> Vec<String> {
-    shared.config.repos.iter().map(|r| r.repo.clone()).collect()
+    shared
+        .config
+        .repos
+        .get()
+        .iter()
+        .map(|r| r.repo.clone())
+        .collect()
 }
 
 /// Where a catch-up reads `channel` from: its cursor less [`OVERLAP`] (a message the socket

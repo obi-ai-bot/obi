@@ -1264,6 +1264,7 @@ fn repos(shared: &Shared) -> Vec<(String, String)> {
     shared
         .config
         .repos
+        .get()
         .iter()
         .map(|r| (r.repo.clone(), r.default_branch.clone()))
         .collect()
@@ -1333,9 +1334,8 @@ pub async fn find(State(shared): State<Arc<Shared>>) -> Result<Response, ApiErro
     let repos = repos(&shared);
     let mut problems: Vec<String> = vec![];
     let mut pull_requests = BTreeSet::new();
-    let on_github = shared
-        .config
-        .repos
+    let listed = shared.config.repos.get();
+    let on_github = listed
         .iter()
         .filter(|r| {
             r.pull_requests
