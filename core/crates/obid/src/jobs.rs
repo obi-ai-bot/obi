@@ -5633,6 +5633,9 @@ impl Jobs {
                         }),
                     ),
                 );
+                if round == 1 {
+                    self.transcribed(id, self.transcripts.asked(id, &job.request));
+                }
                 let turn = self
                     .turn(
                         id,

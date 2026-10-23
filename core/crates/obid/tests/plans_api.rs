@@ -4742,7 +4742,7 @@ fn a_calls_output_never_reaches_the_brain() {
     let ended = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None);
     assert_eq!(ended.status, 200, "{}", ended.text);
     let canary = "DETAIL-ONLY-CANARY-7f3a";
-    let opened = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/2"), None);
+    let opened = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/3"), None);
     assert!(opened.text.contains(canary), "{}", opened.text);
     queue(&obid, &[reply("It listed the files.")]);
     assert_eq!(
