@@ -181,7 +181,7 @@ export function testApp(overrides: Partial<Deps> = {}, envOverrides: Partial<Env
 
   /// A request as it reaches the Worker, with `headers` as they are (no signature added).
   async function raw(method: string, path: string, body?: string, headers: Record<string, string> = {}): Promise<Answer> {
-    const request = new Request(`https://oby-control.tetrix.pro${path}`, {
+    const request = new Request(`https://oby-control.oby.test${path}`, {
       method,
       headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...headers },
       body,

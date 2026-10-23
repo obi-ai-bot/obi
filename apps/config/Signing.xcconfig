@@ -14,6 +14,11 @@ OBY_IPHONE_BUNDLE_ID = com.deskree.oby
 // writes and uploads. "//" starts a comment in an xcconfig, so the empty $() keeps the URL whole.
 OBY_APPCAST_URL = https:/$()/downloads.oby.deskree.com/appcast.xml
 
+// The control plane the Mac app signs in with for remote access (apps/mac/app/Info.plist,
+// ObyControlPlaneURL; Engine/ControlPlane.swift): Deskree's own instance. Running your own
+// (docs/remote-access.md, "Run your own control plane")? Put its URL here or in Signing.local.xcconfig.
+OBY_CONTROL_PLANE_URL = https:/$()/oby-control.deskree.com
+
 // Sparkle's EdDSA public key (apps/mac/app/Info.plist, SUPublicEDKey): the one `generate_keys` printed on
 // 2026-10-20 (docs/release.md, Sparkle keys). Its private half is in the release Mac's login keychain;
 // every update must be signed with it, so keep an exported copy somewhere safe.

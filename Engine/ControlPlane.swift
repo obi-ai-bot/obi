@@ -18,7 +18,10 @@ nonisolated struct ControlPlane: Sendable {
     /// The clock the calls' timestamps come from.
     var now: @Sendable () -> Date = { Date() }
 
-    static let defaultURL = URL(string: "https://oby-control.deskree.com")!
+    /// The app's ObyControlPlaneURL (OBY_CONTROL_PLANE_URL in apps/config/Signing.xcconfig), else
+    /// Deskree's own instance.
+    static let defaultURL = (Bundle.main.object(forInfoDictionaryKey: "ObyControlPlaneURL") as? String)
+        .flatMap { $0.isEmpty ? nil : URL(string: $0) } ?? URL(string: "https://oby-control.deskree.com")!
     /// What's signed before the method, the path, the timestamp, the nonce and the body.
     static let signedPrefix = "oby-control-v1"
 

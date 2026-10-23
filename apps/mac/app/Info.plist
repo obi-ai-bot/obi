@@ -15,5 +15,8 @@
 	<true/>
 	<key>SUScheduledCheckInterval</key>
 	<integer>21600</integer>
+	<!-- Remote access's control plane (Engine/ControlPlane.swift), from apps/config/Signing.xcconfig. -->
+	<key>ObyControlPlaneURL</key>
+	<string>$(OBY_CONTROL_PLANE_URL)</string>
 </dict>
 </plist>

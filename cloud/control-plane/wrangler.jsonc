@@ -1,52 +1,66 @@
-// Oby's control plane (#285): a Worker at oby-control.deskree.com with a D1 database, in the Deskree Cloudflare account.
-// Deploying is the user's step: docs/remote-access.md has the exact commands.
+// Oby's control plane (#285): a Worker with a D1 database. Anyone may run their own; each instance
+// is a named environment below, deployed with `pnpm run deploy --env <name>` (docs/remote-access.md,
+// "Run your own control plane"). The top level is the template every environment starts from, with
+// nothing instance-specific: on its own it signs nobody in (every sign-in answers 503).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "oby-control",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "observability": { "enabled": true },
-  // The Worker's own hostname, a first-level name under the zone so Universal SSL covers it.
-  "routes": [{ "pattern": "oby-control.deskree.com", "custom_domain": true }],
-  // Plain settings. Secrets (the Cloudflare API token, the account and zone ids) are never
-  // here: `wrangler secret put`, or .dev.vars for `wrangler dev`.
-  "vars": {
-    // The zone the devices' hostnames live in: a registrable domain of their own, never under
-    // PRODUCT_DOMAIN, since anyone running Oby gets a name there (docs/remote-access.md). Empty
-    // until the owner registers one; CF_ZONE_ID is that zone's id. No endpoint is made until then.
-    "DEVICE_DOMAIN": "",
-    "PRODUCT_DOMAIN": "deskree.com",
-    "HOSTNAME_PREFIX": "oby-",
-    // Sign in with Apple on the web (docs/remote-access.md): the Services ID, and the return URL
-    // registered for it at Apple. Not secrets: no private key is used, only Apple's identity token.
-    "APPLE_CLIENT_ID": "com.deskree.oby.signin",
-    "APPLE_REDIRECT_URI": "https://oby-control.deskree.com/v1/auth/apple/callback",
-    // Sign in with Google (docs/remote-access.md): the OAuth client's id from Deskree's Google
-    // Cloud project, and the redirect URI authorized for it. Not secrets: the ID token flow uses no
-    // client secret. Empty until the owner makes the client: Sign in with Google answers 503.
-    "GOOGLE_CLIENT_ID": "",
-    "GOOGLE_REDIRECT_URI": "https://oby-control.deskree.com/v1/auth/google/callback",
-    // What one Google Workspace's accounts may have together (src/app.ts, PER_DOMAIN): live
-    // endpoints, and Macs set up a day. Raise them for a bigger company; other email domains get
-    // 25 and 20, fixed.
-    "WORKSPACE_DOMAIN_ENDPOINTS": "100",
-    "WORKSPACE_DOMAIN_REGISTRATIONS": "50",
-    // The most endpoints alive at once: under Cloudflare's tunnel limit for the account.
-    "MAX_ENDPOINTS": "500",
-    // What every tunnel routes to on the Mac: the gateway (#284). Nothing else is reachable.
-    "GATEWAY": "http://127.0.0.1:8810"
-  },
   // Every minute: spent nonces and old rate-limit windows go, installations with no endpoint
   // after a day, installations idle for 30 days with their tunnels, and tunnels not kept
   // connected (src/app.ts, `sweep`).
   "triggers": { "crons": ["* * * * *"] },
+  // Plain settings, every one documented in src/env.ts. Secrets (the Cloudflare API token, the
+  // account and zone ids) are never here: `wrangler secret put --env <name>`, or .dev.vars for
+  // `wrangler dev`. Wrangler doesn't inherit `vars` or `d1_databases`: an environment lists them all.
+  "vars": {
+    "PRODUCT_DOMAIN": "",
+    "DEVICE_DOMAIN": "",
+    "MEMBER_WORKSPACES": "",
+    "HOSTNAME_PREFIX": "oby-",
+    "APPLE_CLIENT_ID": "",
+    "APPLE_REDIRECT_URI": "",
+    "GOOGLE_CLIENT_ID": "",
+    "GOOGLE_REDIRECT_URI": "",
+    "WORKSPACE_DOMAIN_ENDPOINTS": "100",
+    "WORKSPACE_DOMAIN_REGISTRATIONS": "50",
+    "MAX_ENDPOINTS": "500",
+    "GATEWAY": "http://127.0.0.1:8810"
+  },
   "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "oby-control",
-      // `wrangler d1 create oby-control` prints the id; paste it here before the first deploy.
-      "database_id": "00000000-0000-0000-0000-000000000000",
-      "migrations_dir": "migrations"
+    { "binding": "DB", "database_name": "oby-control", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+  ],
+  "env": {
+    // Deskree's own instance, for Deskree's people only: oby-control.deskree.com in Deskree's
+    // Cloudflare account. Copy this block, rename it and put your own values in to run yours.
+    "deskree": {
+      "name": "oby-control",
+      // The Worker's own hostname, a first-level name under the zone so Universal SSL covers it.
+      "routes": [{ "pattern": "oby-control.deskree.com", "custom_domain": true }],
+      "vars": {
+        "PRODUCT_DOMAIN": "deskree.com",
+        // Members-only (MEMBER_WORKSPACES), so the Macs' hostnames may live under deskree.com
+        // itself: only Deskree's own Google Workspace accounts get one.
+        "DEVICE_DOMAIN": "deskree.com",
+        "MEMBER_WORKSPACES": "deskree.com",
+        "HOSTNAME_PREFIX": "oby-",
+        // Members-only refuses Apple, which has no Workspace; kept for when that changes.
+        "APPLE_CLIENT_ID": "com.deskree.oby.signin",
+        "APPLE_REDIRECT_URI": "https://oby-control.deskree.com/v1/auth/apple/callback",
+        // Empty until the OAuth client exists in Deskree's Google Cloud project: Google answers 503.
+        "GOOGLE_CLIENT_ID": "",
+        "GOOGLE_REDIRECT_URI": "https://oby-control.deskree.com/v1/auth/google/callback",
+        "WORKSPACE_DOMAIN_ENDPOINTS": "100",
+        "WORKSPACE_DOMAIN_REGISTRATIONS": "50",
+        "MAX_ENDPOINTS": "500",
+        "GATEWAY": "http://127.0.0.1:8810"
+      },
+      "d1_databases": [
+        // `wrangler d1 create oby-control` prints the id; paste it here before the first deploy.
+        { "binding": "DB", "database_name": "oby-control", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+      ]
     }
-  ]
+  }
 }

@@ -206,6 +206,8 @@ const PROVIDERS: Record<Provider, { name: string; client: keyof Env; redirect: k
 /// for it, answered with a form post to the callback.
 async function startSignIn(request: Request, env: Env, now: () => Date, provider: Provider): Promise<Response> {
   const call = await signed(request, env, now());
+  const members = memberWorkspaces(env);
+  if (members.length && provider === "apple") throw new Reply(403, `This Oby is for ${members.join(", ")} accounts only: sign in with Google.`);
   const client = setting(env, provider, "client");
   const redirect = setting(env, provider, "redirect");
   const address = addressBucket(request.headers.get("CF-Connecting-IP") ?? "unknown");
@@ -258,9 +260,11 @@ async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => D
     const audience = setting(env, provider, "client");
     if (provider === "google") {
       const google = await verifyGoogleToken(token, deps.google, audience, pending.nonce_hash, now());
+      if (!isMember(env, google.workspaceDomain)) throw new TokenError(`not a member Workspace: ${google.workspaceDomain ?? "a personal account"}`);
       account = `google:${google.sub}`;
       domains = { workspace: google.workspaceDomain, email: google.emailDomain, limit: limitDomain(google.workspaceDomain, google.emailDomain) };
     } else {
+      if (memberWorkspaces(env).length) throw new TokenError("Apple accounts have no Workspace: this instance is members-only");
       account = await verifyAppleToken(token, deps.apple, audience, pending.nonce_hash, now());
     }
   } catch (error) {
@@ -277,6 +281,19 @@ async function finishSignIn(request: Request, env: Env, deps: Deps, now: () => D
     env.DB.prepare("UPDATE sign_ins SET sub = ?2, code_hash = ?3 WHERE state = ?1 AND sub IS NULL").bind(state, account, await sha256Hex(code)),
   ]);
   return back("done", state, code);
+}
+
+/// MEMBER_WORKSPACES, lowercased: the Google Workspaces a members-only instance serves; none for an
+/// open one.
+function memberWorkspaces(env: Env): string[] {
+  return (env.MEMBER_WORKSPACES ?? "").split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
+}
+
+/// Whether an account of Workspace `workspace` (Google's `hd`; null for a personal account) may
+/// use this instance: any account on an open one, only a member Workspace's on a members-only one.
+function isMember(env: Env, workspace: string | null): boolean {
+  const members = memberWorkspaces(env);
+  return !members.length || (!!workspace && members.includes(workspace.toLowerCase()));
 }
 
 /// The registrable domain a Google account's limits are shared under (`users.limit_domain`): its
@@ -332,12 +349,14 @@ async function register(request: Request, env: Env, deps: Deps, now: () => Date)
   const code = typeof call.body.signInCode === "string" ? call.body.signInCode : "";
   const seconds = Math.floor(now().getTime() / 1000);
   const signIn = await env.DB.prepare(
-    `SELECT s.sub, s.code_hash, u.limit_domain, u.workspace_domain IS NOT NULL AS workspace FROM sign_ins s JOIN users u ON u.sub = s.sub
+    `SELECT s.sub, s.code_hash, u.limit_domain, u.workspace_domain, u.workspace_domain IS NOT NULL AS workspace FROM sign_ins s JOIN users u ON u.sub = s.sub
      WHERE s.state = ?1 AND s.public_key = ?2 AND s.used_at IS NULL AND s.expires_at > ?3`,
   )
     .bind(state, call.key, seconds)
-    .first<{ sub: string; code_hash: string; limit_domain: string | null; workspace: number }>();
+    .first<{ sub: string; code_hash: string; limit_domain: string | null; workspace_domain: string | null; workspace: number }>();
   if (!signIn || !code || (await sha256Hex(code)) !== signIn.code_hash) throw new Reply(403, "Sign in with Apple or Google first.");
+  // Checked again here: MEMBER_WORKSPACES may have changed since the sign-in.
+  if (!isMember(env, signIn.workspace_domain)) throw new Reply(403, `This Oby is for ${memberWorkspaces(env).join(", ")} accounts only.`);
   await spend(env.DB, call);
   const address = request.headers.get("CF-Connecting-IP") ?? "unknown";
   const counted = [`registrations:account:${signIn.sub}`, `registrations:address:${addressBucket(address)}`, `registrations:network:${networkBucket(address)}`];
@@ -526,7 +545,11 @@ async function deviceDomain(env: Env, tunnels: TunnelAPI): Promise<string> {
   if (!devices) throw new Reply(503, "No device domain is set up: set DEVICE_DOMAIN in wrangler.jsonc to a domain of its own.");
   const products = registrableDomain(product);
   if (!products) throw new Reply(503, "PRODUCT_DOMAIN isn't set in wrangler.jsonc, so DEVICE_DOMAIN can't be checked against it.");
-  if (devices === products) throw new Reply(503, "DEVICE_DOMAIN can't share the product's registrable domain: register a domain of its own.");
+  // Anyone who signs in gets a hostname: under the product's domain, a stranger's page could get it
+  // flagged or set its cookies. Only a members-only instance may share it (MEMBER_WORKSPACES).
+  if (devices === products && !memberWorkspaces(env).length) {
+    throw new Reply(503, "DEVICE_DOMAIN can't share the product's registrable domain unless MEMBER_WORKSPACES makes this instance members-only: register a domain of its own, or set MEMBER_WORKSPACES.");
+  }
   if (!checkedZones.has(domain)) {
     const zone = (await tunnels.zoneName()).toLowerCase();
     if (zone !== domain) throw new Reply(503, "CF_ZONE_ID isn't DEVICE_DOMAIN's zone: set it to that zone's id.");
