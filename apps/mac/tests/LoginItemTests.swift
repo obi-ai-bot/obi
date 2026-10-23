@@ -127,6 +127,35 @@ struct LoginItemTests {
         #expect(RunnerLoginItem.launchd("com.deskree.oby.nothing.\(UUID().uuidString)") == nil)
     }
 
+    /// After an update, an obid still running the old executable is restarted, once (2026-10-23,
+    /// the MacBook Air on 0.3.0 with 0.2.1's obid: "There's no such endpoint").
+    @Test func anObidFromBeforeTheUpdateIsRestarted() throws {
+        func decide(_ status: SMAppService.Status, runs: Bool = true, outdated: Bool, onThisMac: Bool = true) -> RunnerLoginItem.AtLaunch {
+            RunnerLoginItem.atLaunch(onThisMac: onThisMac, byScript: false, mayRegister: true, status: status,
+                                     signingChanged: false, runs: runs, outdated: outdated)
+        }
+        #expect(decide(.enabled, outdated: true) == .restart)
+        #expect(decide(.enabled, outdated: false) == .nothing)
+        // Not running at all is a re-register, and a remote runner is left alone.
+        if case .reregister = decide(.enabled, runs: false, outdated: true) {} else { Issue.record("expected a re-register") }
+        #expect(decide(.enabled, outdated: true, onThisMac: false) == .nothing)
+        let now = Date()
+        #expect(RunnerLoginItem.stale(started: now.addingTimeInterval(-3600), replaced: now))
+        #expect(!RunnerLoginItem.stale(started: now, replaced: now.addingTimeInterval(-3600)))
+        #expect(!RunnerLoginItem.stale(started: now, replaced: now), "the same moment is not stale")
+        // Read from launchctl's own words: this test process, started before a file written now, is outdated.
+        let file = FileManager.default.temporaryDirectory.appending(path: "obid-\(UUID().uuidString)")
+        try Data().write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let printed = "gui/501/com.deskree.oby.obid = {\n\tstate = running\n\tprogram = \(file.path)\n\tpid = \(pid)\n}"
+        if try #require(RunnerLoginItem.started(pid)) < Date().addingTimeInterval(-1.5) {
+            #expect(RunnerLoginItem.outdated(printed))
+        }
+        #expect(!RunnerLoginItem.outdated(printed.replacingOccurrences(of: "pid = \(pid)", with: "")), "no pid, no restart")
+        #expect(!RunnerLoginItem.outdated(nil))
+    }
+
     /// A team or kind of certificate is recorded at every launch; only a change from one on record counts.
     @Test func signingChangesAreRecorded() throws {
         let suite = "oby-login-item-\(UUID().uuidString)"

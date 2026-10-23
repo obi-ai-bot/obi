@@ -111,17 +111,19 @@ final class RunnerLoginItem {
         Task {
             let checks = status != .notRegistered && status != .requiresApproval
             let runs = checks ? await Self.obidRuns() : true
+            let outdated = checks && runs && Self.outdated()
             switch Self.atLaunch(onThisMac: onThisMac, byScript: byScript, mayRegister: mayRegister, status: status,
-                                 signingChanged: signingChanged, runs: runs) {
+                                 signingChanged: signingChanged, runs: runs, outdated: outdated) {
             case .nothing: break
             case .register: register()
             case .reregister(let why): reregister(because: why)
+            case .restart: Self.restart()
             }
         }
     }
 
     /// What launch does about obid's login item.
-    nonisolated enum AtLaunch: Equatable { case nothing, register, reregister(String) }
+    nonisolated enum AtLaunch: Equatable { case nothing, register, reregister(String), restart }
 
     /// Registers when nothing is; registers again when obid doesn't run (`runs`), whatever macOS
     /// says of the registration (`.enabled`, or `.notFound` for one it lost track of). A signature
@@ -129,9 +131,10 @@ final class RunnerLoginItem {
     /// share one bundle ID, so switching between them would take a working obid down at every
     /// launch; a launch constraint launchd enforces shows as obid not running anyway. Waiting for
     /// approval: nothing, that's the user's step, and Settings › Runner shows it. A copy that may
-    /// not register (`mayRegister`) leaves the registration alone.
+    /// not register (`mayRegister`) leaves the registration alone. An obid that runs from before its
+    /// executable was replaced (`outdated`: an update swapped the app under it) is restarted.
     nonisolated static func atLaunch(onThisMac: Bool, byScript: Bool, mayRegister: Bool, status: SMAppService.Status,
-                                     signingChanged: Bool, runs: Bool) -> AtLaunch {
+                                     signingChanged: Bool, runs: Bool, outdated: Bool = false) -> AtLaunch {
         guard onThisMac, !byScript, mayRegister else { return .nothing }
         switch status {
         case .requiresApproval: return .nothing
@@ -139,7 +142,60 @@ final class RunnerLoginItem {
         case _ where !runs:
             return .reregister("obid doesn't answer on 127.0.0.1:\(LocalRunner.port) and launchd doesn't run it"
                 + (signingChanged ? ", and Oby's signing team or kind of certificate changed since the last launch" : ""))
-        default: return .nothing
+        default: return outdated ? .restart : .nothing
+        }
+    }
+
+    /// Whether the obid launchd runs started before its executable was put where it is: Sparkle
+    /// replaces the whole app on an update, and the obid already running keeps its old code (its
+    /// old endpoints) until it starts again, while the new app asks it for new ones ("There's no
+    /// such endpoint", seen 2026-10-23 on the MacBook Air after updating to 0.3.0). The file's
+    /// status-change time is when it was written on this disk, which an archive can't set.
+    nonisolated static func outdated(_ printed: String? = launchd(label)) -> Bool {
+        guard let printed else { return false }
+        let value = { (key: String) in
+            printed.split(separator: "\n").lazy.map { $0.trimmingCharacters(in: .whitespaces) }
+                .first { $0.hasPrefix("\(key) = ") }.map { String($0.dropFirst(key.count + 3)) }
+        }
+        guard let program = value("program"), let pid = value("pid").flatMap(Int32.init),
+              let started = started(pid), let replaced = changed(program) else { return false }
+        return stale(started: started, replaced: replaced)
+    }
+
+    /// Started before the executable was replaced, with a second's slack for clocks' rounding.
+    nonisolated static func stale(started: Date, replaced: Date) -> Bool { started < replaced.addingTimeInterval(-1) }
+
+    /// When process `pid` started.
+    nonisolated static func started(_ pid: Int32) -> Date? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let time = info.kp_proc.p_un.__p_starttime
+        return Date(timeIntervalSince1970: TimeInterval(time.tv_sec) + TimeInterval(time.tv_usec) / 1_000_000)
+    }
+
+    /// When the file at `path` was last written or moved on this disk (its ctime).
+    nonisolated static func changed(_ path: String) -> Date? {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(info.st_ctimespec.tv_sec) + TimeInterval(info.st_ctimespec.tv_nsec) / 1_000_000_000)
+    }
+
+    /// Restarts obid with the executable now in the app (`launchctl kickstart -k`). Its jobs carry
+    /// on after the restart, as after any (docs/runner-api.md, "After any restart").
+    nonisolated static func restart() {
+        let kick = Process()
+        kick.executableURL = URL(filePath: "/bin/launchctl")
+        kick.arguments = ["kickstart", "-k", "gui/\(getuid())/\(label)"]
+        kick.standardOutput = FileHandle.nullDevice
+        kick.standardError = FileHandle.nullDevice
+        do {
+            try kick.run()
+            kick.waitUntilExit()
+            Logger.feed.notice("restarted obid: it ran from before Oby's update (launchctl kickstart said \(kick.terminationStatus))")
+        } catch {
+            Logger.feed.error("restarting obid after Oby's update failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
