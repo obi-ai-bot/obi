@@ -33,6 +33,22 @@ nonisolated enum SettingsPage: String, CaseIterable, Hashable, Sendable {
         case .about: "About"
         }
     }
+
+    /// The pages the side panel lists: the launch build leaves out Sharing and Remote access (`Launch`).
+    static func shown(everything: Bool = Launch.everything) -> [SettingsPage] {
+        everything ? allCases : allCases.filter { $0 != .sharing && $0 != .remote }
+    }
+}
+
+/// The launch build (AGENTS.md, the owner's decision of 2026-10-23): Mac share, Runner share, Remote
+/// access and every connector but GitHub and Slack are hidden on the Mac and the iPhone, not deleted.
+/// `showEverything`, a default with no UI, shows them on Deskree's own Macs:
+/// `defaults write <bundle id> showEverything -bool YES`.
+nonisolated enum Launch {
+    static let everythingKey = "showEverything"
+    static var everything: Bool { UserDefaults.standard.bool(forKey: everythingKey) }
+    /// The connectors Settings › Connectors lists.
+    static let connectors: Set<String> = ["github", "slack"]
 }
 
 /// Where you are, as the steps that got you there: the title bar's trail. Each step opens over

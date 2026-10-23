@@ -318,11 +318,11 @@ struct WindowScreens {
         try await save("mac-settings-components", window: window)
     }
 
-    /// Each Settings page in the window (docs/mac-design.md A1), with the side panel on Settings.
+    /// Each Settings page the launch build shows in the window (docs/mac-design.md A1), with the side panel on Settings.
     /// Nothing of this Mac's own shows: run it with `TEST_RUNNER_OBY_HOME` set to an empty folder (the
     /// desk's accounts and rules), and the pages read a defaults suite of their own, a made-up
     /// hostname and a vault in a temporary folder.
-    @Test(arguments: SettingsPage.allCases)
+    @Test(arguments: SettingsPage.shown(everything: false))
     func settings(_ page: SettingsPage) async throws {
         let suite = try #require(UserDefaults(suiteName: "oby-screens-\(UUID().uuidString)"))
         suite.set(true, forKey: "ObySidebarOpen")

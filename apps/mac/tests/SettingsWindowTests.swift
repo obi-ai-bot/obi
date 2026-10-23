@@ -10,6 +10,14 @@ struct SettingsWindowTests {
         #expect(SettingsPage.allCases.map(\.label) == ["General", "Runner", "Sharing", "Remote access", "Accounts", "Models", "Connectors", "Memory", "Obysphere", "Vault", "About"])
     }
 
+    /// The launch build (AGENTS.md, 2026-10-23) hides Sharing, Remote access and every connector but
+    /// GitHub and Slack; `showEverything` brings them back.
+    @Test func theLaunchBuildHidesSharingRemoteAndMostConnectors() {
+        #expect(SettingsPage.shown(everything: false).map(\.label) == ["General", "Runner", "Accounts", "Models", "Connectors", "Memory", "Obysphere", "Vault", "About"])
+        #expect(SettingsPage.shown(everything: true) == SettingsPage.allCases)
+        #expect(Connectors.list(accounts: [], runner: nil).filter { Launch.connectors.contains($0.id) }.map(\.name) == ["GitHub", "Slack"])
+    }
+
     @Test func aPageOpensOverHomeWithThePanelOnSettings() {
         let state = ChatState()
         state.trail.start(.group(.review))

@@ -88,6 +88,7 @@ struct SidebarView: View {
     let width: CGFloat
     let onNewTask: () -> Void
     @AppStorage(GroupBy.key) private var groupBy = GroupBy.type
+    @AppStorage(Launch.everythingKey) private var everything = false
     @State private var search = ""
     @State private var searching = false
     @FocusState private var searchFocused: Bool
@@ -152,7 +153,7 @@ struct SidebarView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if searching && !listsSettings { searchField.transition(.opacity.combined(with: .move(edge: .top))) }
                     if listsSettings {
-                        ForEach(SettingsPage.allCases, id: \.self) { page in
+                        ForEach(SettingsPage.shown(everything: everything), id: \.self) { page in
                             SettingsRow(page: page, on: state.trail.top == .settings(page)) {
                                 withAnimation(Tokens.warm) { state.openSettings(page) }
                             }

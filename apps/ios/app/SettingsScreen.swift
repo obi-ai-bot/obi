@@ -13,6 +13,8 @@ struct SettingsScreen: View {
     @State private var watchProblem: String?
     @State private var stopping = false
     @AppStorage(Appearance.key) private var appearance = Appearance.system
+    /// The launch build (`Launch`) hides Connectors (Tetrix) and Apple Watch without iPhone.
+    @AppStorage(Launch.everythingKey) private var everything = false
 
     var body: some View {
         ScrollView {
@@ -25,7 +27,7 @@ struct SettingsScreen: View {
                     // The runner's "accounts" event brings a lifted reserve back.
                     PhoneAccountRow(account: account) { lift in _ = try await phone.runner.liftReserve(account.id, lift) }
                 }
-                connectors
+                if everything { connectors }
                 RunnerModelsSections(options: options, models: phone.models, save: phone.setModels)
                 PermissionsSection(runner: phone.runner, defaultMode: phone.defaultMode, setDefault: phone.setDefaultMode)
                 RoutinesSection(runner: phone.runner, changes: phone.routineChanges)
@@ -41,7 +43,7 @@ struct SettingsScreen: View {
                     SetRow("Version") { SetValue(Self.version) }
                     SetRow("Mac") { SetValue(phone.host.isEmpty ? "Not reached yet" : phone.host) }
                 }
-                watch
+                if everything { watch }
                 SetGroup("Publishing key", footer: "Oby opens a pull request by itself once a job's check passes and the secret scan is clean. Publishing by hand, when that failed, needs Face ID on this iPhone.",
                          problem: problem) {
                     SetRow("This iPhone's key") {
@@ -58,7 +60,7 @@ struct SettingsScreen: View {
         .task {
             do { options = try await phone.runner.modelOptions() } catch { problem = error.localizedDescription }
             // A runner older than the Watch API has no list: then there's nothing to show.
-            try? await watchPairing.load(phone)
+            if everything { try? await watchPairing.load(phone) }
         }
     }
 
@@ -170,6 +172,7 @@ private struct PhoneAccountRow: View {
     let account: Account
     var lift: @MainActor (Bool) async throws -> Void
     @State private var problem: String?
+    @AppStorage(Launch.everythingKey) private var everything = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
@@ -199,7 +202,7 @@ private struct PhoneAccountRow: View {
                             SetAbout(Usage.liftNote(usage))
                             if let problem { SetAbout(problem, color: Tokens.danger) }
                         }
-                        if account.signedIn {
+                        if everything, account.signedIn {
                             SetAbout(TetrixJobReport.accountLine(connected: account.tetrix == true, jobs: account.tetrixJobs ?? 0,
                                                                  used: account.tetrixUsed ?? 0, there: "on your Mac"),
                                      color: account.tetrix == true ? Tokens.muted : Tokens.needsInk)
