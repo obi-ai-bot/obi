@@ -646,10 +646,13 @@ impl Link {
     /// (docs/runner-api.md, "obid only: plug-ins"), unless an item for the same plug-in and event
     /// id is there already, open or done. Past [`inbox::MAX_OPEN_EVENTS`] open items of that
     /// plug-in, the oldest open one is settled by itself, with no answer. The event never starts
-    /// work and no remembered decision applies to it.
+    /// work by itself and no remembered decision applies to it: a failed deploy, an alert or a
+    /// ticket about one of obid's repositories is an offer, started only on an answer (#1124).
     pub fn plugin_event(&self, event: obi_plugin_api::PluginEvent) {
         let now = time::now();
-        let item = inbox::plugin_event_item(&event, now);
+        let repo = &event.event.subject.repo;
+        let known = self.config.repos.iter().any(|r| &r.repo == repo);
+        let item = inbox::plugin_event_item(&event, known, now);
         let mut changed = Vec::new();
         {
             let mut state = self.lock();
@@ -827,8 +830,27 @@ impl Link {
         Ok(item.to_json())
     }
 
+    /// `POST /v1/inbox/{id}/answer` on a plug-in's offer with its start answer (`Look into it`,
+    /// `Fix it`), which `answer` claimed: starts the work (crate::event_work); what couldn't start
+    /// leaves the item open again. Nothing is sent anywhere.
+    async fn answer_plugin_offer(&self, mut item: Item, answer: String) -> Result<Value, ApiError> {
+        match crate::event_work::start(&self.jobs, &self.config, &item).await {
+            Ok(job) => item.job = job.id,
+            Err(why) => {
+                self.lock().inbox.insert(item.id.clone(), item.clone());
+                return Err(why);
+            }
+        }
+        item.done = Some(time::now());
+        item.answer = Some(answer);
+        self.lock().inbox.insert(item.id.clone(), item.clone());
+        self.save_item(&item);
+        Ok(item.to_json())
+    }
+
     /// `POST /v1/inbox/{id}/answer` on a `pluginEvent` item: `Dismiss` or `{"done": true}` settles
-    /// it, `later` puts it off. Nothing is sent anywhere.
+    /// it, `later` puts it off. Nothing is sent anywhere. (An offer's start is
+    /// [`Self::answer_plugin_offer`]'s.)
     fn answer_plugin_event(
         &self,
         mut item: Item,
@@ -838,9 +860,14 @@ impl Link {
         if let Some(answer) = &answer
             && answer != inbox::DISMISS
         {
+            let options = if item.kind == "pluginEvent" {
+                item.options.join(" or ")
+            } else {
+                inbox::DISMISS.to_owned()
+            };
             return Err(api(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("The answer is {}.", inbox::DISMISS),
+                format!("The answer is {options}."),
             ));
         }
         match later {
@@ -3656,6 +3683,30 @@ impl Link {
             }
             item
         };
+        // A plug-in's offer (#1124): its start answer claims the item under the lock, as a GitHub
+        // offer's does, so a second answer finds it done and starts nothing.
+        let offer = {
+            let mut state = self.lock();
+            let item = state
+                .inbox
+                .get(id)
+                .filter(|i| {
+                    i.done.is_none()
+                        && i.kind == "pluginEvent"
+                        && i.options.len() > 1
+                        && matches!(&given, Given::Answer(a) if i.options.first() == Some(a))
+                })
+                .cloned();
+            if item.is_some()
+                && let Some(kept) = state.inbox.get_mut(id)
+            {
+                kept.done = Some(time::now());
+            }
+            item
+        };
+        if let (Some(item), Given::Answer(answer)) = (offer, &given) {
+            return self.answer_plugin_offer(item, answer.clone()).await;
+        }
         let share_used = self
             .lock()
             .inbox

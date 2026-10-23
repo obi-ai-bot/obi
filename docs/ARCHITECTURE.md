@@ -107,7 +107,7 @@ A plug-in adds context or events to Oby. Oby works fully with none: a fresh inst
 | Kind | What it gives | Used when |
 |---|---|---|
 | `context` | Context items for a job: past work, decisions, a code graph's answers. | `obid` dispatches, plans or reviews a job: it asks every enabled context plug-in and quotes the answers to the agent as data. |
-| `events` | Events from outside: a review was requested, an issue was assigned. | Continuously, while enabled: each event becomes an inbox item of kind `pluginEvent` for the owner to read (runner-api.md, "obid only: plug-ins"). In this version an event never starts work, and no remembered decision applies to events. |
+| `events` | Events from outside: a review was requested, an issue was assigned, a deploy failed, an alert fired, a ticket was assigned. | Continuously, while enabled: each event becomes an inbox item of kind `pluginEvent` (runner-api.md, "obid only: plug-ins"). An event never starts work by itself, and no remembered decision applies to events: a failed deploy, an alert or a ticket about one of `obid`'s repositories is an offer, and only the owner's answer starts its work (5.4). |
 | `agent-mcp` | An MCP server the job's agents may call, limited to tools the manifest lists. | Each job: `obid` adds the server to the agent's MCP configuration, and its permission gate refuses every tool not listed. |
 
 Tetrix is an `agent-mcp` plug-in in its first version (its graph reads and `save_session`, as `Engine/TetrixUse.swift` allows today) and may add `context` later. The Swift engine's hard-coded Tetrix handling (`TetrixUse`, the reminders, the `Tetrix-Session` trailer, the account's `tetrix` fields) becomes per-plug-in: `obid` counts each `agent-mcp` plug-in's calls per job the way it counts Tetrix's today, and keeps filling the job's and account's `tetrix` keys from the plug-in with id `tetrix` (null when it isn't enabled), so the apps keep working.
@@ -135,12 +135,13 @@ Each plug-in is a folder with `obi-plugin.json`:
 }
 ```
 
+- `manifest`: the protocol it speaks, on the wire too (5.4): `obi-plugin/0.1` or `obi-plugin/0.2`.
 - `id`: lower-case letters, digits and hyphens, unique; the folder's name. `oby` is reserved: it is the connected-app broker's server name in an agent's MCP config.
 - `kinds`: one or more of `context`, `events`, `agent-mcp`.
 - `run`: the process to start, relative to the plug-in's folder: needed for `context` and `events`; an `agent-mcp`-only plug-in may leave it out.
 - `agentMcp`: for `agent-mcp`, the server (`{"type": "http", "url"}`, `{"type": "http", "urlFromConfig": "<config key>"}` or `{"type": "stdio", "command", "args"}`) and the only tools agents may call. With `urlFromConfig` the server's URL is the owner's setting under that key: the manifest's `config` schema must require the key and give it no default, so the plug-in can't be enabled (`422`) until the owner has set it. A server that needs a secret in its configuration is refused: logins are the server's own (OAuth in its own store), never a vault secret.
 - Tetrix's MCP URL is such a setting: `url`, required, with no default. Its manifest names no host of its own: there is no placeholder URL to fall back on.
-- `events`: required for an `events` plug-in and refused on any other: `{"kinds": [ … ]}`, the event kinds it may emit (5.4), like `{"kinds": ["pull_request.review_requested", "issue.assigned"]}`. An event of a kind not listed is refused.
+- `events`: required for an `events` plug-in and refused on any other: `{"kinds": [ … ]}`, the event kinds it may emit (5.4), like `{"kinds": ["pull_request.review_requested", "issue.assigned"]}`. An event of a kind not listed is refused. An `obi-plugin/0.1` manifest may list only the five GitHub kinds; `deploy.failed`, `alert.fired` and `ticket.assigned` need `obi-plugin/0.2`.
 - `network`: the hosts it talks to, shown to the owner before enabling, together with the host of a server URL that comes from its settings. Declared in this version, not enforced.
 - `config`: a JSON Schema for its settings; the owner's settings must match it.
 
@@ -173,7 +174,9 @@ There is no field that enables a plug-in by itself.
 
 A plug-in never blocks Oby: a context query that fails or is late gives no context and the job goes on; a failed plug-in only shows in `GET /v1/obid/plugins`.
 
-### 5.4 Wire protocol: `obi-plugin/0.1`
+### 5.4 Wire protocol: `obi-plugin/0.1` and `obi-plugin/0.2`
+
+`obi-plugin/0.2` is `obi-plugin/0.1` with three more event kinds and the fields they need (below); everything else is the same. A plug-in speaks its manifest's protocol: `initialize` sends it, and an answer that names another is refused. A 0.1 plug-in works as it always did.
 
 JSON-RPC 2.0 over the plug-in's stdin and stdout, one JSON object per line (split on `\n` only), UTF-8. stderr goes to `obid`'s log, at most 64 KB per minute, as events of the `tracing` target `obi_plugin`, and so does every `log` notification. **The vault's secrets, and their encoded forms, are taken out by `obid`'s log layer for that target** before anything is written: the layer is the Rust core's, and the plug-in host only logs to the target, never writes a log of its own.
 
@@ -181,7 +184,7 @@ Requests from `obid`:
 
 | Method | Params | Result |
 |---|---|---|
-| `initialize` | `{"protocol": "obi-plugin/0.1", "obid": {"version"}, "plugin": {"id", "dataDir"}, "config": { … }}` | `{"protocol": "obi-plugin/0.1", "kinds": [ … ]}`: the kinds it serves now, a subset of its manifest's |
+| `initialize` | `{"protocol": "obi-plugin/0.1", "obid": {"version"}, "plugin": {"id", "dataDir"}, "config": { … }}`, with its manifest's protocol | `{"protocol": "obi-plugin/0.1", "kinds": [ … ]}`: the same protocol, and the kinds it serves now, a subset of its manifest's |
 | `context/query` | `{"requestId", "purpose": "dispatch" \| "plan" \| "review", "job": {"id", "kind", "repo", "branch", "base", "issue", "pr", "files"}, "maxBytes": 16384}` | `{"items": [{"title", "source", "uri", "text"}]}`: at most 20 items, `text` in all at most `maxBytes`; 5 seconds to answer |
 | `ping` | `{}` | `{}` |
 | `shutdown` | `{}` | `{}` |
@@ -190,12 +193,20 @@ Requests from the plug-in (only for the kinds it serves):
 
 | Method | Params | Result |
 |---|---|---|
-| `events/emit` | `{"id", "kind", "occurredAt", "subject": {"repo", "pr", "issue", "headSha"}, "actor", "data": {"title", "url"}}` | `{"accepted": true}`; an `id` seen before is accepted and ignored |
+| `events/emit` | `{"id", "kind", "occurredAt", "subject": {"repo", "pr", "issue", "headSha"}, "actor", "data": {"title", "url"}}`; in 0.2 `subject` may also have `project`, `environment`, `severity` and `ticket`, and `data` a `text` | `{"accepted": true}`; an `id` seen before is accepted and ignored |
 | `log` (notification) | `{"level": "info" \| "warn" \| "error", "message"}` | none |
 
 - `job` in a context query carries typed fields only: no prompt, no summary, no file contents.
 - Context `items` and event `data` are data. `obid` writes context items to `.obi/context/<plugin id>.md` in the job's worktree, fenced and labeled as quoted data, and shows event data to the owner as text. Neither is ever placed in a prompt as an instruction.
-- Event `kind`s in this version: `pull_request.review_requested`, `pull_request.changes_requested`, `issue.assigned`, `check.failed`, `mention`. Each accepted event becomes one inbox item of kind `pluginEvent` (runner-api.md, "obid only: plug-ins", where its fields and its one answer are defined). Events never start work, and no remembered decision covers them in this version: acting on an event is the owner's step. Remembered decisions for events, and work started from them, are a later version's, specified in runner-api.md before anyone builds them.
+- Event `kind`s: `pull_request.review_requested`, `pull_request.changes_requested`, `issue.assigned`, `check.failed`, `mention` (0.1 and 0.2), each about `subject.repo` (`owner/name`, required); and, in 0.2 only:
+  - `deploy.failed`, "Deploy failed": needs `subject.project` and `subject.environment`;
+  - `alert.fired`, "Alert": needs `subject.project` and `subject.severity`;
+  - `ticket.assigned`, "Ticket assigned": needs `subject.ticket`.
+
+  For these three `subject.repo` is optional: empty, or `owner/name`. A kind missing a field it needs is refused.
+- Typed subject fields, each held to its form before anything is made from it: `project` is 1 to 100 of ASCII letters, digits, `.`, `_` and `-`; `environment` is `production`, `preview`, `staging` or `development`; `severity` is `critical`, `error`, `warning` or `info`; `ticket` is a key like `ENG-123` (an upper-case letter, up to 9 more upper-case letters or digits, `-`, and a number from 1 of at most 9 digits).
+- Quoted data: `actor` (at most 256 bytes), `data.title` (1,024), `data.url` (2,048, empty or `http(s)`), and in 0.2 `data.text` (16 KiB: a log's tail, an alert's message, a ticket's description). Each is refused, not cut, when longer.
+- Each accepted event becomes one inbox item of kind `pluginEvent` (runner-api.md, "obid only: plug-ins", where its fields and answers are defined), its words from the typed fields only. Events never start work by themselves, and no remembered decision covers them: a `deploy.failed` or `alert.fired` about one of `obid`'s repositories is an offer, `Look into it`, and a `ticket.assigned` one, `Fix it`; the owner's answer (or the conversation's brain, as for a GitHub offer) starts an ordinary job, with what the plug-in sent quoted in its `.obi/inputs/`. The event orchestrator never acts on a plug-in's event. Remembered decisions for events are #1314's, specified in runner-api.md before anyone builds them.
 
 ### 5.5 Rust interface
 

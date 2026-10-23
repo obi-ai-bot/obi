@@ -23,6 +23,7 @@ pub mod conversation;
 pub mod decisions;
 pub mod detail;
 pub mod devices;
+pub mod event_work;
 pub mod events;
 pub mod facts;
 pub mod failures;

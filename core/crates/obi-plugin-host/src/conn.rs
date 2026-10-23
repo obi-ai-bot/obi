@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use obi_plugin_api::rpc::{self, Message, RequestId, code, method};
-use obi_plugin_api::{Event, EventKind, Kind, PROTOCOL, PluginError, PluginEvent, PluginId};
+use obi_plugin_api::{Event, EventKind, Kind, PluginError, PluginEvent, PluginId};
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
@@ -44,6 +44,8 @@ pub(crate) const BUSY: i64 = -32000;
 #[derive(Debug)]
 pub(crate) struct Peer {
     pub id: PluginId,
+    /// The protocol its manifest names: what `initialize` sends, and its answer must say.
+    pub protocol: String,
     /// The kinds its manifest lists: what its `initialize` answer may say it serves.
     pub kinds: Vec<Kind>,
     /// The manifest's `events.kinds`; empty for a plug-in that isn't an `events` plug-in.
@@ -54,9 +56,15 @@ pub(crate) struct Peer {
 }
 
 impl Peer {
-    pub(crate) fn new(id: PluginId, kinds: Vec<Kind>, event_kinds: Vec<EventKind>) -> Peer {
+    pub(crate) fn new(
+        id: PluginId,
+        protocol: String,
+        kinds: Vec<Kind>,
+        event_kinds: Vec<EventKind>,
+    ) -> Peer {
         Peer {
             id,
+            protocol,
             kinds,
             event_kinds,
             seen: Mutex::new(Seen::default()),
@@ -314,8 +322,9 @@ impl Reader {
                 result,
             } => {
                 if *lock(&self.initialize_id) == Some(id) {
-                    let kinds = rpc::from_value::<rpc::InitializeResult>(result.clone())
-                        .and_then(|result| initialize_kinds(&self.peer.kinds, result));
+                    let kinds = rpc::from_value::<rpc::InitializeResult>(result.clone()).and_then(
+                        |result| initialize_kinds(&self.peer.protocol, &self.peer.kinds, result),
+                    );
                     if let Ok(kinds) = kinds {
                         *lock(&self.served) = kinds;
                     }
@@ -415,15 +424,16 @@ impl Reader {
     }
 }
 
-/// The kinds an `initialize` answer says it serves, when that answer is `obi-plugin/0.1` and
-/// they are among `manifest_kinds`.
+/// The kinds an `initialize` answer says it serves, when that answer speaks `protocol` (its
+/// manifest's) and they are among `manifest_kinds`.
 pub(crate) fn initialize_kinds(
+    protocol: &str,
     manifest_kinds: &[Kind],
     result: rpc::InitializeResult,
 ) -> Result<Vec<Kind>, PluginError> {
-    if result.protocol != PROTOCOL {
+    if result.protocol != protocol {
         return Err(PluginError::Protocol(format!(
-            "it speaks {:?}, not {PROTOCOL:?}",
+            "it speaks {:?}, not {protocol:?}",
             result.protocol
         )));
     }

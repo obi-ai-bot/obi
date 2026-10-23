@@ -19,6 +19,8 @@ What the macOS sandbox can't stop:
 
 On Linux, Unix sockets in the abstract namespace (no file) stay reachable, because the plug-in shares the machine's network namespace.
 
+**Event plug-ins** declare the kinds they emit in the manifest's `events.kinds`, and send each event with `events/emit` (docs/ARCHITECTURE.md 5.4). An `obi-plugin/0.1` manifest may list the five GitHub kinds (`pull_request.review_requested`, `pull_request.changes_requested`, `issue.assigned`, `check.failed`, `mention`). Work from anywhere else needs `"manifest": "obi-plugin/0.2"` and its kinds: `deploy.failed` (with `subject.project` and `subject.environment`), `alert.fired` (`subject.project` and `subject.severity`) and `ticket.assigned` (`subject.ticket`), and `data.text` for a log's tail or a message, at most 16 KiB. On one of `obid`'s repositories (`subject.repo`) they become offers the owner starts with one tap; whatever the plug-in wrote reaches the agent only quoted. `core/crates/obid/tests/plugins/alerts` is a working example in `sh`.
+
 | Plug-in | Kind | |
 |---|---|---|
 | [`tetrix`](tetrix/) | `agent-mcp` | Tetrix's code graph and memory, for a job's agents. |

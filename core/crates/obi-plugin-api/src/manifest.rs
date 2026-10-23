@@ -9,7 +9,7 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{EventKind, Kind, PROTOCOL, PluginError, PluginId};
+use crate::{EventKind, Kind, PROTOCOL, PROTOCOLS, PluginError, PluginId};
 
 /// The manifest's file name inside the plug-in's folder.
 pub const MANIFEST_FILE: &str = "obi-plugin.json";
@@ -20,7 +20,7 @@ pub const MAX_TOOL_NAME_BYTES: usize = 128;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Manifest {
-    /// Always [`PROTOCOL`].
+    /// One of [`PROTOCOLS`]: the protocol it speaks on the wire too.
     pub manifest: String,
     /// Unique, and the folder's name.
     pub id: PluginId,
@@ -207,8 +207,11 @@ impl Manifest {
     /// The rules of docs/ARCHITECTURE.md 5.2 that parsing alone doesn't hold.
     pub fn validate(&self) -> Result<(), PluginError> {
         let fail = |reason: String| Err(PluginError::Manifest(reason));
-        if self.manifest != PROTOCOL {
-            return fail(format!("manifest is {:?}, not {PROTOCOL:?}", self.manifest));
+        if !PROTOCOLS.contains(&self.manifest.as_str()) {
+            return fail(format!(
+                "manifest is {:?}, not one of {PROTOCOLS:?}",
+                self.manifest
+            ));
         }
         if self.name.trim().is_empty() {
             return fail("name is empty".into());
@@ -253,6 +256,14 @@ impl Manifest {
                 }
                 if !unique(&spec.kinds) {
                     return fail("events.kinds lists a kind twice".into());
+                }
+                if self.manifest == PROTOCOL
+                    && let Some(kind) = spec.kinds.iter().find(|kind| !kind.is_github())
+                {
+                    return fail(format!(
+                        "events.kinds lists {}, which needs obi-plugin/0.2",
+                        kind.as_str()
+                    ));
                 }
             }
             (None, false) => {}
