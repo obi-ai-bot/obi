@@ -1,10 +1,10 @@
 #!/bin/bash
 # Ships Oby as a notarized DMG that updates itself (#282): docs/release.md has the steps around it.
 #
-#   scripts/release.sh <version> [--dry-run] [--full] [--notes <file>]
+#   scripts/release.sh <version> [--dry-run] [--full] [--notes <file>] [--from-upload]
 #
 # Run on a Mac with Xcode 27. In order:
-#   0. runs the checks (swift test, the Mac app with MacTests), side by side, through
+#   0. runs the checks (swift test, the Mac app with MacTests), one after the other, through
 #      scripts/tested.sh: nothing is built unless they pass. A check that already passed on this
 #      Mac on the same files (run by the merge ritual with `scripts/tested.sh run`) is skipped,
 #      saying so; --full runs them all;
@@ -285,19 +285,35 @@ check_obi_vm() {
     note "obi-vm: arm64, its entitlement, the image ${root_sha:0:12}… $published"
 }
 
-upload_r2() {
-    local file="$1" name="$2" type="$3"
-    if command -v wrangler >/dev/null 2>&1; then
-        wrangler r2 object put "$bucket/$name" --file "$file" --content-type "$type" --remote
-        return
-    fi
-    command -v aws >/dev/null 2>&1 || die "neither wrangler nor aws is installed: docs/release.md, Uploading"
+# The Cloudflare account the bucket is in: OBY_R2_ACCOUNT_ID from the environment, .env.local or the
+# keychain (service oby-r2, account account-id). Wrangler gets it as CLOUDFLARE_ACCOUNT_ID, since a
+# login that sees more than one account won't pick one by itself. Checked before anything is built.
+r2_account() {
     if [[ -f "$root/.env.local" ]]; then
         # OBY_R2_ACCOUNT_ID, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, never in git.
         set -a; # shellcheck disable=SC1091
         source "$root/.env.local"; set +a
     fi
     : "${OBY_R2_ACCOUNT_ID:=$(security find-generic-password -s oby-r2 -a account-id -w 2>/dev/null || true)}"
+    if command -v wrangler >/dev/null 2>&1; then
+        if [[ -n "$OBY_R2_ACCOUNT_ID" ]]; then
+            export CLOUDFLARE_ACCOUNT_ID="$OBY_R2_ACCOUNT_ID"
+        elif [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+            local accounts
+            accounts="$(wrangler whoami 2>/dev/null | grep -cE '[0-9a-f]{32}' || true)"
+            (( accounts <= 1 )) || die "wrangler sees $accounts Cloudflare accounts and none is chosen: set OBY_R2_ACCOUNT_ID (or the keychain item oby-r2/account-id) to the one with the $bucket bucket: docs/release.md, Uploading"
+        fi
+        return
+    fi
+    command -v aws >/dev/null 2>&1 || die "neither wrangler nor aws is installed: docs/release.md, Uploading"
+}
+
+upload_r2() {
+    local file="$1" name="$2" type="$3"
+    if command -v wrangler >/dev/null 2>&1; then
+        wrangler r2 object put "$bucket/$name" --file "$file" --content-type "$type" --remote
+        return
+    fi
     : "${AWS_ACCESS_KEY_ID:=$(security find-generic-password -s oby-r2 -a access-key-id -w 2>/dev/null || true)}"
     : "${AWS_SECRET_ACCESS_KEY:=$(security find-generic-password -s oby-r2 -a secret-access-key -w 2>/dev/null || true)}"
     [[ -n "$OBY_R2_ACCOUNT_ID" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] || die "no R2 credentials in the keychain (service oby-r2) or .env.local: docs/release.md, Uploading"
@@ -307,11 +323,12 @@ upload_r2() {
 }
 
 main() {
-    local version="" dry_run=false full=false notes_file=""
+    local version="" dry_run=false full=false notes_file="" from_upload=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --dry-run) dry_run=true ;;
             --full) full=true ;;
+            --from-upload) from_upload=true ;;
             --notes) shift; notes_file="${1:-}"; [[ -f "$notes_file" ]] || die "--notes needs a file" ;;
             -h|--help) sed -n '2,36p' "${BASH_SOURCE[0]}"; exit 0 ;;
             -*) die "unknown option $1" ;;
@@ -319,7 +336,8 @@ main() {
         esac
         shift
     done
-    [[ -n "$version" ]] || die "usage: scripts/release.sh <version> [--dry-run] [--full] [--notes <file>]"
+    [[ -n "$version" ]] || die "usage: scripts/release.sh <version> [--dry-run] [--full] [--notes <file>] [--from-upload]"
+    ! { $from_upload && $dry_run; } || die "--from-upload publishes: it doesn't go with --dry-run"
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "the version is X.Y.Z, like 1.2.3"
     [[ "$(uname)" == "Darwin" ]] || die "runs on a Mac with Xcode"
     for tool in xcodebuild xcrun swift hdiutil codesign xmllint plutil git jq curl; do
@@ -348,6 +366,21 @@ main() {
         die "the working tree isn't clean: commit or put aside what's changed first"
     fi
 
+    $dry_run || r2_account
+
+    # A release that stopped at the upload (its build, DMG and appcast are in build/release/, and
+    # HEAD is its version commit): publish what's there, through the same checks.
+    if $from_upload; then
+        local dmg="$out/Oby-$version.dmg" build
+        [[ -f "$dmg" && -f "$out/appcast.xml" ]] || die "--from-upload needs build/release/Oby-$version.dmg and appcast.xml from this release"
+        build="$(git log -1 --format=%s | sed -nE "s/^chore\(release\): Oby $version \(([0-9]+)\)$/\1/p")"
+        [[ -n "$build" ]] || die "--from-upload runs on the release's own commit, chore(release): Oby $version (N)"
+        grep -q "<sparkle:shortVersionString>$version</sparkle:shortVersionString>" "$out/appcast.xml" || die "build/release/appcast.xml has no entry for $version"
+        spctl -a -t open --context context:primary-signature "$dmg" 2>/dev/null || die "$dmg isn't a notarized DMG Gatekeeper accepts"
+        publish "$dmg" "$version" "$build" "$tag" "$base"
+        return
+    fi
+
     rm -rf "$out"
     mkdir -p "$out"
 
@@ -363,7 +396,8 @@ main() {
     # 0. The checks Oby runs before a merge (docs/ci.md), without the iPhone app, which this release
     #    doesn't ship: nothing is built for release, let alone uploaded, unless they pass. One that
     #    passed on these files on this Mac (scripts/tested.sh) doesn't run again; the ones that run
-    #    run side by side, through tested.sh, which records them when they pass on a clean checkout.
+    #    run one after the other, through tested.sh, which records them when they pass on a clean
+    #    checkout. Side by side, the load timed tests out (CursorTests, CharacterTests' page, 0.3.0).
     say "Checks"
     local suite reason recording=true
     local -a running=()
@@ -383,21 +417,22 @@ main() {
         running+=("$suite")
     done
     if (( ${#running[@]} )); then
-        local i failed=""
         for suite in "${running[@]}"; do
+            note "$suite…"
             if $recording; then
                 tested_run "$suite" > "$out/$suite.log" 2>&1 &
             else
                 tested_command "$suite" > "$out/$suite.log" 2>&1 &
             fi
-            bg_pids+=($!)
+            # In the background only so a stopped release stops it too (cleanup).
+            bg_pids=($!)
+            if ! wait "${bg_pids[0]}"; then
+                bg_pids=()
+                tail -n 40 "$out/$suite.log"
+                die "failed: $suite (build/release/$suite.log)"
+            fi
+            bg_pids=()
         done
-        for i in "${!running[@]}"; do
-            wait "${bg_pids[$i]}" || failed+=" ${running[$i]}"
-        done
-        bg_pids=()
-        for suite in $failed; do tail -n 40 "$out/$suite.log"; done
-        [[ -z "$failed" ]] || die "failed:$failed (build/release/<name>.log)"
         note "passed: ${running[*]}"
         for suite in "${running[@]}"; do grep -h '^recorded: ' "$out/$suite.log" | sed 's/^/    /' || true; done
     fi
@@ -603,6 +638,13 @@ main() {
         note "$out/appcast.xml"
         exit 0
     fi
+    publish "$dmg" "$version" "$build" "$tag" "$base"
+}
+
+# 7. Upload, 8. tag: the DMG, checked at its public URL, then the appcast that points at it.
+publish() {
+    local dmg="$1" version="$2" build="$3" tag="$4" base="$5" dmg_name
+    dmg_name="$(basename "$dmg")"
     say "Uploading to R2 ($bucket)"
     upload_r2 "$dmg" "$dmg_name" "application/octet-stream"
     # The appcast points at the DMG only once the public URL serves this very file.
@@ -610,6 +652,7 @@ main() {
     [[ "$(stat -f %z "$out/published.dmg")" == "$(stat -f %z "$dmg")" && \
         "$(shasum -a 256 < "$out/published.dmg")" == "$(shasum -a 256 < "$dmg")" ]] \
         || die "$base/$dmg_name isn't the DMG just built (size or sha256): the appcast isn't uploaded"
+    rm -f "$out/published.dmg"
     note "$base/$dmg_name serves this DMG (size and sha256)"
     upload_r2 "$out/appcast.xml" "appcast.xml" "application/xml"
     say "Tagging $tag"
