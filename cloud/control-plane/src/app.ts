@@ -968,7 +968,7 @@ async function forgetPhone(request: Request, env: Env, id: string): Promise<Resp
 }
 
 /// obid's push: `{pushId, sealed, collapse?, urgent?, at}` with `Oby-Push-Mac`, the HMAC-SHA-256
-/// of the body's bytes under the pushKey's text, base64url; `at` (Unix seconds, in the body, so
+/// of the body's bytes under the pushKey's 32 raw bytes, base64url; `at` (Unix seconds, in the body, so
 /// the MAC covers it) within PUSH_SKEW_SECONDS of the relay's clock. The MAC is checked before
 /// anything is read or counted, so a stranger's push costs no D1 and can't spend the phone's
 /// allowance. Apple gets the fixed alert with `sealed` beside `aps`; Apple saying the token is gone
@@ -1052,23 +1052,24 @@ function pushSecretKey(env: Env): string {
   return key;
 }
 
-/// HMAC-SHA-256 of `message` under the UTF-8 bytes of `key`, base64url: how every key here is made
-/// from the one before it, by its text.
-async function hmac(key: string, message: Uint8Array): Promise<string> {
-  const imported = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+/// HMAC-SHA-256 of `message` under the raw bytes `key`, base64url with no padding. A pushSecret's
+/// or a pushKey's raw bytes are its base64url decoded (32 bytes), never its text.
+async function hmac(key: Uint8Array, message: Uint8Array): Promise<string> {
+  const imported = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return base64url(new Uint8Array(await crypto.subtle.sign("HMAC", imported, message)));
 }
 
-/// A phone's pushSecret: the HMAC of PUSH_SECRET_INFO and its pushId under PUSH_SECRET_KEY, made
-/// again whenever it's needed, so D1 keeps no secret.
+/// A phone's pushSecret: the HMAC of PUSH_SECRET_INFO, a newline and its pushId, under
+/// PUSH_SECRET_KEY's text (the relay's own, so no one else makes it), made again whenever it's
+/// needed, so D1 keeps no secret.
 async function pushSecret(env: Env, id: string): Promise<string> {
-  return hmac(pushSecretKey(env), new TextEncoder().encode(`${PUSH_SECRET_INFO}\n${id}`));
+  return hmac(new TextEncoder().encode(pushSecretKey(env)), new TextEncoder().encode(`${PUSH_SECRET_INFO}\n${id}`));
 }
 
-/// The pushKey the phone gives obid: the HMAC of PUSH_KEY_INFO under the pushSecret. obid signs
-/// pushes with it, and can't register or forget the phone.
+/// The pushKey the phone gives obid: the HMAC of PUSH_KEY_INFO under the pushSecret's 32 raw
+/// bytes. obid signs pushes with it, and can't register or forget the phone.
 async function pushKey(env: Env, id: string): Promise<string> {
-  return hmac(await pushSecret(env, id), new TextEncoder().encode(PUSH_KEY_INFO));
+  return hmac(fromBase64url(await pushSecret(env, id))!, new TextEncoder().encode(PUSH_KEY_INFO));
 }
 
 /// Whether two texts are the same, compared in constant time.
@@ -1084,10 +1085,10 @@ async function secretMatches(env: Env, id: string, secret: unknown): Promise<boo
   return sameText(secret, await pushSecret(env, id));
 }
 
-/// Whether `mac` is the HMAC of `body` under `id`'s pushKey.
+/// Whether `mac` is the HMAC of `body` under `id`'s pushKey's 32 raw bytes.
 async function macMatches(env: Env, id: string, mac: string | null, body: Uint8Array): Promise<boolean> {
   if (!mac) return false;
-  return sameText(mac, await hmac(await pushKey(env, id), body));
+  return sameText(mac, await hmac(fromBase64url(await pushKey(env, id))!, body));
 }
 
 /// A JSON object of at most `max` bytes (413 past it).

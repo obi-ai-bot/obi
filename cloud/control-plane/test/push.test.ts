@@ -76,9 +76,10 @@ async function phone(app: App, fields: Record<string, unknown> = {}): Promise<Ph
   return answer.body;
 }
 
-/// HMAC-SHA-256 under the UTF-8 bytes of `key`'s text, base64url: as the phone and obid make them.
+/// HMAC-SHA-256 under `key`'s raw bytes (its base64url decoded, never its text), base64url: as the
+/// phone and obid make them.
 async function hmac(key: string, message: string): Promise<string> {
-  const imported = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const imported = await crypto.subtle.importKey("raw", fromBase64url(key)!, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return base64url(new Uint8Array(await crypto.subtle.sign("HMAC", imported, new TextEncoder().encode(message))));
 }
 
@@ -436,6 +437,38 @@ describe("a push", () => {
     const tokens = apns.alerts().map((sent) => sent.headers.get("authorization"));
     expect(tokens[1]).toBe(tokens[0]);
     expect(tokens[2]).not.toBe(tokens[1]);
+  });
+});
+
+describe("the keys", () => {
+  // A fixed vector for obid and the iPhone to copy, worked out apart from the relay (Python's hmac).
+  // Every HMAC key is raw bytes: a pushSecret's or a pushKey's base64url, decoded (32 bytes).
+  const VECTOR = {
+    pushId: "b2J5LXRlc3QtdmVjdG9yLTAx",
+    pushSecret: "7x-XJBtltDkgComjTzh2aougWSW5C4fOPr7MutSocH4",
+    pushKey: "vx_9SyYw9p7qPCxR8xHlDF8WlTOsR_LRA67SHhzpTHM",
+    body: '{"pushId":"b2J5LXRlc3QtdmVjdG9yLTAx","sealed":"c2VhbGVkLWZvci10aGUtcGhvbmU","collapse":"9f08fd10","urgent":true,"at":1791806400}',
+    mac: "EK3ocbR_NCA7i3gJQAGEnXJe2mGFd74zqt190mk1a7s",
+  };
+
+  it("match the fixed vector: pushSecret to pushKey, and pushKey and body to Oby-Push-Mac", async () => {
+    expect(await hmac(VECTOR.pushSecret, "oby push key v1")).toBe(VECTOR.pushKey);
+    expect(await hmac(VECTOR.pushKey, VECTOR.body)).toBe(VECTOR.mac);
+    // The relay makes the same: the vector's pushSecret is what it answers for that pushId with
+    // this PUSH_SECRET_KEY, and it takes the vector's push at the vector's time.
+    const apns = fakeAPNs();
+    const app = testApp({ apns: apns.send }, { ...secrets(), PUSH_SECRET_KEY: "oby-test-vector-only-never-a-real-key-00000" });
+    expect(seconds(app)).toBe(1791806400);
+    const again = await register(app, { pushId: VECTOR.pushId, pushSecret: VECTOR.pushSecret });
+    expect(again.status).toBe(200);
+    expect(again.body).toEqual({ pushId: VECTOR.pushId, pushSecret: VECTOR.pushSecret });
+    const pushed = await app.raw("POST", "/v1/push", VECTOR.body, { "Oby-Push-Mac": VECTOR.mac });
+    expect(pushed.status).toBe(200);
+    expect(apns.alerts()).toHaveLength(1);
+    // The pushKey's text as the HMAC key is refused.
+    const imported = await crypto.subtle.importKey("raw", new TextEncoder().encode(VECTOR.pushKey), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const byText = base64url(new Uint8Array(await crypto.subtle.sign("HMAC", imported, new TextEncoder().encode(VECTOR.body))));
+    expect((await app.raw("POST", "/v1/push", VECTOR.body, { "Oby-Push-Mac": byText })).status).toBe(401);
   });
 });
 

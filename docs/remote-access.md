@@ -134,11 +134,20 @@ How Oby reaches the iPhone when the phone isn't talking to the Mac (#398, the ow
 
 These routes are the one part of the control plane open to any phone, outsiders included, on every instance: `MEMBER_WORKSPACES` doesn't apply, and the phone never signs in.
 
-**The keys.** Every HMAC here is HMAC-SHA-256 keyed with the UTF-8 bytes of the previous value's base64url text (not its decoded bytes), and every result is base64url without padding:
+**The keys.** Every HMAC is HMAC-SHA-256, and **every HMAC key is raw bytes, never base64url text**: a `pushSecret`'s or a `pushKey`'s raw bytes are its base64url decoded, 32 bytes. Every result is base64url with no padding (43 characters).
 
-- `pushSecret` = HMAC(key `PUSH_SECRET_KEY`, message `oby-push-secret/1`, a newline, then the `pushId`). The relay makes it again whenever it needs it, so D1 keeps no secret.
-- `pushKey` = HMAC(key `pushSecret`, message `oby push key v1`). 43 characters. The phone makes it, and the relay makes it again from the `pushSecret`.
-- `Oby-Push-Mac` = HMAC(key `pushKey`, message the push's body, its exact bytes).
+- `pushSecret` = HMAC(key: the UTF-8 bytes of the relay's own `PUSH_SECRET_KEY`, message: UTF-8 `oby-push-secret/1`, a newline, then the `pushId`). The relay makes it again whenever it needs it, so D1 keeps no secret. Only the relay makes it.
+- `pushKey` = HMAC(key: the 32 raw bytes of `pushSecret`, message: UTF-8 `oby push key v1`). The phone makes it, and the relay makes it again from the `pushSecret`.
+- `Oby-Push-Mac` = HMAC(key: the 32 raw bytes of `pushKey`, message: the raw request body bytes, exactly as sent).
+
+A fixed vector to check against (`test/push.test.ts`, "the keys", worked out apart from the relay with Python's `hmac`):
+
+| | |
+| --- | --- |
+| `pushSecret` | `7x-XJBtltDkgComjTzh2aougWSW5C4fOPr7MutSocH4` |
+| `pushKey` | `vx_9SyYw9p7qPCxR8xHlDF8WlTOsR_LRA67SHhzpTHM` |
+| body | `{"pushId":"b2J5LXRlc3QtdmVjdG9yLTAx","sealed":"c2VhbGVkLWZvci10aGUtcGhvbmU","collapse":"9f08fd10","urgent":true,"at":1791806400}` |
+| `Oby-Push-Mac` | `EK3ocbR_NCA7i3gJQAGEnXJe2mGFd74zqt190mk1a7s` |
 
 ### The calls
 

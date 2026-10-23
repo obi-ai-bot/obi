@@ -6,3 +6,8 @@ useDefault = true
 description = "Minified Lexical in obid's web UI: its selection anchor and focus keys read as an API key"
 regexTarget = "match"
 regexes = ['''^\w{1,3}\.anchor\.key,\w{1,3}=\w{1,3}\.focus\.key;?$''']
+
+[[allowlists]]
+description = "The push relay's published test vector (docs/remote-access.md, Pushes; test/push.test.ts): a pushSecret and pushKey made from a test-only PUSH_SECRET_KEY, exactly these two values"
+regexTarget = "secret"
+regexes = ['''^7x-XJBtltDkgComjTzh2aougWSW5C4fOPr7MutSocH4$''', '''^vx_9SyYw9p7qPCxR8xHlDF8WlTOsR_LRA67SHhzpTHM$''']
