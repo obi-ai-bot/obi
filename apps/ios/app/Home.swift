@@ -58,7 +58,6 @@ extension View {
 struct HomeView: View {
     @Environment(Phone.self) private var phone
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.colorScheme) private var colorScheme
     let character: ObyCharacter
     @State private var text = ""
     @FocusState private var typing: Bool
@@ -85,9 +84,12 @@ struct HomeView: View {
                     .keepsDraft($text, as: Drafts.home)
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { typing = false; phone.panel = .home } label: { Image(systemName: "sidebar.left") }
-                        .accessibilityLabel("Show sidebar")
+                // One panel button, as Sangam's: while the panel is open, its own puts it away.
+                if phone.panel == nil {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { typing = false; phone.panel = .home } label: { Image(systemName: "sidebar.left") }
+                            .accessibilityLabel("Show sidebar")
+                    }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { phone.homePath.append(.settings) } label: { OwnerPicture(name: HomeLine.owner(ofMac: phone.link?.name)) }
@@ -116,15 +118,7 @@ struct HomeView: View {
         let running = work.count { $0.status == .running }
         let needs = WorkList.needsYou(work, loose: phone.loose.count)
         return VStack(spacing: 0) {
-            WebView(character.page)
-                .webViewContentBackground(.hidden)
-                .opacity(character.ready ? 1 : 0)
-                .allowsHitTesting(false)
-                .frame(width: 160, height: 157)
-                // White in both themes: on light, a soft shadow keeps its shape (the design's `--oby-glow`).
-                .shadow(color: .black.opacity(colorScheme == .light ? 0.10 : 0), radius: 11, y: 10)
-                .accessibilityElement()
-                .accessibilityLabel("Oby")
+            StageOby(character: character)
             Button {
                 if let first = PhoneWork.firstNeeding(work, inbox: phone.answering) { phone.homePath.append(first) }
             } label: {
@@ -186,6 +180,24 @@ struct HomeView: View {
         text = ""
         typing = false
         phone.homePath.append(.newConversation)
+    }
+}
+
+/// Oby on its stage (`.oby-frame`), the same face on Home and on the unpaired screen.
+struct StageOby: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let character: ObyCharacter
+
+    var body: some View {
+        WebView(character.page)
+            .webViewContentBackground(.hidden)
+            .opacity(character.ready ? 1 : 0)
+            .allowsHitTesting(false)
+            .frame(width: 160, height: 157)
+            // White in both themes: on light, a soft shadow keeps its shape (the design's `--oby-glow`).
+            .shadow(color: .black.opacity(colorScheme == .light ? 0.10 : 0), radius: 11, y: 10)
+            .accessibilityElement()
+            .accessibilityLabel("Oby")
     }
 }
 

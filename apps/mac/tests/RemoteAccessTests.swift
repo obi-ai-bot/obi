@@ -8,7 +8,7 @@ struct RemoteAccessTests {
     /// cloudflared ships inside Oby.app (apps/mac/app/Tools/bundle-cloudflared.sh): the pinned release,
     /// universal, signed with the app's identity and the hardened runtime.
     @Test func cloudflaredIsBundledAndSigned() throws {
-        let binary = try #require(TunnelRunner.bundled)
+        let binary = try #require(ObidTunnel.bundled)
         #expect(binary.path.hasSuffix("/Contents/MacOS/cloudflared"))
         #expect(FileManager.default.isExecutableFile(atPath: binary.path))
         let verified = try run("/usr/bin/codesign", ["--verify", "--strict", "--verbose=2", binary.path])
@@ -56,11 +56,10 @@ struct RemoteAccessTests {
         let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
         defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
-        let launched = Launched()
-        let runner = TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) })
+        let host = FakeHost()
         let sheet = Sheet("oby-signin://done?state=s1&code=c1")
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
-                                  secrets: secrets, defaults: defaults, runner: runner, authenticate: sheet.run)
+                                  secrets: secrets, defaults: defaults, host: host, authenticate: sheet.run)
         defer { remote.stop() }
         #expect(!remote.on)
         #expect(remote.status == "Off")
@@ -72,11 +71,9 @@ struct RemoteAccessTests {
         #expect(defaults.bool(forKey: "remote.enabled"))
         let saved = try #require(try secrets.value(RemoteAccess.keyKey))
         #expect(saved.hasPrefix(SecureEnclave.isAvailable ? "se:" : "sw:"))
-        #expect(try secrets.value(RemoteAccess.tokenKey) == "eyJ-run-token")
-        let process = try #require(launched.processes.first)
-        #expect(process.executableURL?.path == "/usr/bin/true")
-        #expect(process.arguments == ["tunnel", "--no-autoupdate", "run"])
-        #expect(process.environment?["TUNNEL_TOKEN"] == "eyJ-run-token")
+        // The run token goes to obid (#896), which runs cloudflared; the app keeps no copy.
+        #expect(host.handed == ["eyJ-run-token"])
+        #expect(try secrets.value(RemoteAccess.tokenKey) == nil)
         #expect(remote.tunnel == .starting)
 
         let requests = Array(exchange.requests.prefix(5))
@@ -95,18 +92,20 @@ struct RemoteAccessTests {
             #expect(try Self.verifies(request, publicKey: publicKey))
         }
 
-        // Off keeps the hostname for next time; nothing ran, so there's nothing to end.
-        remote.turnOff()
+        // Off stops obid's tunnel and keeps the hostname for next time.
+        await remote.turnOff()
         #expect(!remote.on)
         #expect(remote.hostname == "oby-abcdefghij0123456789.tetrix.pro")
         #expect(!defaults.bool(forKey: "remote.enabled"))
+        #expect(host.stops == 1)
         #expect(remote.tunnel == .off)
 
         // Forget: one signed call, then nothing of it stays here.
         let forgetting = Exchange([(204, "")])
         let forgets = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: forgetting.transport),
-                                   secrets: secrets, defaults: defaults, runner: runner)
+                                   secrets: secrets, defaults: defaults, host: host)
         await forgets.forget()
+        #expect(host.stops == 2)
         #expect(forgets.problem == nil)
         #expect(forgetting.requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == ["DELETE /v1/installations/self"])
         #expect(try Self.verifies(try #require(forgetting.requests.first), publicKey: publicKey))
@@ -136,7 +135,7 @@ struct RemoteAccessTests {
         let sheet = Sheet("oby-signin://done?state=s1&code=c1")
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                   secrets: secrets, defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }), authenticate: sheet.run)
+                                  host: FakeHost(), authenticate: sheet.run)
         defer { remote.stop() }
         #expect(remote.signsInFirst)
 
@@ -152,7 +151,7 @@ struct RemoteAccessTests {
         let body = try JSONDecoder().decode([String: String].self, from: try #require(exchange.requests[2].httpBody))
         #expect(body["signIn"] == "s1" && body["signInCode"] == "c1")
         // Off keeps the hostname: the switch, not the buttons.
-        remote.turnOff()
+        await remote.turnOff()
         #expect(!remote.signsInFirst)
     }
 
@@ -163,7 +162,7 @@ struct RemoteAccessTests {
         let members = Exchange([(200, #"{"providers": ["google"], "workspaces": ["deskree.com"]}"#)])
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: members.transport),
                                   secrets: KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)"), defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }), authenticate: { $0 })
+                                  host: FakeHost(), authenticate: { $0 })
         #expect(remote.providers == [.google, .apple])
         await remote.loadSignInOptions()
         #expect(remote.providers == [.google])
@@ -174,7 +173,7 @@ struct RemoteAccessTests {
         let down = Exchange([(503, #"{"error": "down"}"#)])
         let offline = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: down.transport),
                                    secrets: KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)"), defaults: defaults,
-                                   runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }), authenticate: { $0 })
+                                   host: FakeHost(), authenticate: { $0 })
         await offline.loadSignInOptions()
         #expect(offline.providers == [.google, .apple])
     }
@@ -187,7 +186,7 @@ struct RemoteAccessTests {
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                   secrets: secrets, defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }),
+                                  host: FakeHost(),
                                   authenticate: Sheet("oby-signin://failed?state=s1").run)
         await remote.turnOn(with: .google)
         #expect(!remote.on)
@@ -206,7 +205,7 @@ struct RemoteAccessTests {
             let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
             let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                       secrets: secrets, defaults: defaults,
-                                      runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }), authenticate: Sheet(back).run)
+                                      host: FakeHost(), authenticate: Sheet(back).run)
             await remote.turnOn(with: .apple)
             #expect(!remote.on)
             #expect(remote.problem == said)
@@ -229,7 +228,7 @@ struct RemoteAccessTests {
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                   secrets: secrets, defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }),
+                                  host: FakeHost(),
                                   authenticate: Sheet("oby-signin://done?state=s1&code=c1").run)
         defer { remote.stop() }
         await remote.turnOn(with: .apple)
@@ -255,7 +254,7 @@ struct RemoteAccessTests {
         try secrets.save(try MacKey.make(), as: RemoteAccess.keyKey)
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                   secrets: secrets, defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }),
+                                  host: FakeHost(),
                                   authenticate: { _ in Issue.record("no sign-in sheet at a check-in"); return URL(string: "oby-signin://failed")! })
         defer { remote.stop() }
         await remote.checkIn()
@@ -279,7 +278,7 @@ struct RemoteAccessTests {
         try secrets.save("eyJ-run-token", as: RemoteAccess.tokenKey)
         let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                   secrets: secrets, defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }),
+                                  host: FakeHost(),
                                   authenticate: { _ in Issue.record("no sign-in sheet at a check-in"); return URL(string: "oby-signin://failed")! })
         defer { remote.stop() }
 
@@ -292,9 +291,11 @@ struct RemoteAccessTests {
         #expect(exchange.requests.count == 1)
     }
 
-    /// At launch with remote access on, the tunnel runs again from the keychain's token; with
-    /// the token gone, it says so and stays off. The email sign-in's leftovers go.
-    @Test @MainActor func startsAgainFromTheKeychain() throws {
+    /// #896: an older Oby kept the run token in its own keychain and ran cloudflared itself. At
+    /// launch that token goes to obid once and the app's copy is deleted; the next launch has
+    /// nothing to hand over, and remote access stays on (obid has the token). The email sign-in's
+    /// leftovers go.
+    @Test @MainActor func aTokenLeftInTheKeychainMovesToObidOnce() async throws {
         let secrets = KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)")
         defer { for name in (try? secrets.names()) ?? [] { try? secrets.remove(name) } }
         let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
@@ -302,26 +303,71 @@ struct RemoteAccessTests {
         try secrets.save("eyJ-run-token", as: RemoteAccess.tokenKey)
         for name in RemoteAccess.oldSecrets { try secrets.save("old", as: name) }
         for key in RemoteAccess.oldDefaults { defaults.set("old", forKey: key) }
-        let launched = Launched()
+        let host = FakeHost()
         let plane = ControlPlane(base: URL(string: "https://oby-control.test")!) { _ in (Data(), 500) }
-        let remote = RemoteAccess(plane: plane, secrets: secrets, defaults: defaults,
-                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) }))
+        let remote = RemoteAccess(plane: plane, secrets: secrets, defaults: defaults, host: host)
+        defer { remote.stop() }
         #expect(remote.on)
-        remote.start()
-        #expect(try secrets.names().sorted() == [RemoteAccess.tokenKey])
+        await remote.start()
+        #expect(host.handed == ["eyJ-run-token"])
+        #expect(try secrets.names().isEmpty)
         #expect(RemoteAccess.oldDefaults.allSatisfy { defaults.object(forKey: $0) == nil })
-        #expect(launched.processes.first?.environment?["TUNNEL_TOKEN"] == "eyJ-run-token")
-        #expect(remote.tunnel == .starting)
 
-        try secrets.remove(RemoteAccess.tokenKey)
-        let again = RemoteAccess(plane: plane, secrets: secrets, defaults: defaults,
-                                 runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { launched.processes.append($0) }))
-        again.start()
-        #expect(!again.on)
-        #expect(again.problem?.contains("keychain") == true)
-        #expect(launched.processes.count == 1)
+        let again = RemoteAccess(plane: plane, secrets: secrets, defaults: defaults, host: host)
+        defer { again.stop() }
+        await again.start()
+        #expect(again.on && again.problem == nil)
+        #expect(host.handed.count == 1)
     }
 
+    /// Quitting the app stops its check-ins, never obid's tunnel (#896).
+    @Test @MainActor func quittingTheAppStopsNoTunnel() async throws {
+        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
+        defaults.set(true, forKey: "remote.enabled")
+        let host = FakeHost()
+        let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!) { _ in (Data(), 500) },
+                                  secrets: KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)"),
+                                  defaults: defaults, host: host)
+        remote.stop()
+        #expect(host.stops == 0)
+    }
+
+    /// With Settings › Runner on a remote runner there's no gateway on this Mac: turning remote
+    /// access on says so, before any sign-in.
+    @Test @MainActor func remoteAccessAsksForThisMacFirst() async throws {
+        let exchange = Exchange([])
+        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
+        let host = FakeHost()
+        host.thisMac = false
+        let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
+                                  secrets: KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)"),
+                                  defaults: defaults, host: host,
+                                  authenticate: { _ in Issue.record("no sign-in without obid here"); return URL(string: "oby-signin://failed")! })
+        await remote.turnOn()
+        #expect(!remote.on)
+        #expect(remote.problem == RemoteAccess.needsThisMac)
+        #expect(exchange.requests.isEmpty && host.handed.isEmpty)
+    }
+
+    /// obid's `tunnel` field, as Settings shows it.
+    @Test func obidsTunnelStateReads() {
+        #expect(ObidTunnel.state(["state": "connected"]) == .connected)
+        #expect(ObidTunnel.state(["state": "starting"]) == .starting)
+        #expect(ObidTunnel.state(["state": "off"]) == .off)
+        #expect(ObidTunnel.state(["state": "failed", "detail": "ERR no edge"]) == .failed("ERR no edge"))
+    }
+
+    /// obid as a test sees it: what it was handed and asked to stop.
+    @MainActor final class FakeHost: TunnelHost {
+        var onState: (RemoteAccess.TunnelState) -> Void = { _ in }
+        var handed: [String] = []
+        var stops = 0
+        var thisMac = true
+        func ready() throws { if !thisMac { throw Shell.Failure(message: RemoteAccess.needsThisMac) } }
+        func hand(_ token: String) async throws { try ready(); handed.append(token); onState(.starting) }
+        func stop() async throws { stops += 1; onState(.off) }
+        func refresh() async {}
+    }
 
     /// The Worker's check (cloud/control-plane/src/app.ts, `signed`), in CryptoKit.
     static func verifies(_ request: URLRequest, publicKey: Data) throws -> Bool {

@@ -157,8 +157,7 @@ struct ConnectScreen: View {
     /// What the QR code said: the gateway's URL, the Mac's link and the one-time secret.
     private func pair(_ value: String) async {
         do {
-            let envelope = try GatewayEnvelope.decode(value)
-            try await phone.pairGateway(url: envelope.url, credential: envelope.secret, link: envelope.link)
+            try await phone.pair(scanned: value)
             problem = nil
         } catch { problem = error.localizedDescription }
     }
@@ -230,17 +229,26 @@ private struct DigitBoxes: View {
 }
 
 /// The screen's one `ink` button, full width.
-private struct PrimaryButton: View {
+struct PrimaryButton: View {
     let title: String
     let action: () -> Void
+    @ScaledMetric(relativeTo: .body) private var size = Tokens.textLg
 
     var body: some View {
         Button(action: action) {
-            Text(title).font(Tokens.font(Tokens.textLg, .medium)).foregroundStyle(Tokens.onInk)
-                .frame(maxWidth: .infinity).frame(height: 48)
+            Text(title).font(Tokens.font(size, .medium)).foregroundStyle(Tokens.onInk)
+                .frame(maxWidth: .infinity).padding(.vertical, 12).frame(minHeight: 48)
                 .background(Tokens.ink, in: Capsule())
         }
         .buttonStyle(.plain)
+    }
+}
+
+extension Phone {
+    /// Pairs with what the Mac's QR code (or an invitation pasted) says.
+    func pair(scanned value: String) async throws {
+        let envelope = try GatewayEnvelope.decode(value)
+        try await pairGateway(url: envelope.url, credential: envelope.secret, link: envelope.link)
     }
 }
 
@@ -291,7 +299,7 @@ enum PairingCode {
     }
 }
 
-private struct QRScanner: UIViewControllerRepresentable {
+struct QRScanner: UIViewControllerRepresentable {
     var found: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(found: found) }

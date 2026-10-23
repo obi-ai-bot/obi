@@ -371,6 +371,70 @@ pub struct Answer {
     pub text: String,
 }
 
+/// The owner's tap on Confirm (#776): a fixed test key, registered once per obid (pairing opened
+/// for it), signs `oby-confirm\n<item>\n<title>\n<signedAt>` over the item's own title.
+pub fn confirm(obid: &Obid, item: &str) -> Answer {
+    confirm_with(obid, item, json!({"answer": "Confirm"}))
+}
+
+/// [`confirm`] with any body: the approval is added to it.
+pub fn confirm_with(obid: &Obid, item: &str, mut body: Value) -> Answer {
+    let approval = confirm_approval(obid, item);
+    body["approval"] = approval;
+    call(
+        obid,
+        "POST",
+        &format!("/v1/inbox/{item}/answer"),
+        Some(&body),
+    )
+}
+
+/// A fresh approval of Confirm on `item` by the test device, as the Mac or iPhone signs it.
+pub fn confirm_approval(obid: &Obid, item: &str) -> Value {
+    confirm_approval_at(obid, item, time::now())
+}
+
+/// [`confirm_approval`] signed at `at` (seconds since the epoch): two taps a second apart.
+pub fn confirm_approval_at(obid: &Obid, item: &str, at: i64) -> Value {
+    use base64::Engine as _;
+    use p256::ecdsa::signature::Signer as _;
+    use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+    let secret = p256::SecretKey::from_slice(&[42; 32]).unwrap();
+    let marker = obid.home.join("test-owner-device");
+    let device = match std::fs::read_to_string(&marker) {
+        Ok(id) => id,
+        Err(_) => {
+            let public = base64::engine::general_purpose::STANDARD
+                .encode(secret.public_key().to_encoded_point(false).as_bytes());
+            std::fs::write(obid.home.join("pairing"), "").unwrap();
+            let registered = call(
+                obid,
+                "POST",
+                "/v1/devices",
+                Some(&json!({"name": "Test owner's Mac", "publicKey": public})),
+            );
+            assert_eq!(registered.status, 200, "{}", registered.text);
+            let id = registered.body["id"].as_str().unwrap().to_owned();
+            std::fs::write(&marker, &id).unwrap();
+            id
+        }
+    };
+    let all = call(obid, "GET", "/v1/inbox", None).body;
+    let items = all.get("items").cloned().unwrap_or(all);
+    let title = items
+        .as_array()
+        .and_then(|a| a.iter().find(|i| i["id"] == item))
+        .and_then(|i| i["title"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let signed_at = time::format(at);
+    let key = p256::ecdsa::SigningKey::from(secret);
+    let signature: p256::ecdsa::Signature =
+        key.sign(format!("oby-confirm\n{item}\n{title}\n{signed_at}").as_bytes());
+    json!({"device": device, "action": title, "signedAt": signed_at,
+           "signature": base64::engine::general_purpose::STANDARD.encode(signature.to_der())})
+}
+
 /// One request to obid, with its token.
 pub fn call(obid: &Obid, method: &str, target: &str, body: Option<&Value>) -> Answer {
     call_with_token(obid, TOKEN, method, target, body)

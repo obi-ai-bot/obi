@@ -144,6 +144,16 @@ struct ConnectTests {
         // Removed from the Mac, or the 30 days are up: Connect again, with the line saying why.
         #expect(Phone.needsPairing(linked: true, runner: nil, notice: .removed))
         #expect(Phone.needsPairing(linked: true, runner: nil, notice: .expired))
+        // Out of reach is Home with its notice, never the unpaired screen.
+        #expect(!Phone.needsPairing(linked: true, runner: nil, notice: .unreachable(lastSeen: nil)))
+    }
+
+    @Test func theUnpairedScreenSaysWhyAndWhereOnTheMac() {
+        // Its one line (apps/ios/app/Unpaired.swift): where to pair on the Mac, and why when the Mac stopped taking it.
+        let pair = "Settings › Runner › Pair a device"
+        #expect(UnpairedLine.message(nil) == "Let's connect to your Mac. On it, open \(pair).")
+        #expect(UnpairedLine.message(.removed) == "Your Mac removed this iPhone. Pair again from \(pair).")
+        #expect(UnpairedLine.message(.expired) == "Pairing ended after 30 days. Pair again from \(pair).")
     }
 
     @Test func theThirtyDaysEndingSaysSoInsteadOfBlamingTailscale() {

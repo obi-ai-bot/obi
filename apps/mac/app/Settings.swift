@@ -322,7 +322,7 @@ struct RemoteAccessSettingsView: View {
     private var switchRow: some View {
         SetRow("Reach this Mac from anywhere") {
             Toggle("Reach this Mac from anywhere", isOn: Binding(get: { remote.on }, set: { on in
-                if on { Task { await remote.turnOn() } } else { remote.turnOff() }
+                if on { Task { await remote.turnOn() } } else { Task { await remote.turnOff() } }
             }))
             .toggleStyle(.set)
             .disabled(remote.busy || remote.signsInFirst)
