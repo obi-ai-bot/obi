@@ -829,7 +829,7 @@ struct ConnectorsSettingsView: View {
     /// needs doing (what's wrong, or what to do where Oby has no button); at the right "Connected", its
     /// button, or "Coming soon".
     private func row(_ connector: Connector) -> some View {
-        let buttons = [connector.way, connector.also].compactMap { way -> (String, Connector.Action)? in
+        let buttons = [connector.way, connector.also, connector.more].compactMap { way -> (String, Connector.Action)? in
             if case .button(let label, let action) = way { (label, action) } else { nil }
         }
         // Connected, every button is in the context menu; otherwise the first is on the row.
@@ -920,6 +920,18 @@ struct ConnectorsSettingsView: View {
                 defer { busy = false }
                 do {
                     feed.watch = try await runner.setWatchLive(live)
+                    problems[connector.id] = nil
+                } catch {
+                    problems[connector.id] = error.localizedDescription
+                }
+            }
+        case .setTellAuthors(let on):
+            guard feed.local, let runner = feed.runner else { return }
+            Task {
+                busy = true
+                defer { busy = false }
+                do {
+                    feed.slack = try await runner.setSlackTellAuthors(on)
                     problems[connector.id] = nil
                 } catch {
                     problems[connector.id] = error.localizedDescription

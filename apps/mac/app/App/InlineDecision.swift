@@ -176,7 +176,7 @@ struct InlineNotice: View {
     static func options(_ notice: WatchNotice) -> [CardOption] {
         notice.options.map { option in
             CardOption(label: option, answer: option,
-                       detail: option == "Approve" ? "Posts the review above on the pull request, as a comment from your GitHub login." : nil)
+                       detail: option == "Approve" ? "Posts the review above on the pull request with Oby's verdict, from your GitHub login." : nil)
         }
     }
 

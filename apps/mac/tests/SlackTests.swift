@@ -61,9 +61,9 @@ struct SlackTests {
 
     /// `GET /v1/slack`'s whole body, and the `slack` and `watch` events.
     @Test func slackStatusReadsTheSpecsBody() throws {
-        let body = #"{"connected":true,"team":"Deskree","user":"U02MX5VJKQU","bot":"U0BOT1234","socket":true,"connectedAt":"2026-10-21T14:02:11Z","error":null}"#
+        let body = #"{"connected":true,"team":"Deskree","user":"U02MX5VJKQU","bot":"U0BOT1234","socket":true,"tellAuthors":true,"connectedAt":"2026-10-21T14:02:11Z","error":null}"#
         let status = try Runner.decoder.decode(SlackStatus.self, from: Data(body.utf8))
-        #expect(status == SlackStatus(connected: true, team: "Deskree", socket: true))
+        #expect(status == SlackStatus(connected: true, team: "Deskree", socket: true, tellAuthors: true))
         #expect(events("slack", #"{"connected":false,"error":"Slack refused Oby's tokens: paste new ones in Settings › Connectors › Slack."}"#)
                 == .slack(SlackStatus(error: "Slack refused Oby's tokens: paste new ones in Settings › Connectors › Slack.")))
         #expect(events("watch", #"{"rules":{"name":"Dmitry watcher","live":false,"enabled":true,"zone":"UTC"},"nextRun":null,"runs":[]}"#)

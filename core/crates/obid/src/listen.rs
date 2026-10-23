@@ -943,12 +943,12 @@ fn review_item(review: &Review, body: Result<&str, &str>, now: i64) -> Item {
     let (text, options, details) = match body {
         Ok(_) => (
             format!(
-                "Oby reviewed pull request #{} in {}, as asked in Slack. Approve posts the review shown here on GitHub.",
+                "Oby reviewed pull request #{} in {}, as asked in Slack. Approve posts the review shown here on GitHub, with Oby's verdict.",
                 review.number, review.repo
             ),
             vec![APPROVE.to_owned(), crate::sphere::inbox::DISMISS.to_owned()],
             vec![
-                "Posts this review on the pull request, as a comment from your GitHub login."
+                "Posts this review on the pull request with Oby's verdict, from your GitHub login."
                     .to_owned(),
                 "Leaves it in Oby. Nothing is posted.".to_owned(),
             ],
@@ -1033,20 +1033,26 @@ pub(crate) async fn reviews_ended(
     }
     if !ready.is_empty() {
         // What the item shows reaches the phone, and is what Approve posts: the scan first.
-        let bodies: Vec<String> = ready.iter().map(|(_, b)| b.clone()).collect();
+        let decided: Vec<(&str, String)> = ready.iter().map(|(_, b)| decided(b)).collect();
+        let bodies: Vec<String> = decided.iter().map(|(_, b)| b.clone()).collect();
         let flagged = crate::watch::scan_each(&bodies, &listen.scratch).await;
         hands.tell(
             ready
                 .iter()
                 .enumerate()
                 .map(|(n, (r, body))| {
+                    let (verdict, posted) = &decided[n];
                     let shown = match &flagged {
                         _ if body.is_empty() => Err("the review was empty"),
                         Err(_) => Err("the secret scan couldn't run"),
                         Ok(f) if f.contains(&n) => Err("the secret scan flagged it"),
-                        Ok(_) => Ok(body.as_str()),
+                        Ok(_) => Ok(posted.as_str()),
                     };
-                    review_item(r, shown, now)
+                    let mut item = review_item(r, shown, now);
+                    if let Some(watch) = item.watch.as_mut() {
+                        watch["verdict"] = json!(verdict);
+                    }
+                    item
                 })
                 .collect(),
         );
@@ -1136,13 +1142,54 @@ pub(crate) async fn digest(listen: &Listen, hands: &impl Hands, now: i64) {
 
 // Posting a review
 
+/// What a review decided, from its agent's last `VERDICT:` line (taken out of the text):
+/// `approve`, `requestChanges`, or `comment` when it gave none. The text posted starts with
+/// obid's own line saying so.
+pub fn decided(summary: &str) -> (&'static str, String) {
+    let mut verdict = "comment";
+    let kept: Vec<&str> = summary
+        .lines()
+        .filter(|line| match line.trim().to_ascii_uppercase().as_str() {
+            "VERDICT: APPROVE" => {
+                verdict = "approve";
+                false
+            }
+            "VERDICT: REQUEST CHANGES" => {
+                verdict = "requestChanges";
+                false
+            }
+            _ => true,
+        })
+        .collect();
+    let said = match verdict {
+        "approve" => "Oby's verdict: approved.",
+        "requestChanges" => "Oby's verdict: changes requested.",
+        _ => "Oby's verdict: comments only.",
+    };
+    (verdict, format!("{said}\n\n{}", kept.join("\n").trim()))
+}
+
+/// The `gh pr review` flag for a verdict.
+fn verdict_flag(verdict: &str) -> &'static str {
+    match verdict {
+        "approve" => "--approve",
+        "requestChanges" => "--request-changes",
+        _ => "--comment",
+    }
+}
+
 /// Why a phone may not give this answer to `item`, or none: Approve on a listener's review, which
-/// posts on GitHub a review the phones don't show yet. Dismiss and later go through.
+/// posts on GitHub a review the phones don't show yet, and Send on a review's author's item, which
+/// sends a Slack message they don't show either. Dismiss and later go through.
 pub fn phone_refuses(item: Option<&Item>, body: &[u8]) -> Option<&'static str> {
-    let review = item.is_some_and(|i| i.kind == "listen" && i.options.iter().any(|o| o == APPROVE));
-    let approve = serde_json::from_slice::<Value>(body).is_ok_and(|b| b["answer"] == APPROVE);
-    (review && approve).then_some(
-        "Approve it on your Mac, where the review is shown: the phone doesn't show it yet.",
+    let sends = [APPROVE, SEND, SEND_AND_REMEMBER];
+    let asks = item.is_some_and(|i| {
+        i.kind == "listen" && i.options.iter().any(|o| sends.contains(&o.as_str()))
+    });
+    let sending = serde_json::from_slice::<Value>(body)
+        .is_ok_and(|b| b["answer"].as_str().is_some_and(|a| sends.contains(&a)));
+    (asks && sending).then_some(
+        "Answer it on your Mac, where what it sends is shown: the phone doesn't show it yet.",
     )
 }
 
@@ -1159,7 +1206,7 @@ pub async fn post_review<H, HF, P, PF>(
 where
     H: FnOnce(String, u64) -> HF,
     HF: Future<Output = Result<String, String>>,
-    P: FnOnce(String, u64, PathBuf) -> PF,
+    P: FnOnce(String, u64, PathBuf, &'static str) -> PF,
     PF: Future<Output = Result<(), String>>,
 {
     let watch = item.watch.as_deref().ok_or("that item has no review")?;
@@ -1177,6 +1224,7 @@ where
     ) else {
         return Err("the item names no pull request".into());
     };
+    let flag = verdict_flag(watch["verdict"].as_str().unwrap_or_default());
     let folder = home
         .join("tmp")
         .join(format!("listen-post-{}", uuid::Uuid::new_v4().simple()));
@@ -1203,39 +1251,55 @@ where
         let file = folder.join("review.md");
         crate::store::write_private(&file, body.as_bytes())
             .map_err(|e| format!("obid couldn't write the review: {e}"))?;
-        post(repo.to_owned(), number, file).await
+        post(repo.to_owned(), number, file, flag).await
     }
     .await;
     let _ = std::fs::remove_dir_all(&folder);
     result
 }
 
-/// [`post_review`] with obid's own `gh`: `gh pr view` for the head, `gh pr review --comment` to post.
+/// [`post_review`] with obid's own `gh`: `gh pr view` for the head, `gh pr review` with Oby's
+/// verdict to post (`--approve`, `--request-changes` or `--comment`). GitHub lets nobody approve or
+/// request changes on their own pull request: there it goes as a comment, its first line saying
+/// the verdict.
 pub async fn post_review_with_gh(home: &Path, item: &Item) -> Result<(), String> {
     post_review(
         home,
         item,
         |repo, number| async move { pr_head(&repo, number).await },
-        |repo, number, file| async move {
+        |repo, number, file, flag| async move {
             let gh = crate::github::gh().ok_or("gh isn't installed")?;
             let number = number.to_string();
             let file = file.to_string_lossy().into_owned();
-            crate::github::output(
-                &gh,
-                &[
-                    "pr",
-                    "review",
-                    &number,
-                    "-R",
-                    &repo,
-                    "--comment",
-                    "--body-file",
-                    &file,
-                ],
-            )
-            .await
-            .map(|_| ())
-            .map_err(|(_, said)| format!("GitHub didn't take it: {said}"))
+            let review = |flag: &'static str| {
+                let (gh, number, repo, file) =
+                    (gh.clone(), number.clone(), repo.clone(), file.clone());
+                async move {
+                    crate::github::output(
+                        &gh,
+                        &[
+                            "pr",
+                            "review",
+                            &number,
+                            "-R",
+                            &repo,
+                            flag,
+                            "--body-file",
+                            &file,
+                        ],
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|(_, said)| said)
+                }
+            };
+            match review(flag).await {
+                Err(said) if flag != "--comment" && said.contains("your own pull request") => {
+                    review("--comment").await
+                }
+                done => done,
+            }
+            .map_err(|said| format!("GitHub didn't take it: {said}"))
         },
     )
     .await
@@ -1268,6 +1332,223 @@ async fn pr_head(repo: &str, number: u64) -> Result<String, String> {
         .filter(|s| s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit()))
         .map(str::to_owned)
         .ok_or_else(|| "GitHub didn't say its head commit".into())
+}
+
+// Telling a review's author (docs/runner-api.md, "obid only: Slack")
+
+/// The answers on a `listen` item that asks to tell a review's author on Slack.
+pub const SEND: &str = "Send";
+pub const SEND_AND_REMEMBER: &str = "Send and Remember";
+
+/// A pull request's author: their GitHub login, their name, and the emails GitHub linked to that
+/// login in the pull request's commits (it links only an email its owner verified).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrAuthor {
+    pub login: String,
+    pub name: Option<String>,
+    pub emails: Vec<String>,
+}
+
+/// The author in `gh pr view --json author,commits`'s answer; none for a bot or no login.
+pub fn author_of(answer: &Value) -> Option<PrAuthor> {
+    let author = &answer["author"];
+    let login = author["login"]
+        .as_str()
+        .filter(|l| !l.is_empty() && l.len() <= 39)
+        .filter(|l| l.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'))?;
+    if author["is_bot"] == true {
+        return None;
+    }
+    let mut emails: Vec<String> = vec![];
+    let commits = answer["commits"].as_array().into_iter().flatten();
+    for a in commits.flat_map(|c| c["authors"].as_array().into_iter().flatten()) {
+        let theirs = a["login"]
+            .as_str()
+            .is_some_and(|l| l.eq_ignore_ascii_case(login));
+        if let Some(email) = a["email"].as_str().filter(|_| theirs) {
+            let email = email.trim().to_lowercase();
+            let fine = email.contains('@')
+                && email.len() <= 254
+                && !email.ends_with("users.noreply.github.com")
+                && !email.contains(char::is_whitespace);
+            if fine && !emails.contains(&email) && emails.len() < 5 {
+                emails.push(email);
+            }
+        }
+    }
+    Some(PrAuthor {
+        login: login.to_owned(),
+        name: author["name"]
+            .as_str()
+            .map(|n| n.chars().filter(|c| !c.is_control()).take(100).collect())
+            .filter(|n: &String| !n.trim().is_empty()),
+        emails,
+    })
+}
+
+/// The author of pull request `number` in `repo`, with obid's `gh`.
+pub async fn pr_author(repo: &str, number: u64) -> Result<Option<PrAuthor>, String> {
+    let gh = crate::github::gh().ok_or("gh isn't installed")?;
+    let number = number.to_string();
+    let text = crate::github::output(
+        &gh,
+        &[
+            "pr",
+            "view",
+            &number,
+            "-R",
+            repo,
+            "--json",
+            "author,commits",
+        ],
+    )
+    .await
+    .map_err(|(_, said)| said)?;
+    let answer: Value = serde_json::from_str(&text).map_err(|_| "gh's answer wasn't JSON")?;
+    Ok(author_of(&answer))
+}
+
+/// What became of telling a review's author.
+#[derive(Debug)]
+pub enum Told {
+    /// Sent to them, a person the owner said Oby may remember.
+    Sent(crate::slack::Person),
+    /// The owner decides first: an item naming who Oby found, or saying it found nobody.
+    Ask(Box<Item>),
+}
+
+/// After the owner's review of pull request `number` in `repo` (job `job`) was posted: its author
+/// is told on Slack, as the owner. The review's Approve covers a person the owner already said Oby
+/// may remember; anyone else waits for the owner's own answer, on an item naming who Oby found and
+/// how. Nobody is guessed: no match, or more than one, is an item that says so. Nothing for a bot,
+/// for the owner's own pull request, or when the owner turned it off.
+pub async fn tell_author(
+    slack: &crate::slack::Slack,
+    job: &str,
+    repo: &str,
+    number: u64,
+    verdict: &str,
+    author: Result<Option<PrAuthor>, String>,
+) -> Option<Told> {
+    if !slack.tells_authors() {
+        return None;
+    }
+    let item =
+        |text: String, options: Vec<&str>, person: Option<&crate::slack::Person>, login: &str| {
+            let url = format!("https://github.com/{repo}/pull/{number}");
+            let name = repo.rsplit('/').next().unwrap_or(repo);
+            Told::Ask(Box::new(Item {
+                id: format!("feed-slack-{job}"),
+                kind: "listen".into(),
+                job: job.into(),
+                title: format!("Tell the author: {name} #{number}"),
+                text,
+                options: options.into_iter().map(str::to_owned).collect(),
+                details: None,
+                recommended: None,
+                created: obi_protocol::time::now(),
+                done: None,
+                later: None,
+                answer: None,
+                obi: None,
+                plugin: None,
+                arrived: Some(crate::sphere::inbox::arrival()),
+                confirm: None,
+                start: None,
+                github: None,
+                watch: Some(Box::new(json!({
+                    "source": "slack",
+                    "url": url,
+                    "pr": {"repo": repo, "number": number, "url": url},
+                    "verdict": verdict,
+                    "slack": person.map(|p| json!({"login": login, "user": p.id, "name": p.name})),
+                }))),
+            }))
+        };
+    let author = match author {
+        Ok(Some(author)) => author,
+        Ok(None) => return None,
+        Err(why) => {
+            return Some(item(
+                format!(
+                    "Oby couldn't read who wrote pull request #{number} in {repo} ({}), so it didn't tell them on Slack.",
+                    one_line(&why)
+                ),
+                vec![crate::sphere::inbox::DISMISS],
+                None,
+                "",
+            ));
+        }
+    };
+    let login = author.login.as_str();
+    if let Some(person) = slack.person(login) {
+        if slack.owner().as_deref() == Some(person.id.as_str()) {
+            return None;
+        }
+        let text = crate::slack::review_message(repo, number, verdict);
+        return Some(match slack.send_as_owner(&person.id, &text).await {
+            Ok(_) => Told::Sent(person),
+            Err(why) => item(
+                format!(
+                    "Oby couldn't tell {} (@{login}) on Slack that pull request #{number} in {repo} was reviewed: {}.",
+                    person.name,
+                    one_line(&why)
+                ),
+                vec![crate::sphere::inbox::DISMISS],
+                None,
+                login,
+            ),
+        });
+    }
+    let found = slack.find(&author.emails, author.name.as_deref()).await;
+    match found {
+        Ok(Some((person, _))) if slack.owner().as_deref() == Some(person.id.as_str()) => None,
+        Ok(Some((person, how))) => {
+            let how = if how == "email" {
+                "by the email GitHub links to their login"
+            } else {
+                "by their name, the only person on Slack with it"
+            };
+            Some(item(
+                format!(
+                    "Send @{login}, who wrote pull request #{number} in {repo}, this Slack message as you? Oby found them as {} {how}.\n\n“{}”\n\nCan I remember that @{login} is {} on Slack? Send and Remember says yes; Send asks again next time.",
+                    person.name,
+                    crate::slack::review_message(repo, number, verdict),
+                    person.name,
+                ),
+                vec![SEND_AND_REMEMBER, SEND, crate::sphere::inbox::DISMISS],
+                Some(&person),
+                login,
+            ))
+        }
+        Ok(None) => Some(item(
+            format!(
+                "Oby couldn't find @{login}, who wrote pull request #{number} in {repo}, on Slack (no one there has their GitHub email or, alone, their name), so it didn't tell them."
+            ),
+            vec![crate::sphere::inbox::DISMISS],
+            None,
+            login,
+        )),
+        Err(why) => Some(item(
+            format!(
+                "Oby couldn't look for @{login} on Slack ({}), so it didn't tell them their pull request was reviewed.",
+                one_line(&why)
+            ),
+            vec![crate::sphere::inbox::DISMISS],
+            None,
+            login,
+        )),
+    }
+}
+
+/// `why` on one line, at most 300 characters.
+fn one_line(why: &str) -> String {
+    why.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(300)
+        .collect()
 }
 
 // Socket Mode
@@ -2434,8 +2715,9 @@ mod tests {
         assert!(!item.text.contains("Ernesto"));
         assert_eq!(
             item.watch.as_ref().unwrap()["review"],
-            "Looks right; one nit."
+            "Oby's verdict: comments only.\n\nLooks right; one nit."
         );
+        assert_eq!(item.watch.as_ref().unwrap()["verdict"], "comment");
         reviews_ended(
             &listen,
             &hands,
@@ -2512,12 +2794,16 @@ mod tests {
     async fn approve_posts_what_it_shows_only_on_the_same_head() {
         let home = scratch("listen-post");
         let posted = Mutex::new(vec![]);
-        let post = |repo: String, number: u64, file: PathBuf| {
+        let post = |repo: String, number: u64, file: PathBuf, flag: &'static str| {
             let body = std::fs::read_to_string(&file).unwrap();
-            posted.lock().unwrap().push((repo, number, body, file));
+            posted
+                .lock()
+                .unwrap()
+                .push((repo, number, body, file, flag));
             async { Ok(()) }
         };
-        let item = ready_item("Looks right; one nit.");
+        let mut item = ready_item("Looks right; one nit.");
+        item.watch.as_mut().unwrap()["verdict"] = json!("requestChanges");
         post_review(&home, &item, |_, _| async { Ok(SHA.to_owned()) }, post)
             .await
             .unwrap();
@@ -2552,6 +2838,7 @@ mod tests {
             (posted[0].0.as_str(), posted[0].1, posted[0].2.as_str()),
             ("obi-ai-bot/obi", 835, "Looks right; one nit.")
         );
+        assert_eq!(posted[0].4, "--request-changes", "with Oby's verdict");
         assert_ne!(posted[0].3.parent(), posted[1].3.parent(), "a folder each");
     }
 
@@ -2744,5 +3031,187 @@ mod tests {
         other.kind = "github".into();
         assert!(phone_refuses(Some(&other), br#"{"answer": "Approve"}"#).is_none());
         assert!(phone_refuses(None, br#"{"answer": "Approve"}"#).is_none());
+    }
+
+    /// The author is the pull request's login, with only the emails GitHub linked to that login
+    /// (never a noreply one); a bot is nobody to tell.
+    #[test]
+    fn a_pull_requests_author_has_the_emails_github_linked_to_them() {
+        let answer = json!({
+            "author": {"login": "janedoe", "name": "Jane Doe", "is_bot": false},
+            "commits": [
+                {"authors": [{"login": "JaneDoe", "email": "Jane@Deskree.com"}, {"login": "bob", "email": "bob@x.com"}]},
+                {"authors": [{"login": "janedoe", "email": "1+janedoe@users.noreply.github.com"}]},
+                {"authors": [{"login": "janedoe", "email": "jane@deskree.com"}, {"email": "jane@home.com"}]},
+            ],
+        });
+        let author = author_of(&answer).unwrap();
+        assert_eq!(author.login, "janedoe");
+        assert_eq!(author.name.as_deref(), Some("Jane Doe"));
+        assert_eq!(author.emails, ["jane@deskree.com"]);
+        assert!(author_of(&json!({"author": {"login": "dependabot", "is_bot": true}})).is_none());
+        assert!(author_of(&json!({"author": {"login": "a b"}})).is_none());
+    }
+
+    /// After a posted review: a person the owner said Oby may remember is told straight away; one
+    /// Oby found waits for the owner's Send (and "Can I remember that?"); nobody found is said, never
+    /// guessed; off, a bot or the owner's own pull request is nothing.
+    #[tokio::test]
+    async fn a_reviews_author_is_told_or_the_owner_is_asked() {
+        use std::collections::HashMap;
+        let home = crate::slack::tests::scratch("tell-author");
+        let jane = json!({"id": "UJANE", "real_name": "Jane Doe"});
+        let stub = crate::slack::tests::stub(HashMap::from([
+            ("users.lookupByEmail", json!({"ok": true, "user": jane})),
+            (
+                "conversations.open",
+                json!({"ok": true, "channel": {"id": "D0JANE"}}),
+            ),
+            ("chat.postMessage", json!({"ok": true, "ts": "1.2"})),
+        ]))
+        .await;
+        let slack = crate::slack::tests::connected(&home, stub.url.clone());
+        let author = || {
+            Ok(Some(PrAuthor {
+                login: "janedoe".into(),
+                name: Some("Jane Doe".into()),
+                emails: vec!["jane@deskree.com".into()],
+            }))
+        };
+        let repo = "deskree-inc/tetrix-front-end";
+        let Some(Told::Ask(asked)) =
+            tell_author(&slack, "j1", repo, 350, "approve", author()).await
+        else {
+            panic!("the owner is asked first");
+        };
+        assert_eq!(asked.id, "feed-slack-j1");
+        assert_eq!(asked.options, [SEND_AND_REMEMBER, SEND, "Dismiss"]);
+        assert!(
+            asked
+                .text
+                .contains("Can I remember that @janedoe is Jane Doe on Slack?"),
+            "{}",
+            asked.text
+        );
+        assert!(asked.text.contains("pull/350"), "{}", asked.text);
+        let watch = asked.watch.as_ref().unwrap();
+        assert_eq!(
+            watch["slack"],
+            json!({"login": "janedoe", "user": "UJANE", "name": "Jane Doe"})
+        );
+        assert_eq!(watch["pr"]["number"], 350);
+        assert!(
+            !stub
+                .got
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.0 == "chat.postMessage"),
+            "nothing sent yet"
+        );
+        // A phone can't send it: it doesn't show the message.
+        assert!(phone_refuses(Some(&asked), br#"{"answer": "Send"}"#).is_some());
+        assert!(phone_refuses(Some(&asked), br#"{"answer": "Dismiss"}"#).is_none());
+
+        slack
+            .remember(
+                "JaneDoe",
+                crate::slack::Person {
+                    id: "UJANE".into(),
+                    name: "Jane Doe".into(),
+                },
+            )
+            .unwrap();
+        let Some(Told::Sent(person)) =
+            tell_author(&slack, "j1", repo, 350, "approve", author()).await
+        else {
+            panic!("a remembered person is told");
+        };
+        assert_eq!(person.id, "UJANE");
+        let got = stub.got.lock().unwrap().clone();
+        let posted = got.iter().find(|c| c.0 == "chat.postMessage").unwrap();
+        assert!(posted.1.contains("approved+it"), "{}", posted.1);
+        assert!(posted.1.contains("pull%2F350"), "{}", posted.1);
+
+        assert!(
+            tell_author(&slack, "j1", repo, 350, "approve", Ok(None))
+                .await
+                .is_none(),
+            "a bot"
+        );
+        let Some(Told::Ask(failed)) = tell_author(
+            &slack,
+            "j1",
+            repo,
+            350,
+            "approve",
+            Err("gh isn't installed".into()),
+        )
+        .await
+        else {
+            panic!("a failure is said");
+        };
+        assert_eq!(failed.options, ["Dismiss"]);
+
+        // Nobody with their email or name: said, with Dismiss only.
+        let empty = crate::slack::tests::stub(HashMap::from([
+            (
+                "users.lookupByEmail",
+                json!({"ok": false, "error": "users_not_found"}),
+            ),
+            ("users.list", json!({"ok": true, "members": []})),
+        ]))
+        .await;
+        let nobody =
+            crate::slack::tests::connected(&crate::slack::tests::scratch("tell-nobody"), empty.url);
+        let Some(Told::Ask(item)) =
+            tell_author(&nobody, "j2", repo, 351, "approve", author()).await
+        else {
+            panic!("nobody found is said");
+        };
+        assert_eq!(item.options, ["Dismiss"]);
+        assert!(item.watch.as_ref().unwrap()["slack"].is_null());
+
+        // The owner's own pull request, and telling turned off: nothing.
+        let own = crate::slack::tests::stub(HashMap::from([(
+            "users.lookupByEmail",
+            json!({"ok": true, "user": {"id": "UOWNER", "real_name": "Me"}}),
+        )]))
+        .await;
+        let mine =
+            crate::slack::tests::connected(&crate::slack::tests::scratch("tell-own"), own.url);
+        assert!(
+            tell_author(&mine, "j3", repo, 352, "approve", author())
+                .await
+                .is_none()
+        );
+        let off =
+            crate::slack::tests::connected(&crate::slack::tests::scratch("tell-off"), stub.url);
+        off.set_tells_authors(false).unwrap();
+        assert!(
+            tell_author(&off, "j4", repo, 353, "approve", author())
+                .await
+                .is_none()
+        );
+    }
+
+    /// The agent's `VERDICT:` line decides, and is taken out; the posted text says the verdict
+    /// first, in obid's words.
+    #[test]
+    fn a_reviews_verdict_is_its_agents_last_verdict_line() {
+        let (verdict, body) = decided("Looks fine.\n\nOne nit in a.rs.\nVERDICT: APPROVE");
+        assert_eq!(verdict, "approve");
+        assert_eq!(
+            body,
+            "Oby's verdict: approved.\n\nLooks fine.\n\nOne nit in a.rs."
+        );
+        let (verdict, body) = decided("A blocker.\n verdict: request changes \n");
+        assert_eq!(
+            (verdict, body.lines().next().unwrap()),
+            ("requestChanges", "Oby's verdict: changes requested.")
+        );
+        assert_eq!(decided("No verdict here.").0, "comment");
+        assert_eq!(verdict_flag("approve"), "--approve");
+        assert_eq!(verdict_flag("anything"), "--comment");
     }
 }

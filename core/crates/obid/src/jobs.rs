@@ -605,6 +605,8 @@ pub struct Jobs {
     routines: std::sync::OnceLock<Arc<crate::routines::Routines>>,
     /// Oby's Tetrix login: every owner's job's agent gets Tetrix through obid (crate::tetrix).
     tetrix: std::sync::OnceLock<Arc<crate::tetrix::Tetrix>>,
+    /// Oby's Slack login: a posted review's author is told with it (crate::listen::tell_author).
+    slack: std::sync::OnceLock<Arc<crate::slack::Slack>>,
     /// Where a job's `.obi/artifacts/` is published when it ends.
     artifacts: std::sync::OnceLock<Arc<crate::artifacts::Artifacts>>,
     /// Loopback endpoint given to agents for `oby-check apple`.
@@ -694,6 +696,7 @@ impl Jobs {
             connections: std::sync::OnceLock::new(),
             routines: std::sync::OnceLock::new(),
             tetrix: std::sync::OnceLock::new(),
+            slack: std::sync::OnceLock::new(),
             artifacts: std::sync::OnceLock::new(),
             api_url: Mutex::new(api_url),
             approvals,
@@ -740,6 +743,23 @@ impl Jobs {
     pub fn tetrix_used(&self, id: &str, change: impl FnOnce(&mut crate::tetrix::Use)) {
         self.update(id, |job| {
             change(job.tetrix.get_or_insert_with(Default::default))
+        });
+    }
+
+    pub fn use_slack(&self, slack: Arc<crate::slack::Slack>) {
+        let _ = self.slack.set(slack);
+    }
+
+    pub fn slack(&self) -> Option<Arc<crate::slack::Slack>> {
+        self.slack.get().cloned()
+    }
+
+    /// The Slack message the owner sent `user` (a Slack user id) for job `id`, in its outgoing
+    /// actions.
+    pub fn sent_on_slack(&self, id: &str, user: &str) {
+        self.update(id, |job| {
+            let sent = crate::publish::Outgoing::new("slackMessage", &job.repo, user, None);
+            job.outgoing.push(sent);
         });
     }
 
@@ -6371,10 +6391,10 @@ impl Jobs {
         let Some(sha) = job.start_commit.clone().filter(|sha| git::is_sha(sha)) else {
             return;
         };
-        let summary = job.summary.trim().to_owned();
-        if summary.is_empty() {
+        if job.summary.trim().is_empty() {
             return;
         }
+        let (verdict, summary) = crate::listen::decided(job.summary.trim());
         let Some(link) = self.link.get().and_then(std::sync::Weak::upgrade) else {
             return;
         };
@@ -6385,7 +6405,7 @@ impl Jobs {
             crate::scan::Verdict::Clean
         );
         link.add_items(vec![owner_review_item(
-            id, &job.repo, number, &sha, &summary, clean,
+            id, &job.repo, number, &sha, &summary, verdict, clean,
         )]);
     }
 
@@ -8588,6 +8608,9 @@ fn owner_prompt(job: &Job) -> String {
         "Run checks in the foreground, and never end a turn waiting on a background command: obid takes the end of your turn as the end of your work."
     }.into());
     lines.push("Change files with Edit or Write, never a script (sed -i, python -c, a heredoc into a file), and run commands from this worktree's root without cd, naming paths instead (`cargo test --manifest-path core/Cargo.toml`), and keep scratch files in your own $TMPDIR, never /tmp: obid can't see what a script writes or where a cd leads, and /tmp is outside the worktree, so each of these stops the job until the user says yes.".into());
+    if job.kind == "review" {
+        lines.push("Your summary is the review, posted on the pull request once the user approves it. End it with a line that is exactly `VERDICT: APPROVE` when the change can merge as it is, or `VERDICT: REQUEST CHANGES` when something must change first.".into());
+    }
     lines.push(
         "Finish with a short summary. Its first line is one sentence the user will see.".into(),
     );
@@ -8884,25 +8907,30 @@ fn owner_review_item(
     number: u64,
     sha: &str,
     summary: &str,
+    verdict: &str,
     clean: bool,
 ) -> crate::sphere::inbox::Item {
     let name = repo.rsplit('/').next().unwrap_or(repo);
     let (text, options, details) = if clean {
         (
-            format!("Post this review on pull request #{number} in {repo} as you? Approve posts the review shown here, as a comment from your GitHub login."),
+            format!(
+                "Post this review on pull request #{number} in {repo} as you? Approve posts the review shown here with Oby's verdict, from your GitHub login."
+            ),
             vec![
                 crate::listen::APPROVE.to_owned(),
                 crate::sphere::inbox::DISMISS.to_owned(),
             ],
             vec![
-                "Posts this review on the pull request, as a comment from your GitHub login."
+                "Posts this review on the pull request with Oby's verdict, from your GitHub login."
                     .to_owned(),
                 "Leaves it in Oby. Nothing is posted.".to_owned(),
             ],
         )
     } else {
         (
-            format!("Oby reviewed pull request #{number} in {repo}, but it isn't shown or posted from here. Open the job to read it."),
+            format!(
+                "Oby reviewed pull request #{number} in {repo}, but it isn't shown or posted from here. Open the job to read it."
+            ),
             vec![crate::sphere::inbox::DISMISS.to_owned()],
             vec!["Leaves it in Oby. Nothing is posted.".to_owned()],
         )
@@ -8936,6 +8964,7 @@ fn owner_review_item(
                 "url": format!("https://github.com/{repo}/pull/{number}"),
             },
             "review": clean.then_some(summary),
+            "verdict": verdict,
         }))),
     }
 }
@@ -8944,12 +8973,28 @@ fn owner_review_item(
 mod tests {
     #[test]
     fn a_finished_review_offers_approve_only_when_the_scan_is_clean() {
-        let clean = super::owner_review_item("j1", "obi-ai-bot/obi", 702, "a".repeat(40).as_str(), "Looks right.", true);
+        let clean = super::owner_review_item(
+            "j1",
+            "obi-ai-bot/obi",
+            702,
+            "a".repeat(40).as_str(),
+            "Looks right.",
+            "approve",
+            true,
+        );
         assert_eq!(clean.id, "feed-review-j1");
         assert_eq!(clean.options, ["Approve", "Dismiss"]);
         assert_eq!(clean.watch.as_ref().unwrap()["review"], "Looks right.");
         assert_eq!(clean.watch.as_ref().unwrap()["pr"]["sha"], "a".repeat(40));
-        let held = super::owner_review_item("j1", "obi-ai-bot/obi", 702, "a".repeat(40).as_str(), "secret", false);
+        let held = super::owner_review_item(
+            "j1",
+            "obi-ai-bot/obi",
+            702,
+            "a".repeat(40).as_str(),
+            "secret",
+            "comment",
+            false,
+        );
         assert_eq!(held.options, ["Dismiss"]);
         assert!(held.watch.as_ref().unwrap()["review"].is_null());
     }

@@ -336,6 +336,7 @@ pub async fn serve(
         vault::shared().expect("the vault is installed first"),
         events.clone(),
     );
+    jobs.use_slack(slack.clone());
     let watch = watch::Watch::open(&config.home, events.clone());
     let listen = listen::Listen::open(&config.home, events.clone());
     let shared = Arc::new(api::Shared {

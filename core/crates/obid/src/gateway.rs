@@ -771,6 +771,7 @@ mod tests {
             "event: job\ndata: {\"id\":\"j1\"}\n\nevent: inbox\ndata: {\"id\":\"i1\"}\n\n"
         );
         assert!(!allows(&Method::GET, "/v1/slack"));
+        assert!(!allows(&Method::PATCH, "/v1/slack"));
         assert!(!allows(&Method::POST, "/v1/slack/sign-in"));
         assert!(!allows(&Method::PATCH, "/v1/watch"));
         assert!(!allows(&Method::POST, "/v1/watch/run"));

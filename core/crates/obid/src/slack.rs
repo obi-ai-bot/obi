@@ -5,7 +5,8 @@
 //! bot token (`xoxb-`), which it uses only to send the owner a direct message as the app. obid
 //! checks both with `auth.test` and keeps them in its vault, so every answer, log line and push has
 //! them taken out. Agents never get them, and nothing here is on the gateway. Every message obid
-//! sends passes the secret scan first, and goes to the owner and nobody else.
+//! sends passes the secret scan first, and goes to the owner, or, as the owner with the user token,
+//! to the author of a pull request the owner's review was posted on ("Telling a review's author").
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -47,6 +48,18 @@ struct Saved {
     socket: bool,
     connected_at: Option<String>,
     error: Option<String>,
+    /// Whether a posted review's author is told on Slack: on unless the owner turned it off.
+    tell_authors: Option<bool>,
+    /// GitHub logins (lowercase) and who they are on Slack, kept only on the owner's "Send and
+    /// Remember": the answer to "Can I remember that?".
+    people: std::collections::BTreeMap<String, Person>,
+}
+
+/// Someone on Slack, as Slack named them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Person {
+    pub id: String,
+    pub name: String,
 }
 
 pub struct Slack {
@@ -278,6 +291,7 @@ impl Slack {
             "user": saved.user.filter(|_| connected),
             "bot": saved.bot.filter(|_| connected),
             "socket": connected && saved.socket,
+            "tellAuthors": connected && saved.tell_authors.unwrap_or(true),
             "connectedAt": saved.connected_at,
             "error": saved.error,
         })
@@ -332,6 +346,19 @@ impl Slack {
         let code = code_of(answer["error"].as_str().unwrap_or(""));
         if refused(&code) {
             return Err(Failed::Refused);
+        }
+        if code == "missing_scope" {
+            let needed: String = answer["needed"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | ','))
+                .take(120)
+                .collect();
+            return Err(Failed::Other(format!(
+                "Your Slack app's token lacks the {} scope: add it in OAuth & Permissions, reinstall the app, and paste its tokens again in Settings › Connectors › Slack.",
+                if needed.is_empty() { "needed" } else { &needed }
+            )));
         }
         Err(Failed::Other(if code.is_empty() {
             format!("Slack answered HTTP {}.", status.as_u16())
@@ -436,6 +463,10 @@ impl Slack {
                 return Err(internal(why));
             }
         }
+        // New tokens for the same workspace and owner keep who the owner said people are, and
+        // whether authors are told.
+        let same = before.team_id.as_deref() == Some(team_id.as_str())
+            && before.user.as_deref() == Some(owner.as_str());
         self.save(Saved {
             team: text(&person, "team"),
             team_id: Some(team_id),
@@ -444,6 +475,12 @@ impl Slack {
             socket: socket_kept,
             connected_at: Some(obi_protocol::time::format(obi_protocol::time::now())),
             error: None,
+            tell_authors: before.tell_authors.filter(|_| same),
+            people: if same {
+                before.people
+            } else {
+                Default::default()
+            },
         })
         .map_err(|why| {
             // Never half a login: the tokens kept go too.
@@ -637,39 +674,37 @@ impl Slack {
         Ok((found, false))
     }
 
-    /// Sends `text` to the owner as the app's bot, in its direct message with them: never to
-    /// anyone else. It passes the secret scan first: a finding, or a scan that can't run, sends
-    /// nothing. Answers the message's `ts`.
-    pub async fn tell_owner(&self, text: &str) -> Result<String, String> {
-        let owner = self
-            .saved()
-            .user
-            .filter(|_| self.connected())
-            .ok_or(NOT_CONNECTED)?;
+    /// The secret scan of `text`, about to go to Slack: a finding, or a scan that can't run, is why
+    /// nothing is sent.
+    async fn scanned(&self, text: &str) -> Result<(), String> {
         crate::store::make_private_dir(&self.scratch)
             .map_err(|e| format!("the secret scan couldn't run (its folder: {e})"))?;
         match crate::scan::scan(&[("slack.txt".into(), text.to_owned())], &self.scratch).await {
-            crate::scan::Verdict::Clean => {}
+            crate::scan::Verdict::Clean => Ok(()),
             crate::scan::Verdict::Found(_) => {
-                return Err("the secret scan found something in it, so it wasn't sent".into());
+                Err("the secret scan found something in it, so it wasn't sent".into())
             }
-            crate::scan::Verdict::CouldNotRun(why) => {
-                return Err(format!(
-                    "the secret scan couldn't run ({why}), so it wasn't sent"
-                ));
-            }
+            crate::scan::Verdict::CouldNotRun(why) => Err(format!(
+                "the secret scan couldn't run ({why}), so it wasn't sent"
+            )),
         }
+    }
+
+    /// Sends `text` in a direct message with `to`, with the token `name`, after the secret scan.
+    /// Answers the message's `ts`.
+    async fn direct(&self, name: &str, to: &str, text: &str) -> Result<String, String> {
+        self.scanned(text).await?;
         let opened = self
-            .call(BOT, "conversations.open", &[("users", &owner)])
+            .call(name, "conversations.open", &[("users", to)])
             .await?;
         let channel = opened["channel"]["id"]
             .as_str()
             .filter(|c| c.starts_with('D'))
-            .ok_or("Slack opened no direct message with you.")?
+            .ok_or("Slack opened no direct message.")?
             .to_owned();
         let answer = self
             .call(
-                BOT,
+                name,
                 "chat.postMessage",
                 &[
                     ("channel", &channel),
@@ -681,12 +716,154 @@ impl Slack {
             .await?;
         Ok(answer["ts"].as_str().unwrap_or_default().to_owned())
     }
+
+    /// Sends `text` to the owner as the app's bot, in its direct message with them. It passes the
+    /// secret scan first: a finding, or a scan that can't run, sends nothing. Answers the message's
+    /// `ts`.
+    pub async fn tell_owner(&self, text: &str) -> Result<String, String> {
+        let owner = self.owner().ok_or(NOT_CONNECTED)?;
+        self.direct(BOT, &owner, text).await
+    }
+
+    // Telling a review's author
+
+    /// The owner's own Slack user id, while connected.
+    pub fn owner(&self) -> Option<String> {
+        self.saved().user.filter(|_| self.connected())
+    }
+
+    /// Whether a posted review's author is told on Slack: connected, and not turned off.
+    pub fn tells_authors(&self) -> bool {
+        self.connected() && self.saved().tell_authors.unwrap_or(true)
+    }
+
+    pub(crate) fn set_tells_authors(&self, on: bool) -> Result<(), String> {
+        let mut saved = self.saved();
+        saved.tell_authors = Some(on);
+        self.save(saved)
+    }
+
+    /// Who the GitHub `login` is on Slack, as the owner said Oby may remember.
+    pub fn person(&self, login: &str) -> Option<Person> {
+        self.saved().people.get(&login.to_lowercase()).cloned()
+    }
+
+    /// Remembers that `login` is `person` on Slack: only on the owner's yes.
+    pub fn remember(&self, login: &str, person: Person) -> Result<(), String> {
+        let mut saved = self.saved();
+        saved.people.insert(login.to_lowercase(), person);
+        self.save(saved)
+    }
+
+    /// Who a pull request's author is on Slack, and how Oby found them: by one of `emails` (GitHub
+    /// linked them to the author, so they're verified) with `users.lookupByEmail`, else the one
+    /// person whose name is `name` exactly (`users.list`). None when nobody, or more than one
+    /// person, matches: Oby never guesses.
+    pub async fn find(
+        &self,
+        emails: &[String],
+        name: Option<&str>,
+    ) -> Result<Option<(Person, &'static str)>, String> {
+        let real = |u: &Value| {
+            u["deleted"] != true && u["is_bot"] != true && u["id"].as_str() != Some("USLACKBOT")
+        };
+        let person = |u: &Value| {
+            let name = text(&u["profile"], "real_name")
+                .or_else(|| text(u, "real_name"))
+                .or_else(|| text(&u["profile"], "display_name"))
+                .or_else(|| text(u, "name"))?;
+            Some(Person {
+                id: text(u, "id")?,
+                name: name.chars().filter(|c| !c.is_control()).take(60).collect(),
+            })
+        };
+        for email in emails {
+            match self
+                .call(USER, "users.lookupByEmail", &[("email", email)])
+                .await
+            {
+                Ok(answer) if real(&answer["user"]) => {
+                    if let Some(found) = person(&answer["user"]) {
+                        return Ok(Some((found, "email")));
+                    }
+                }
+                Ok(_) => {}
+                Err(why) if why == "Slack said users_not_found." => {}
+                Err(why) => return Err(why),
+            }
+        }
+        let Some(wanted) = name
+            .map(|n| n.trim().to_lowercase())
+            .filter(|n| !n.is_empty())
+        else {
+            return Ok(None);
+        };
+        let mut found: Vec<Person> = vec![];
+        let mut cursor = String::new();
+        // ponytail: 10 pages of 200; a workspace past 2,000 people is asked by email only.
+        for _ in 0..10 {
+            let mut form = vec![("limit", "200")];
+            if !cursor.is_empty() {
+                form.push(("cursor", cursor.as_str()));
+            }
+            let answer = self.call(USER, "users.list", &form).await?;
+            for u in answer["members"].as_array().into_iter().flatten() {
+                let named = [
+                    &u["profile"]["real_name"],
+                    &u["real_name"],
+                    &u["profile"]["display_name"],
+                ]
+                .iter()
+                .any(|n| {
+                    n.as_str()
+                        .is_some_and(|n| n.trim().to_lowercase() == wanted)
+                });
+                if real(u) && named {
+                    found.extend(person(u));
+                }
+            }
+            cursor = answer["response_metadata"]["next_cursor"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            if cursor.is_empty() {
+                break;
+            }
+        }
+        found.dedup_by(|a, b| a.id == b.id);
+        Ok((found.len() == 1).then(|| (found.remove(0), "name")))
+    }
+
+    /// Sends `text` to `to` as the owner, with the user token, in their direct message: after the
+    /// secret scan, never to the owner themselves. Answers the message's `ts`.
+    pub async fn send_as_owner(&self, to: &str, text: &str) -> Result<String, String> {
+        if self.owner().as_deref() == Some(to) {
+            return Err("that's you".into());
+        }
+        self.direct(USER, to, text).await
+    }
+}
+
+/// What the owner sends a pull request's author once Oby's review is posted: Oby's words, the
+/// verdict (`approve`, `requestChanges`, else comments) and the link.
+pub fn review_message(repo: &str, number: u64, verdict: &str) -> String {
+    let did = match verdict {
+        "approve" => "approved it",
+        "requestChanges" => "requested changes",
+        _ => "left comments",
+    };
+    format!(
+        "Oby reviewed your PR #{number} in {repo} for me and {did}: https://github.com/{repo}/pull/{number}"
+    )
 }
 
 // The API: loopback only, never on the gateway.
 
 pub fn router() -> Router<Arc<Shared>> {
-    Router::new().route("/v1/slack", get(status).put(connect).delete(disconnect))
+    Router::new().route(
+        "/v1/slack",
+        get(status).put(connect).patch(change).delete(disconnect),
+    )
 }
 
 async fn status(State(shared): State<Arc<Shared>>) -> Json<Value> {
@@ -736,6 +913,30 @@ async fn connect(State(shared): State<Arc<Shared>>, body: axum::body::Bytes) -> 
     {
         Ok(()) => Json(shared.slack.status_json()).into_response(),
         Err(error) => error.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Change {
+    tell_authors: bool,
+}
+
+/// `PATCH /v1/slack` with `{"tellAuthors": false}`: whether a posted review's author is told.
+async fn change(State(shared): State<Arc<Shared>>, body: axum::body::Bytes) -> Response {
+    let Ok(change) = serde_json::from_slice::<Change>(&body) else {
+        return ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Send {\"tellAuthors\": true} or false.",
+        )
+        .into_response();
+    };
+    if !shared.slack.connected() {
+        return ApiError::new(StatusCode::CONFLICT, NOT_CONNECTED).into_response();
+    }
+    match shared.slack.set_tells_authors(change.tell_authors) {
+        Ok(()) => Json(shared.slack.status_json()).into_response(),
+        Err(why) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
     }
 }
 
@@ -806,7 +1007,7 @@ pub(crate) mod tests {
         home
     }
 
-    fn unconnected(home: &std::path::Path, api: String) -> Arc<Slack> {
+    pub(crate) fn unconnected(home: &std::path::Path, api: String) -> Arc<Slack> {
         let vault = Arc::new(crate::vault::Vault::file(
             home.join("vault"),
             Arc::new(crate::secrets::Secrets::default()),
@@ -1135,5 +1336,169 @@ pub(crate) mod tests {
             .await;
         assert!(leaked.is_err());
         assert_eq!(stub.got.lock().unwrap().len(), 2);
+    }
+
+    /// The author's GitHub email finds them with `users.lookupByEmail`; else the one person with
+    /// their name. Two with it, a bot or someone gone is nobody: Oby never guesses.
+    #[tokio::test]
+    async fn an_author_is_found_by_email_else_by_a_name_only_one_has() {
+        let home = scratch("find");
+        let jane =
+            json!({"id": "UJANE", "real_name": "Jane Doe", "profile": {"real_name": "Jane Doe"}});
+        let by_email = stub(HashMap::from([(
+            "users.lookupByEmail",
+            json!({"ok": true, "user": jane.clone()}),
+        )]))
+        .await;
+        let slack = connected(&home, by_email.url);
+        let (person, how) = slack
+            .find(&["jane@deskree.com".into()], Some("Jane Doe"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (person.id.as_str(), person.name.as_str(), how),
+            ("UJANE", "Jane Doe", "email")
+        );
+        let got = by_email.got.lock().unwrap().clone();
+        assert_eq!(got[0].1, "email=jane%40deskree.com");
+        assert_eq!(
+            got[0].2.as_deref(),
+            Some(format!("Bearer {}", user_token()).as_str())
+        );
+
+        let not_found = json!({"ok": false, "error": "users_not_found"});
+        let members = |more: Value| {
+            json!({"ok": true, "members": [
+                jane.clone(),
+                {"id": "UBOT", "real_name": "Jane Doe", "is_bot": true},
+                {"id": "UGONE", "real_name": "Jane Doe", "deleted": true},
+                more,
+            ]})
+        };
+        let by_name = stub(HashMap::from([
+            ("users.lookupByEmail", not_found.clone()),
+            (
+                "users.list",
+                members(json!({"id": "U9", "real_name": "Joe"})),
+            ),
+        ]))
+        .await;
+        let slack = connected(&home, by_name.url);
+        let found = slack
+            .find(&["jane@x.com".into()], Some(" jane doe "))
+            .await
+            .unwrap();
+        assert_eq!(
+            found.map(|(p, how)| (p.id, how)),
+            Some(("UJANE".into(), "name"))
+        );
+        assert_eq!(slack.find(&[], None).await.unwrap(), None);
+
+        let two = stub(HashMap::from([
+            ("users.lookupByEmail", not_found),
+            (
+                "users.list",
+                members(json!({"id": "UJANE2", "real_name": "Jane Doe"})),
+            ),
+        ]))
+        .await;
+        let slack = connected(&home, two.url);
+        assert_eq!(
+            slack
+                .find(&["jane@x.com".into()], Some("Jane Doe"))
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    /// The owner's message to someone else goes with the user token, as them, after the scan;
+    /// never to the owner, and a missing scope says which.
+    #[tokio::test]
+    async fn the_owner_sends_as_themselves_only_what_scans_clean() {
+        let home = scratch("as-owner");
+        let stub = stub(HashMap::from([
+            (
+                "conversations.open",
+                json!({"ok": true, "channel": {"id": "D0JANE"}}),
+            ),
+            ("chat.postMessage", json!({"ok": true, "ts": "3.4"})),
+        ]))
+        .await;
+        let slack = connected(&home, stub.url);
+        let text = review_message("deskree-inc/tetrix-front-end", 350, "requestChanges");
+        assert_eq!(
+            text,
+            "Oby reviewed your PR #350 in deskree-inc/tetrix-front-end for me and requested changes: https://github.com/deskree-inc/tetrix-front-end/pull/350"
+        );
+        assert!(review_message("o/r", 1, "comment").contains("left comments"));
+        assert_eq!(slack.send_as_owner("UJANE", &text).await.unwrap(), "3.4");
+        let got = stub.got.lock().unwrap().clone();
+        assert_eq!(
+            (got[0].0.as_str(), got[0].1.as_str()),
+            ("conversations.open", "users=UJANE")
+        );
+        assert!(got[1].1.starts_with("channel=D0JANE&"), "{}", got[1].1);
+        let bearer = format!("Bearer {}", user_token());
+        assert!(got.iter().all(|c| c.2.as_deref() == Some(bearer.as_str())));
+        assert!(slack.send_as_owner("UOWNER", &text).await.is_err());
+        assert!(
+            slack
+                .send_as_owner("UJANE", &format!("AKIA{}", "QWERTYUIOPASDFGH"))
+                .await
+                .is_err()
+        );
+        assert_eq!(stub.got.lock().unwrap().len(), 2, "nothing more went out");
+
+        let scopeless = super::tests::stub(HashMap::from([(
+            "conversations.open",
+            json!({"ok": false, "error": "missing_scope", "needed": "im:write"}),
+        )]))
+        .await;
+        let slack = connected(&home, scopeless.url);
+        let why = slack.send_as_owner("UJANE", &text).await.unwrap_err();
+        assert!(why.contains("lacks the im:write scope"), "{why}");
+        assert!(slack.connected(), "a missing scope signs nothing out");
+    }
+
+    /// Telling authors is on once connected, the owner turns it off, and new tokens for the same
+    /// workspace keep it and who people are.
+    #[tokio::test]
+    async fn telling_authors_and_people_outlast_new_tokens() {
+        let home = scratch("tells");
+        let person = json!({"ok": true, "team": "Deskree", "team_id": "T1", "user_id": "UOWNER"});
+        let bot = json!({"ok": true, "team_id": "T1", "user_id": "UBOT", "bot_id": "B1"});
+        let stub = stub(HashMap::from([
+            ("auth.test", person),
+            ("auth.test.bot", bot),
+        ]))
+        .await;
+        let slack = unconnected(&home, stub.url);
+        assert!(!slack.tells_authors());
+        assert!(
+            slack
+                .connect(&user_token(), &bot_token(), AppToken::Keep)
+                .await
+                .is_ok()
+        );
+        assert!(slack.tells_authors());
+        assert_eq!(slack.status_json()["tellAuthors"], true);
+        let jane = Person {
+            id: "UJANE".into(),
+            name: "Jane Doe".into(),
+        };
+        slack.remember("JaneDoe", jane.clone()).unwrap();
+        slack.set_tells_authors(false).unwrap();
+        assert!(
+            slack
+                .connect(&user_token(), &bot_token(), AppToken::Keep)
+                .await
+                .is_ok()
+        );
+        assert!(!slack.tells_authors());
+        assert_eq!(slack.person("janedoe"), Some(jane));
+        slack.disconnect().await;
+        assert_eq!(slack.person("janedoe"), None);
     }
 }
