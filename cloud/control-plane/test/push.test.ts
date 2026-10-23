@@ -313,6 +313,8 @@ describe("a push", () => {
       await pushTo(app, mine, {}, await hmac(await pushKeyOf(theirs), body)),
       await pushTo(app, mine, {}, ""),
       await pushTo(app, mine, {}, (await hmac(await pushKeyOf(mine), body)).slice(0, 40)),
+      await pushTo(app, mine, {}, `${await hmac(await pushKeyOf(mine), body)}=`),
+      await pushTo(app, mine, {}, `${await hmac(await pushKeyOf(mine), body)}AA`),
       await pushTo(app, mine, { urgent: true }, await hmac(await pushKeyOf(mine), body)),
       await pushTo(app, stranger),
     ];

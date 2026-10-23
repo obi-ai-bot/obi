@@ -139,6 +139,7 @@ These routes are the one part of the control plane open to any phone, outsiders 
 - `pushSecret` = HMAC(key: the UTF-8 bytes of the relay's own `PUSH_SECRET_KEY`, message: UTF-8 `oby-push-secret/1`, a newline, then the `pushId`). The relay makes it again whenever it needs it, so D1 keeps no secret. Only the relay makes it.
 - `pushKey` = HMAC(key: the 32 raw bytes of `pushSecret`, message: UTF-8 `oby push key v1`). The phone makes it, and the relay makes it again from the `pushSecret`.
 - `Oby-Push-Mac` = HMAC(key: the 32 raw bytes of `pushKey`, message: the raw request body bytes, exactly as sent).
+- A `pushSecret` or `Oby-Push-Mac` that isn't exactly the relay's own 43 base64url characters (32 bytes, no padding) is refused (401), compared in constant time.
 
 A fixed vector to check against (`test/push.test.ts`, "the keys", worked out apart from the relay with Python's `hmac`):
 
