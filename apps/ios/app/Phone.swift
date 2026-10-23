@@ -198,7 +198,9 @@ final class Phone {
         didSet {
             UserDefaults.standard.set(runnerURL, forKey: "runner.url")
             stop()
-            // Another runner: nothing the last one said holds.
+            // Another runner: nothing the last one said holds, and what it pushes with reaches
+            // nothing any more (Notifications.swift). Not in `init`, which runs this with oldValue nil.
+            if oldValue != nil, runnerURL != oldValue { PushRelay.forget() }
             conversation.forget()
             forgetConversations()
             forgetGitHub()
@@ -215,8 +217,9 @@ final class Phone {
     var link: MacLink? {
         didSet {
             if oldValue?.hostname != link?.hostname {
-                // What the last Mac pushes with reaches nothing any more (Notifications.swift).
-                PushRelay.forget()
+                // What the last Mac pushes with reaches nothing any more (Notifications.swift). Not
+                // in `init`, which runs this with oldValue nil (NotificationTests.aLaunchKeepsTheSealingKey).
+                if oldValue != nil { PushRelay.forget() }
                 conversation.forget()
                 forgetConversations()
                 forgetGitHub()

@@ -18,26 +18,31 @@ final class Notifications: NSObject, UIApplicationDelegate, UNUserNotificationCe
     /// Face ID can't come up then, so this notification's Publish does it.
     static let approve = "approve"
 
-    /// The runner's `category`: "ready" for a job waiting for Publish, "job" for the rest, and a
-    /// permission's "permission", or "permissionRule" when Always allow can save a rule. A
-    /// permission's actions are named for the inbox's answers (`answers`).
-    nonisolated static let answers: Set<String> = ["Allow", "Always allow", "Deny"]
+    /// The runner's `category`: "ready" for a job waiting for Publish, "job" for the rest, a
+    /// permission's "permission", or "permissionRule" when Always allow can save a rule, and "plan"
+    /// for a plan to approve. Their actions are named for the inbox's answers (`answers`).
+    nonisolated static let answers: Set<String> = ["Allow", "Always allow", "Deny", "Approve", "Keep planning"]
+    /// The answers that let nothing run: from the Lock Screen, with no unlock and no Face ID.
+    nonisolated static let refusals: Set<String> = ["Deny", "Keep planning"]
 
     static let categories: Set<UNNotificationCategory> = {
         let open = UNNotificationAction(identifier: Notifications.open, title: "Open", options: [.foreground])
         let publish = UNNotificationAction(identifier: Notifications.publish, title: "Publish", options: [.authenticationRequired, .foreground])
         let approve = UNNotificationAction(identifier: Notifications.publish, title: "Publish with Face ID", options: [.authenticationRequired, .foreground])
-        // Allow and Always allow let a command run: unlocked, then Oby comes forward for Face ID
-        // (`answer` below), which can't come up in the background. Deny goes from the Lock Screen.
+        // Allow, Always allow and Approve let the agent go on: unlocked, then Oby comes forward for
+        // Face ID (`answer` below), which can't come up in the background. Refusals go from the Lock Screen.
         let allow = UNNotificationAction(identifier: "Allow", title: "Allow", options: [.authenticationRequired, .foreground])
         let always = UNNotificationAction(identifier: "Always allow", title: "Always allow", options: [.authenticationRequired, .foreground])
         let deny = UNNotificationAction(identifier: "Deny", title: "Deny", options: [.destructive])
+        let approvePlan = UNNotificationAction(identifier: "Approve", title: "Approve", options: [.authenticationRequired, .foreground])
+        let keepPlanning = UNNotificationAction(identifier: "Keep planning", title: "Keep planning", options: [])
         return [
             UNNotificationCategory(identifier: "ready", actions: [publish, open], intentIdentifiers: []),
             UNNotificationCategory(identifier: "job", actions: [open], intentIdentifiers: []),
             UNNotificationCategory(identifier: Notifications.approve, actions: [approve], intentIdentifiers: []),
             UNNotificationCategory(identifier: "permission", actions: [allow, deny, open], intentIdentifiers: []),
             UNNotificationCategory(identifier: "permissionRule", actions: [allow, always, deny, open], intentIdentifiers: []),
+            UNNotificationCategory(identifier: "plan", actions: [approvePlan, keepPlanning, open], intentIdentifiers: []),
         ]
     }()
 
@@ -107,7 +112,12 @@ final class Notifications: NSObject, UIApplicationDelegate, UNUserNotificationCe
     /// permission's action answers it.
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let content = response.notification.request.content
-        if let item = Self.item(answering: response.actionIdentifier, content.userInfo) {
+        if Self.answers.contains(response.actionIdentifier) {
+            // An alert with no plain item (the Swift runner's has none) answers nothing.
+            guard let item = Self.item(content.userInfo) else {
+                try? await center.add(Self.couldntAnswer(content.userInfo))
+                return
+            }
             await answer(item, response.actionIdentifier, content.userInfo)
         } else if let id = content.userInfo["job"] as? String {
             phone.open(id, publish: response.actionIdentifier == Self.publish)
@@ -116,25 +126,29 @@ final class Notifications: NSObject, UIApplicationDelegate, UNUserNotificationCe
         }
     }
 
-    /// The inbox item a permission's action answers: always the one the alert showed (its `item`,
+    /// The inbox item an action answers: always the one the alert showed (its `item`, like
     /// `<job>-permission-<id>`), never whatever waits by now; obid answers 409 when it's answered.
-    nonisolated static func item(answering action: String, _ info: [AnyHashable: Any]) -> String? {
-        answers.contains(action) ? info["item"] as? String : nil
+    /// Only a plain id: letters, digits, `-` and `_`.
+    nonisolated static func item(_ info: [AnyHashable: Any]) -> String? {
+        guard let item = info["item"] as? String, item.wholeMatch(of: /[A-Za-z0-9_-]{1,256}/) != nil else { return nil }
+        return item
     }
 
-    /// Allow and Always allow open the job and ask for Face ID: unlocking the phone isn't enough.
-    /// What Face ID approves is what the Mac says waits, not the push's words (anyone can seal to
-    /// this iPhone's public key). A failed answer lets nothing run and says to open Oby.
+    /// Whatever the push said, only an item open in the Mac's inbox, with this answer among its
+    /// options, gets it. Allow, Always allow and Approve also open the job and ask for Face ID, with
+    /// the Mac's words for what it asks: unlocking the phone isn't enough, and anyone can seal to
+    /// this iPhone's public key. A failed answer lets nothing run and says to open Oby.
     private func answer(_ item: String, _ answer: String, _ info: [AnyHashable: Any]) async {
+        let refuses = Self.refusals.contains(answer)
         do {
-            if answer != "Deny" {
+            if !refuses {
                 if let job = info["job"] as? String { phone.open(job, publish: false) }
                 else if let id = info["conversation"] as? String { phone.open(conversation: id) }
-                guard let waits = try await phone.runner.inbox().first(where: { $0.id == item && $0.isOpen }) else {
-                    throw RunnerError(message: "It asks something else now.", status: 409)
-                }
-                guard await Self.ownerApproves(waits.title) else { return }
             }
+            guard let waits = try await phone.runner.inbox().first(where: { $0.id == item && $0.isOpen && $0.options.contains(answer) }) else {
+                throw RunnerError(message: "It asks something else now.", status: 409)
+            }
+            if !refuses { guard await Self.ownerApproves(waits.title) else { return } }
             try await phone.answer(alert: item, answer)
         } catch {
             Logger.phone.error("answering inbox item \(item, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
@@ -143,10 +157,10 @@ final class Notifications: NSObject, UIApplicationDelegate, UNUserNotificationCe
     }
 
     private static func ownerApproves(_ reason: String) async -> Bool {
-        // Face ID comes up only with Oby in front.
-        if UIApplication.shared.applicationState != .active {
-            for await _ in NotificationCenter.default.notifications(named: UIApplication.didBecomeActiveNotification) { break }
-        }
+        // Face ID comes up only with Oby in front. It listens before it checks, so it can't miss
+        // Oby coming forward in between.
+        let activated = NotificationCenter.default.notifications(named: UIApplication.didBecomeActiveNotification).makeAsyncIterator()
+        if UIApplication.shared.applicationState != .active { _ = await activated.next() }
         return (try? await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)) ?? false
     }
 

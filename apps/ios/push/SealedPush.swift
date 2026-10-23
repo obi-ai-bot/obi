@@ -45,7 +45,26 @@ nonisolated enum SealedPush {
         return true
     }
 
-    /// Puts the opened alert in place of the relay's generic "Open Oby to see it."
+    /// What shows for a push: the opened alert when it's news. Otherwise the relay's generic "Open
+    /// Oby to see it." with no category and no userInfo: buttons and taps only ever come from what
+    /// this iPhone opened. A replay also comes quietly: dropping it outright takes Apple's
+    /// filtering entitlement, so it says nothing new, without a sound or lighting the screen.
+    static func shown(_ content: UNNotificationContent, key: Curve25519.KeyAgreement.PrivateKey?, seen: inout [String: TimeInterval],
+                      now: TimeInterval = Date.now.timeIntervalSince1970) -> UNNotificationContent {
+        let shown = content.mutableCopy() as? UNMutableNotificationContent ?? UNMutableNotificationContent()
+        shown.categoryIdentifier = ""
+        shown.userInfo = [:]
+        guard let sealed = content.userInfo["sealed"] as? String, let key, let alert = try? open(sealed, with: key) else { return shown }
+        guard isNews(alert, seen: &seen, now: now) else {
+            shown.sound = nil
+            shown.interruptionLevel = .passive
+            return shown
+        }
+        show(alert, in: shown)
+        return shown
+    }
+
+    /// Puts the opened alert in place of the relay's generic words.
     static func show(_ alert: Alert, in content: UNMutableNotificationContent) {
         content.title = alert.title
         content.body = alert.body
