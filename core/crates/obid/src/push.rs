@@ -247,6 +247,16 @@ pub fn wanted(jobs: &[Job], inbox: &[Value]) -> Vec<(String, Alert)> {
         };
         if let (Some(Notice::Permission), Some(permission)) = (notice(job), &job.permission) {
             let mut asks = alert(self::alert(job, Notice::Permission), true);
+            // The answers its inbox item offers: Approve or Keep planning; Allow, Always allow
+            // or Deny; Allow or Deny.
+            asks.category = if permission.is_plan() {
+                "plan"
+            } else if permission.always.is_some() {
+                "permissionRule"
+            } else {
+                "permission"
+            }
+            .into();
             asks.item = Some(crate::sphere::inbox::permission_item_id(
                 &job.id,
                 &permission.id,
@@ -272,6 +282,13 @@ pub fn wanted(jobs: &[Job], inbox: &[Value]) -> Vec<(String, Alert)> {
         let job = item["job"].as_str().filter(|j| !j.is_empty());
         let category = match item["kind"].as_str() {
             Some("permission") if job.is_some() => continue,
+            Some("permission")
+                if item["options"]
+                    .as_array()
+                    .is_some_and(|o| o.iter().any(|o| o == crate::permissions::ALWAYS_ALLOW)) =>
+            {
+                "permissionRule"
+            }
             Some(kind @ ("permission" | "confirm" | "start")) => kind,
             _ if item["triage"] == "needs_you" => "inbox",
             _ => continue,
@@ -1760,15 +1777,31 @@ mod tests {
             from_owner: "ernesto".into(),
             request_id: "r".into(),
         });
+        let mut always = job("always");
+        always.status = Status::Running;
+        always.permission = Some(crate::permissions::Permission {
+            rule: Some("Bash(swift test:*)".into()),
+            always: Some("Yes, and don't ask again for swift test".into()),
+            ..permission()
+        });
+        let mut planning = job("planning");
+        planning.status = Status::Running;
+        planning.permission = Some(crate::permissions::Permission {
+            tool: "ExitPlanMode".into(),
+            ..permission()
+        });
         let long = format!("shell-{}-p9", "c".repeat(80));
         let mut shell = inbox_item(&long, "permission", "", None);
         shell["conversation"] = json!("conv-1");
+        let mut shell_rule = inbox_item("shell-conv-1-p8", "permission", "", None);
+        shell_rule["options"] = json!(["Allow", "Always allow", "Deny"]);
         let mut later = inbox_item("later", "confirm", "", None);
         later["state"] = json!("later");
         let inbox = [
             shell,
             inbox_item("confirm-1", "confirm", "", None),
             inbox_item("start-1", "start", "", None),
+            shell_rule,
             inbox_item("asks-permission-p1", "permission", "asks", None),
             inbox_item("watch-fyi", "watch", "", Some("fyi")),
             inbox_item("watch-unsorted", "watch", "", None),
@@ -1777,7 +1810,7 @@ mod tests {
         ];
         let wanted = wanted(
             &[
-                asking, failed, done, ready, quiet, stopped, dismissed, theirs,
+                asking, always, planning, failed, done, ready, quiet, stopped, dismissed, theirs,
             ],
             &inbox,
         );
@@ -1787,12 +1820,15 @@ mod tests {
             ids(&wanted),
             [
                 ("asks", "permission", true),
+                ("always", "permissionRule", true),
+                ("planning", "plan", true),
                 ("failed", "job", false),
                 ("done", "job", false),
                 ("ready", "ready", false),
                 (digest.as_str(), "permission", true),
                 ("confirm-1", "confirm", true),
                 ("start-1", "start", true),
+                ("shell-conv-1-p8", "permissionRule", true),
                 ("listen-1", "inbox", true),
             ]
             .map(|(id, category, urgent)| (id.to_owned(), category.to_owned(), urgent))
