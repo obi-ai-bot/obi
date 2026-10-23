@@ -104,12 +104,30 @@ nonisolated struct AlertingTool: Equatable, Sendable {
     static let all = [
         AlertingTool(id: "prometheus", name: "Prometheus", about: "Alerts from Alertmanager", source: "alertmanager", symbol: "flame"),
         AlertingTool(id: "grafana", name: "Grafana", about: "Alerts from Grafana", source: "grafana", symbol: "chart.xyaxis.line"),
+        AlertingTool(id: "pagerduty", name: "PagerDuty", about: "Incidents from PagerDuty", source: "pagerduty", symbol: "bell.badge"),
     ]
 
-    /// What to paste where, for `url` and `secret` (shown once, then only in obid's vault); `label`
-    /// is the one that names the project.
+    /// PagerDuty makes the signing secret itself, once its webhook has Oby's address: the address
+    /// comes first, then the secret it shows is pasted back (#1312).
+    var secretFromTool: Bool { source == "pagerduty" }
+
+    /// The project's label: PagerDuty's is always the incident's service.
+    var asksLabel: Bool { source != "pagerduty" }
+
+    /// What to paste where, for `url` and `secret` (shown once, then only in obid's vault; PagerDuty's
+    /// is its own, so `secret` is empty there); `label` is the one that names the project.
     func steps(url: String, secret: String, label: String = "service") -> String {
         switch source {
+        case "pagerduty":
+            return """
+            In PagerDuty: Integrations › Generic Webhooks (v3) › New Webhook.
+            Webhook URL: \(url)
+            Scope: the service or team whose incidents Oby should hear about.
+            Event subscription: incident.triggered, incident.reopened and incident.resolved.
+
+            PagerDuty then shows its signing secret once: paste it below. High-urgency incidents come
+            as critical, low as error; the project is the incident's service.
+            """
         case "alertmanager":
             return """
             Alertmanager 0.28 or later. Add a receiver and route your alerts to it:
@@ -158,6 +176,12 @@ enum HookSetup {
             await Task { try? await plane.removeHook(address.id, signer) }.value
             throw error
         }
+    }
+
+    /// obid keeps a hook whose address was made first (`reserve`, PagerDuty's), with the secret the
+    /// tool showed.
+    static func finish(_ address: ControlPlane.Hook, name: String, source: String, repo: String?, secret: String, obid: Runner) async throws -> Runner.HookRow {
+        try await obid.addHook(id: address.id, url: address.url, name: name, source: source, secret: secret, repo: repo)
     }
 
     /// obid forgets it and its secret first, then the control plane its address. One obid no longer

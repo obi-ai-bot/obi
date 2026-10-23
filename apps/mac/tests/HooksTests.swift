@@ -62,6 +62,21 @@ struct HooksTests {
         #expect(plane.requests.map { "\($0.httpMethod ?? "") \($0.url?.path() ?? "")" } == ["DELETE /v1/installations/self/hooks/abcdefghij0123456789abcdefghij01"])
     }
 
+    /// PagerDuty's hook: the address first, then obid with the secret PagerDuty showed.
+    @Test func aPagerDutyHookTakesTheToolsOwnSecret() async throws {
+        let plane = Plane([(201, Self.made)])
+        let obid = RunnerStub { _ in
+            (201, #"{"id": "abcdefghij0123456789abcdefghij01", "name": "pagerduty", "source": "pagerduty", "repo": "obi-ai-bot/obi", "url": "https://oby-control.test/h/abcdefghij0123456789abcdefghij01", "lastDelivery": null}"#)
+        }
+        let control = ControlPlane(base: URL(string: "https://oby-control.test")!, transport: plane.transport)
+        let address = try await control.createHook(signer)
+        #expect(obid.requests.isEmpty, "obid hears of it only with PagerDuty's secret")
+        let theirs = "pd-" + String(repeating: "7Kq2", count: 10)
+        _ = try await HookSetup.finish(address, name: "pagerduty", source: "pagerduty", repo: "obi-ai-bot/obi", secret: theirs, obid: obid.runner)
+        let given = try #require(obid.requests.last?.json)
+        #expect(given["secret"] as? String == theirs && given["source"] as? String == "pagerduty")
+    }
+
     @Test func aHookObidRefusesIsRemovedFromTheControlPlane() async throws {
         let plane = Plane([(201, Self.made), (204, "")])
         let obid = RunnerStub { _ in (422, #"{"error": "name is up to 32 lower-case letters, digits or dashes."}"#) }

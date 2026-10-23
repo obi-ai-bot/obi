@@ -718,6 +718,21 @@ impl Link {
         self.save_item(&settled);
     }
 
+    /// Settles, as [`Self::settle_event`] does, every open `pluginEvent` item that `matches` (a
+    /// PagerDuty incident's offers, opened and opened again, #1312).
+    pub fn settle_events(&self, matches: impl Fn(&Item) -> bool, answer: &str) {
+        let ids: Vec<String> = self
+            .lock()
+            .inbox
+            .values()
+            .filter(|i| i.kind == "pluginEvent" && i.done.is_none() && matches(i))
+            .map(|i| i.id.clone())
+            .collect();
+        for id in ids {
+            self.settle_event(&id, answer);
+        }
+    }
+
     /// Sentry's offers start with what it reads then (crate::sentry::Sentry::quote).
     pub fn use_sentry(&self, sentry: Arc<crate::sentry::Sentry>) {
         let _ = self.sentry.set(sentry);

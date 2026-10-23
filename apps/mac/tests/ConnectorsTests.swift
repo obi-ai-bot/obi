@@ -445,6 +445,11 @@ struct ConnectorsTests {
         #expect(steps.contains("url: https://oby-control.test/h/x") && steps.contains("X-Oby-Token:") && steps.contains(#"secrets: ["s3cret"]"#))
         #expect(AlertingTool.all[1].steps(url: "u", secret: "s").contains("X-Grafana-Alerting-Timestamp"))
         #expect(AlertingTool.all[0].steps(url: "u", secret: "s", label: "job").contains("the alert's job label"))
+        // PagerDuty (#1312): its own secret, pasted back after the address; no project label.
+        let pagerDuty = try #require(AlertingTool.all.first { $0.id == "pagerduty" })
+        #expect(pagerDuty.secretFromTool && !pagerDuty.asksLabel && !AlertingTool.all[0].secretFromTool)
+        #expect(pagerDuty.steps(url: "https://oby-control.test/h/x", secret: "").contains("incident.triggered, incident.reopened and incident.resolved"))
+        #expect(list.first { $0.id == "pagerduty" }?.way == .button("Connect…", .connectAlerts("pagerduty")))
     }
 
     /// The Mac reads obid's Sentry, connects it and follows a project as obid answers; a repository

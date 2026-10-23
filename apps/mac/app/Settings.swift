@@ -791,10 +791,17 @@ struct AlertHookSheet: View {
     let remoteOn: Bool
     let openRemote: () -> Void
     let make: (_ repo: String, _ label: String) async throws -> (Runner.HookRow, String)
+    /// PagerDuty's two steps: an address first, then the secret PagerDuty shows; cancelled between
+    /// them, the address goes again.
+    var reserve: () async throws -> ControlPlane.Hook = { throw ControlPlane.Failure(message: "Not here.", status: 0) }
+    var finish: (_ address: ControlPlane.Hook, _ repo: String, _ secret: String) async throws -> Void = { _, _, _ in }
+    var abandon: (_ address: ControlPlane.Hook) async -> Void = { _ in }
     let done: () -> Void
     @State private var repo = ""
     @State private var label = "service"
     @State private var made: (url: String, secret: String, label: String)?
+    @State private var reserved: ControlPlane.Hook?
+    @State private var pasted = ""
     @State private var busy = false
     @State private var problem: String?
 
@@ -816,6 +823,40 @@ struct AlertHookSheet: View {
                     Spacer()
                     Button("Done", action: done).keyboardShortcut(.defaultAction)
                 }
+            } else if let reserved {
+                ScrollView {
+                    Text(tool.steps(url: reserved.url.absoluteString, secret: ""))
+                        .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 220)
+                HStack {
+                    Button("Copy Address") { copy(reserved.url.absoluteString) }
+                    Spacer()
+                }
+                SecureField("PagerDuty's signing secret", text: $pasted)
+                if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger) }
+                HStack {
+                    Spacer()
+                    // The address goes as the sheet closes (`onDisappear`), unless Finish kept it.
+                    Button("Cancel", role: .cancel, action: done).disabled(busy)
+                    Button("Finish") {
+                        busy = true
+                        Task {
+                            defer { busy = false }
+                            do {
+                                try await finish(reserved, repo, pasted.trimmingCharacters(in: .whitespacesAndNewlines))
+                                pasted = ""
+                                self.reserved = nil
+                                done()
+                            } catch {
+                                problem = error.localizedDescription
+                            }
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(busy || pasted.trimmingCharacters(in: .whitespacesAndNewlines).count < 32)
+                }
             } else if !remoteOn {
                 Text("\(tool.name)'s alerts reach this Mac through Remote access, so it needs to be on first.")
                     .fixedSize(horizontal: false, vertical: true)
@@ -831,20 +872,24 @@ struct AlertHookSheet: View {
                     Text("Choose…").tag("")
                     ForEach(repos, id: \.self) { Text($0).tag($0) }
                 }
-                TextField("Label that names the project", text: $label)
+                if tool.asksLabel { TextField("Label that names the project", text: $label) }
                 if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger) }
                 HStack {
                     Spacer()
-                    // Not while Connect runs: the hook it makes would be left with a secret nobody saw.
+                    // Not while it runs: the hook it makes would be left with a secret nobody saw.
                     Button("Cancel", role: .cancel, action: done).disabled(busy)
-                    Button("Connect") {
+                    Button(tool.secretFromTool ? "Continue" : "Connect") {
                         busy = true
                         Task {
                             defer { busy = false }
                             do {
-                                let named = label.trimmingCharacters(in: .whitespaces)
-                                let (row, secret) = try await make(repo, named)
-                                made = (row.url, secret, named)
+                                if tool.secretFromTool {
+                                    reserved = try await reserve()
+                                } else {
+                                    let named = label.trimmingCharacters(in: .whitespaces)
+                                    let (row, secret) = try await make(repo, named)
+                                    made = (row.url, secret, named)
+                                }
                                 problem = nil
                             } catch {
                                 problem = error.localizedDescription
@@ -859,6 +904,8 @@ struct AlertHookSheet: View {
         .padding(24)
         .frame(width: 560)
         .interactiveDismissDisabled(busy)
+        // However it closes (Cancel, Escape, the window), an address obid never got goes again.
+        .onDisappear { if let reserved { Task { await abandon(reserved) } } }
     }
 
     private func copy(_ text: String) {
@@ -1040,6 +1087,9 @@ struct ConnectorsSettingsView: View {
             AlertHookSheet(tool: shown.tool, repos: lists.repos, remoteOn: remote?.on == true && remote?.hostname != nil,
                            openRemote: { alerting = nil; openSettings(.remote) },
                            make: { repo, label in try await makeHook(shown.tool, repo: repo, label: label) },
+                           reserve: { try await reserveHook() },
+                           finish: { address, repo, secret in try await finishHook(shown.tool, address, repo: repo, secret: secret) },
+                           abandon: { address in await abandonHook(address) },
                            done: { alerting = nil })
         }
         .sheet(isPresented: $showingSentryProjects) {
@@ -1445,6 +1495,27 @@ struct ConnectorsSettingsView: View {
                                            plane: remote.plane, signer: try remote.signer(), obid: runner)
         lists.hooks = (try? await runner.hooksIfAny()) ?? lists.hooks
         return (row, secret)
+    }
+
+    /// PagerDuty's first step: an address at the control plane, to paste into PagerDuty.
+    private func reserveHook() async throws -> ControlPlane.Hook {
+        guard let remote else { throw ControlPlane.Failure(message: "Turn on Remote access first.", status: 0) }
+        return try await remote.plane.createHook(try remote.signer())
+    }
+
+    /// Its second: obid keeps the hook with the secret PagerDuty showed.
+    private func finishHook(_ tool: AlertingTool, _ address: ControlPlane.Hook, repo: String, secret: String) async throws {
+        guard let runner = feed.runner else { throw ControlPlane.Failure(message: "obid isn't answering.", status: 0) }
+        let taken = Set((lists.hooks ?? []).map(\.name))
+        let name = ([tool.id] + (2...9).map { "\(tool.id)-\($0)" }).first { !taken.contains($0) } ?? "\(tool.id)-\(Int.random(in: 10...99))"
+        _ = try await HookSetup.finish(address, name: name, source: tool.source, repo: repo, secret: secret, obid: runner)
+        lists.hooks = (try? await runner.hooksIfAny()) ?? lists.hooks
+    }
+
+    /// Cancelled before obid kept it: the address goes, so nothing is left half made.
+    private func abandonHook(_ address: ControlPlane.Hook) async {
+        guard let remote, let signer = try? remote.signer() else { return }
+        try? await remote.plane.removeHook(address.id, signer)
     }
 
     /// Follows a Sentry project or not, and where it's looked into: shown as obid answers.

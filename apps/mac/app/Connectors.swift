@@ -355,15 +355,19 @@ nonisolated enum Connectors {
     /// there, saying what its last delivery came to. Only obid on this Mac gets buttons: the hook's
     /// address is made with this Mac's key, and deliveries come through its tunnel.
     static func alerting(_ tool: AlertingTool, hook: Runner.HookRow?, place: String, local: Bool) -> Connector {
-        let last = hook?.lastDelivery.map { "Last delivery: \($0.result)." } ?? "No delivery yet."
-        let how = hook.map { "Sends critical and error alerts to Oby, looked into in \($0.repo ?? "its repository"). \(last)" }
-            ?? "Sends its alerts to Oby: you paste an address and a secret into \(tool.name) once. Needs Remote access on."
+        let refused = ["bad signature", "too many"].contains(hook?.lastDelivery?.result ?? "")
+        var last = hook?.lastDelivery.map { "Last delivery: \($0.result)." } ?? "No delivery yet."
+        // PagerDuty turns a webhook off after it keeps failing (#1312).
+        if refused && tool.secretFromTool { last += " \(tool.name) may have turned this webhook off: check its secret." }
+        let setUp = tool.secretFromTool
+            ? "Sends its incidents to Oby: you paste Oby's address into \(tool.name), and the secret it shows back into Oby, once. Needs Remote access on."
+            : "Sends its alerts to Oby: you paste an address and a secret into \(tool.name) once. Needs Remote access on."
+        let how = hook.map { "Sends critical and error alerts to Oby, looked into in \($0.repo ?? "its repository"). \(last)" } ?? setUp
         let row = { (state: Connector.State, way: Connector.Way?) in
             Connector(id: tool.id, name: tool.name, about: tool.about, place: place, how: how, state: state, way: way, symbol: tool.symbol)
         }
         guard local else { return row(hook == nil ? .available : .connected, .steps("Connect or disconnect it on \(place) itself, with Oby there.")) }
         if let hook {
-            let refused = ["bad signature", "too many"].contains(hook.lastDelivery?.result ?? "")
             return row(refused ? .broken : .connected, .button("Disconnect…", .disconnectAlerts(hook.id)))
         }
         return row(.available, .button("Connect…", .connectAlerts(tool.source)))

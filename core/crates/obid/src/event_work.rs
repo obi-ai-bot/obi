@@ -98,6 +98,15 @@ pub async fn start(
                 ),
                 format!("Deploy failed: {project}"),
             ),
+            // A PagerDuty incident by its number (#1312), a number obid checked.
+            "alert.fired" if plugin == "pagerduty" && event["pagerduty"]["number"].is_u64() => (
+                "investigate",
+                format!(
+                    "Look into PagerDuty incident #{} on {project}. {quoted}",
+                    event["pagerduty"]["number"]
+                ),
+                format!("Alert: {project}"),
+            ),
             "alert.fired" => (
                 "investigate",
                 format!(

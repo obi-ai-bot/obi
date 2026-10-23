@@ -377,3 +377,120 @@ fn alerting_hooks_offer_critical_alerts_and_settle_resolved_ones() {
     assert!(!obid.log().contains(&token) && !obid.log().contains(&grafana_secret));
     assert!(obid.stop().success());
 }
+
+fn pagerduty_event(kind: &str, occurred: &str) -> Vec<u8> {
+    json!({"event": {"id": format!("ev-{kind}-{occurred}"), "event_type": kind, "resource_type": "incident",
+                     "occurred_at": occurred, "agent": null, "client": null,
+                     "data": {"id": "Q1R2S3T4U5V6W7", "number": 42, "status": "triggered", "urgency": "high",
+                              "title": "API latency high", "html_url": "https://acme.pagerduty.com/incidents/Q1R2S3T4U5V6W7",
+                              "service": {"id": "PSRV123", "summary": "API Production"}}}})
+    .to_string()
+    .into_bytes()
+}
+
+/// PagerDuty (#1312): signed with `v1=`; a triggered incident is one offer, PagerDuty's
+/// redelivery makes no second one, other events answer 2xx and make nothing, and resolved
+/// settles it.
+#[test]
+fn pagerduty_incidents_become_offers_and_settle() {
+    let folder = Folder::new("hooks-pagerduty");
+    let mut obid = started(&folder);
+    let id = "d".repeat(32);
+    let secret = secret();
+    assert_eq!(call(&obid, "POST", "/v1/hooks", Some(&json!({"id": id, "url": format!("https://oby-control.tetrix.pro/h/{id}"),
+        "name": "pagerduty", "source": "pagerduty", "secret": secret, "repo": "obi-e2e/fixture-app"}))).status, 201);
+    let send = |body: &[u8]| {
+        let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, secret.as_bytes());
+        let signature = format!(
+            "v1={}",
+            hex::encode(aws_lc_rs::hmac::sign(&key, body).as_ref())
+        );
+        deliver(&obid, &id, body, &[("X-PagerDuty-Signature", &signature)]).0
+    };
+    let triggered = pagerduty_event("incident.triggered", "2026-10-23T03:12:00Z");
+    assert_eq!(
+        deliver(
+            &obid,
+            &id,
+            &triggered,
+            &[("X-PagerDuty-Signature", "v1=00")]
+        )
+        .0,
+        401
+    );
+    assert_eq!(send(&triggered), 202);
+    let offer = within(10, "the incident's offer", || {
+        inbox_item(&obid, "Alert: PSRV123 (critical)", "open")
+    });
+    assert_eq!(
+        offer["text"],
+        "PagerDuty says incident #42 opened on PSRV123."
+    );
+    assert_eq!(
+        send(&triggered),
+        200,
+        "PagerDuty's redelivery is a duplicate"
+    );
+    // The same event with a slightly different body: the incident's key, not the body, keeps it one card.
+    let mut resent: Value = serde_json::from_slice(&triggered).unwrap();
+    resent["retry"] = json!(1);
+    assert_eq!(send(resent.to_string().as_bytes()), 202);
+    assert_eq!(
+        send(&pagerduty_event(
+            "incident.acknowledged",
+            "2026-10-23T03:13:00Z"
+        )),
+        202
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let open: Vec<Value> = call(&obid, "GET", "/v1/inbox", None)
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "pluginEvent")
+        .cloned()
+        .collect();
+    assert_eq!(open.len(), 1, "{open:#?}");
+    assert_eq!(
+        send(&pagerduty_event(
+            "incident.resolved",
+            "2026-10-23T03:20:00Z"
+        )),
+        202
+    );
+    let settled = within(10, "the settled incident", || {
+        inbox_item(&obid, "Alert: PSRV123 (critical)", "done")
+    });
+    assert!(
+        settled["answer"]
+            .as_str()
+            .unwrap()
+            .starts_with("Resolved at the source at ")
+    );
+    // Reopened later, then the earlier resolve arrives again (a retry): the reopening stays open.
+    assert_eq!(
+        send(&pagerduty_event(
+            "incident.reopened",
+            "2026-10-23T03:30:00Z"
+        )),
+        202
+    );
+    within(10, "the reopened incident", || {
+        inbox_item(&obid, "Alert: PSRV123 (critical)", "open")
+    });
+    let mut late: Value = serde_json::from_slice(&pagerduty_event(
+        "incident.resolved",
+        "2026-10-23T03:20:00Z",
+    ))
+    .unwrap();
+    late["retry"] = json!(1);
+    assert_eq!(send(late.to_string().as_bytes()), 202);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        inbox_item(&obid, "Alert: PSRV123 (critical)", "open").is_some(),
+        "a late resolve settles nothing newer"
+    );
+    assert!(!obid.log().contains(&secret));
+    assert!(obid.stop().success());
+}
