@@ -1,3 +1,4 @@
+import AppKit
 import CryptoKit
 import Foundation
 import Observation
@@ -128,6 +129,10 @@ nonisolated struct SphereServer: Sendable {
     /// still gets through: the TLS certificate has to match it.
     static func problem(_ url: URL) -> String? {
         guard url.scheme == "https" else { return "An Obysphere's address starts with https://." }
+        // Just the origin: obid takes no path either, and links are made from it.
+        guard url.user == nil, url.password == nil, url.query == nil, url.fragment == nil, ["", "/"].contains(url.path()) else {
+            return "An Obysphere's address is https:// and its name only, like https://sphere.example.com."
+        }
         let host = (url.host() ?? "").lowercased()
         let labels = host.split(separator: ".", omittingEmptySubsequences: false)
         let top = labels.last.map(String.init) ?? ""
@@ -173,6 +178,23 @@ nonisolated struct SphereServer: Sendable {
         return object
     }
 
+    /// Signs the owner in with Google for `key` (spec sphere-api.md section 3.1): the Sphere's
+    /// sign-in page in the system's web sheet, which comes back to `obi-sphere://signin` with the
+    /// one-time code. Answers `{"state", "code"}`, for the one call that needs it.
+    @MainActor
+    func signIn(key: OwnerKey) async throws -> [String: String] {
+        let started = try await call("POST", "signin/google", json: ["owner_key": key.publicKey])
+        guard let page = (started["url"] as? String).flatMap(URL.init(string:)), page.scheme == "https",
+              let state = started["state"] as? String else { throw RunnerError(message: "The Obysphere gave no sign-in page.") }
+        let back = try await WebSignIn.run(page, scheme: "obi-sphere")
+        let items = URLComponents(url: back, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let value = { (name: String) in items.first { $0.name == name }?.value }
+        guard value("state") == state, let code = value("code") else {
+            throw RunnerError(message: "The sign-in didn't finish, or that account can't do this here.")
+        }
+        return ["state": state, "code": code]
+    }
+
     /// The owner's own token for `sphere` (identity.md 4.3, no actor), for `scope`: `admin` only
     /// to invite or set the Sphere up, `directory:read` to read it.
     func ownerToken(owner: String, sphere: String, key: OwnerKey, scope: String) async throws -> String {
@@ -197,28 +219,32 @@ nonisolated final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable 
 // MARK: The invite link
 
 /// An invitation to pass on, as a link (onboarding.md section 4, "Joining"): the Sphere's address,
-/// with the rest after `#`, so the secret never reaches a server in a request.
-// ponytail: an invitation names one owner and one Obi (sphere-api.md section 4), so the link is for
-// one person; Sangam's open link (anyone at @deskree.com) needs owner-less invitations in the spec.
+/// with the rest after `#`, so the secret never reaches a server in a request. A named one is for
+/// one person (`for`, `obi`); an open one is one link for a team (sphere-api.md section 4), maybe
+/// only for one Google Workspace's people (`domain`, which the Sphere enforces with a sign-in).
 nonisolated struct InviteLink: Equatable, Sendable {
     var server: URL
     var sphere: String
     var name: String
     var by: String
-    var owner: String
-    var obi: String
+    var owner: String?
+    var obi: String?
     var id: String
     var secret: String
+    /// Only what the link says until the Sphere's preview says it (`SphereModel.preview`).
+    var domain: String?
+    var members: Int?
 
     var link: String {
         var parts = URLComponents()
-        parts.queryItems = [("sphere", sphere), ("name", name), ("by", by), ("for", owner), ("obi", obi), ("id", id), ("secret", secret)]
+        let named = owner.map { [("for", $0), ("obi", obi ?? "")] } ?? []
+        parts.queryItems = ([("sphere", sphere), ("name", name), ("by", by)] + named + (domain.map { [("domain", $0)] } ?? []) + [("id", id), ("secret", secret)])
             .map { URLQueryItem(name: $0, value: $1) }
         return server.appending(path: "join").absoluteString + "#" + (parts.percentEncodedQuery ?? "")
     }
 
-    init(server: URL, sphere: String, name: String, by: String, owner: String, obi: String, id: String, secret: String) {
-        (self.server, self.sphere, self.name, self.by, self.owner, self.obi, self.id, self.secret) = (server, sphere, name, by, owner, obi, id, secret)
+    init(server: URL, sphere: String, name: String, by: String, owner: String? = nil, obi: String? = nil, id: String, secret: String, domain: String? = nil) {
+        (self.server, self.sphere, self.name, self.by, self.owner, self.obi, self.id, self.secret, self.domain) = (server, sphere, name, by, owner, obi, id, secret, domain)
     }
 
     /// The Sphere's address, as the Join screen shows it.
@@ -228,13 +254,14 @@ nonisolated struct InviteLink: Equatable, Sendable {
     /// the link (its name, who sent it) is only what the link says.
     // ponytail: one known server until `<name>.obysphere.com`; then any host under it.
     var warning: String? {
-        server == SphereModel.defaultServer ? nil
+        server == SphereModel.server ? nil
             : "This link is for \(host), not the Obysphere server Oby knows. Joining lets that server act for your Oby for 30 days. Join only if you trust \(host)."
     }
 
-    /// Why this Mac's Oby can't use this link, or nil: it's for one owner.
+    /// Why this Mac's Oby can't use this link, or nil: a named one is for one owner.
     func mismatch(owner mine: String) -> String? {
-        mine == owner ? nil : "This invite is for \(owner), and this Mac's Oby acts for \(mine). Ask \(by.isEmpty ? "the admin" : by) for one for \(mine)."
+        guard let owner, owner != mine else { return nil }
+        return "This invite is for \(owner), and this Mac's Oby acts for \(mine). Ask \(by.isEmpty ? "the admin" : by) for one for \(mine)."
     }
 
     /// The link as pasted, or nil when it isn't one, or its address isn't a public https one.
@@ -246,10 +273,12 @@ nonisolated struct InviteLink: Equatable, Sendable {
         let items = Dictionary((parts.queryItems ?? []).map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { first, _ in first })
         var origin = URLComponents()
         (origin.scheme, origin.host, origin.port) = (url.scheme, host, url.port)
-        guard let server = origin.url, SphereServer.problem(server) == nil, let sphere = items["sphere"], let owner = items["for"], let obi = items["obi"],
-              let id = items["id"], let secret = items["secret"], ![sphere, owner, obi, id, secret].contains(where: \.isEmpty) else { return nil }
+        let owner = items["for"], obi = items["obi"]
+        guard let server = origin.url, SphereServer.problem(server) == nil, let sphere = items["sphere"],
+              let id = items["id"], let secret = items["secret"], ![sphere, id, secret].contains(where: \.isEmpty),
+              (owner == nil) == (obi == nil), owner?.isEmpty != true, obi?.isEmpty != true else { return nil }
         self.init(server: server, sphere: sphere, name: items["name"].flatMap { $0.isEmpty ? nil : $0 } ?? sphere,
-                  by: items["by"] ?? "", owner: owner, obi: obi, id: id, secret: secret)
+                  by: items["by"] ?? "", owner: owner, obi: obi, id: id, secret: secret, domain: items["domain"].flatMap { $0.isEmpty ? nil : $0 })
     }
 }
 
@@ -307,8 +336,15 @@ final class SphereModel {
         static func == (a: Request, b: Request) -> Bool { a.id == b.id && a.options == b.options }
     }
 
-    /// Deskree's Sphere (moved off workers.dev on 2026-10-20) until Oby Cloud hosts `<name>.obysphere.com` (onboarding.md section 4).
-    nonisolated static let defaultServer = URL(string: "https://obysphere.deskree.com")!
+    /// The Obysphere server this Oby makes Obyspheres on and trusts links from: Settings ›
+    /// Obysphere's Server, else the app's ObySphereURL (OBY_SPHERE_URL in apps/config/Signing.xcconfig,
+    /// Deskree's own in Deskree's builds), else none (obi-sphere's docs/run-your-own.md).
+    nonisolated static var server: URL? {
+        let set = UserDefaults.standard.string(forKey: serverKey) ?? ""
+        let built = Bundle.main.object(forInfoDictionaryKey: "ObySphereURL") as? String ?? ""
+        return [set, built].lazy.compactMap { $0.isEmpty ? nil : URL(string: $0) }.first { SphereServer.problem($0) == nil }
+    }
+    nonisolated static let serverKey = "sphereServer"
     /// What another Oby may ask this one (docs/runner-api.md, `POST /v1/obid/sphere/card`).
     nonisolated static let accepts = ["review_request", "question"]
     /// What each Obi's delegation grants it (identity.md 4.2).
@@ -333,11 +369,17 @@ final class SphereModel {
     var joined: Bool { membership?.state == "joined" }
     /// Who this Mac's Oby acts for (obid's `owner`).
     var owner: String? { membership?.owner }
-    /// The operator token's keychain item: only a Mac that has it can create an Obysphere
-    /// (obi-sphere's docs/deploy-cloudflare.md, "Secrets").
-    // ponytail: Oby Cloud creates spheres later; until then the operator's own Mac does.
+    /// The operator token's keychain item, on the Mac that deployed the Obysphere server (obi-sphere's
+    /// scripts/deploy.mjs), its account the server's host: a token only ever goes to the server it was
+    /// made for. Every other Mac creates an Obysphere by signing in with Google, when the server lets
+    /// its Workspace (sphere-api.md section 3.1).
     nonisolated static let operatorToken = KeychainVault(service: "obi-sphere-operator-token", label: "obi-sphere operator token")
-    private(set) var canCreate = false
+    /// The team link the admin made last, kept so Settings can copy it again (its secret is shown once).
+    nonisolated static let teamLinks = KeychainVault(service: "com.deskree.oby.sphere-link", label: "Oby Obysphere link")
+    /// Not in an Obysphere yet, with a server to make one on.
+    var canCreate: Bool { membership != nil && !joined && Self.server != nil }
+    /// The team link to copy (an admin's).
+    private(set) var teamLink: InviteLink?
 
     private func runner() throws -> Runner {
         guard let runner = feed.runner else { throw RunnerError(message: "Oby's engine isn't running on this Mac yet.") }
@@ -366,8 +408,8 @@ final class SphereModel {
     func refresh() async throws {
         let runner = try runner()
         membership = try await runner.call("GET", "v1/obid/sphere")
-        canCreate = !joined && !((try? Self.operatorToken.names()) ?? []).isEmpty
         guard joined, let server, let owner, let sphere = membership?.sphere else { return }
+        teamLink = (try? Self.teamLinks.value(sphere)).flatMap { $0 }.flatMap(InviteLink.init)
         let token = try await server.ownerToken(owner: owner, sphere: sphere, key: try OwnerKey.of(owner), scope: "directory:read")
         let about = try await server.call("GET", "spheres/\(sphere)", bearer: token)
         name = about["name"] as? String
@@ -414,20 +456,46 @@ final class SphereModel {
 
     // MARK: Admin
 
+    /// What creating made: the link for everyone at `domain`, and the one mailed to the people invited.
+    struct Created { var team: InviteLink?; var mailed: InviteLink? }
+
     /// Creates the Obysphere with this Mac's owner as its admin (sphere-api.md section 3), lets
-    /// everyone ask everyone for reviews and questions (section 5), and joins this Mac's Oby.
-    func create(id sphere: String, name: String, server url: URL = defaultServer) async throws {
+    /// everyone ask everyone for reviews and questions (section 5), and joins this Mac's Oby. It
+    /// creates with the operator token when this Mac has it, else by signing in with Google. Then a
+    /// link for everyone at `domain` (the Sphere checks each one's Workspace), and one for the
+    /// `emails` invited, which Mail opens a message with for the owner to send.
+    func create(id sphere: String, name: String, emails: [String] = [], domain: String? = nil) async throws -> Created {
+        guard let url = Self.server else { throw RunnerError(message: "Set the Obysphere server first, in Settings › Obysphere.") }
         let runner = try runner()
         let membership: Membership = try await runner.call("GET", "v1/obid/sphere")
+        // Before anything reaches the server: a joined Oby would make a Sphere it can't join.
+        guard membership.state != "joined" else { throw RunnerError(message: "This Oby is in an Obysphere already.") }
         let owner = membership.owner
-        guard let operatorAccount = try Self.operatorToken.names().first,
-              let operatorToken = try Self.operatorToken.value(operatorAccount) else {
-            throw RunnerError(message: "This Mac has no operator token for the Obysphere server.")
-        }
         let key = try OwnerKey.of(owner)
         let server = SphereServer(base: url)
-        _ = try await server.call("POST", "spheres", bearer: operatorToken,
-                                  json: ["sphere": sphere, "name": name, "admin": ["owner": owner, "owner_key": key.publicKey]])
+        let body: [String: Any] = ["sphere": sphere, "name": name, "admin": ["owner": owner, "owner_key": key.publicKey]]
+        var made = false
+        if let host = url.host(), let operatorToken = try Self.operatorToken.value(host) {
+            do {
+                _ = try await server.call("POST", "spheres", bearer: operatorToken, json: body)
+                made = true
+            } catch let error as RunnerError where error.status == 401 {
+                // The server's token was rotated since: sign in instead.
+            }
+        }
+        if !made {
+            let signin: [String: String]
+            do {
+                signin = try await server.signIn(key: key)
+            } catch let error as RunnerError where error.status == 403 {
+                throw RunnerError(message: "\(url.host() ?? "This Obysphere server") lets only its operator create Obyspheres. Ask them for an invite link, or run your own.")
+            }
+            do {
+                _ = try await server.call("POST", "spheres", json: body.merging(["signin": signin]) { $1 })
+            } catch let error as RunnerError where error.status == 403 {
+                throw RunnerError(message: "\(url.host() ?? "This Obysphere server") doesn't let that Google account create Obyspheres. Sign in with your work account.")
+            }
+        }
         let token = try await server.ownerToken(owner: owner, sphere: sphere, key: key, scope: "admin")
         _ = try await server.call("PUT", "spheres/\(sphere)/policy", bearer: token, json: [
             "expected_version": 0,
@@ -435,45 +503,95 @@ final class SphereModel {
         ])
         let mine = try await invitation(server: server, token: token, sphere: sphere, name: name, by: owner, for: owner)
         try await join(mine)
+        var created = Created()
+        if let domain {
+            // A Sphere server without sign-in can't limit a link to a domain: no team link then.
+            created.team = try? await invitation(server: server, token: token, sphere: sphere, name: name, by: owner, domain: domain)
+            if let team = created.team { try? Self.teamLinks.save(team.link, as: sphere) }
+        }
+        if !emails.isEmpty {
+            // The Sphere is made and joined by now: a failed invite mustn't undo that in the sheet.
+            created.mailed = try? await invitation(server: server, token: token, sphere: sphere, name: name, by: owner, uses: emails.count)
+        }
+        try await refresh()
+        return created
     }
 
-    /// A link for `person`'s Oby to join with (sphere-api.md section 4, "Invite"), for 7 days.
-    func invite(_ person: String) async throws -> InviteLink {
+    /// A link for anyone at `domain` (with a sign-in) for 30 days, or else one for up to 50 people
+    /// for 7 days (sphere-api.md section 4, open invitations), kept for Settings to copy again.
+    func makeTeamLink(domain: String?) async throws -> InviteLink {
         guard let server, let owner, let sphere = membership?.sphere else { throw RunnerError(message: "This Oby isn't in an Obysphere.") }
         let token = try await server.ownerToken(owner: owner, sphere: sphere, key: try OwnerKey.of(owner), scope: "admin")
-        return try await invitation(server: server, token: token, sphere: sphere, name: name ?? sphere, by: owner, for: person)
+        let link = try await invitation(server: server, token: token, sphere: sphere, name: name ?? sphere, by: owner, uses: domain == nil ? 50 : 1000, domain: domain)
+        try? Self.teamLinks.save(link.link, as: sphere)
+        teamLink = link
+        return link
     }
 
-    private func invitation(server: SphereServer, token: String, sphere: String, name: String, by: String, for person: String) async throws -> InviteLink {
-        let obi = "obi-\(person)"
-        let made = try await server.call("POST", "spheres/\(sphere)/invitations", bearer: token,
-                                         json: ["owner": person, "obi": obi, "expires_in": 604_800])
+    /// A named invitation `for` one owner, used once in 7 days; else an open one for `uses` Obis,
+    /// for 30 days when it's limited to `domain`, else 7.
+    private func invitation(server: SphereServer, token: String, sphere: String, name: String, by: String,
+                            for person: String? = nil, uses: Int = 1000, domain: String? = nil) async throws -> InviteLink {
+        var body: [String: Any] = ["expires_in": domain == nil ? 604_800 : 2_592_000]
+        if let person { (body["owner"], body["obi"]) = (person, "obi-\(person)") } else { body["max_uses"] = min(max(uses, 1), 1000) }
+        if let domain { body["domain"] = domain }
+        let made = try await server.call("POST", "spheres/\(sphere)/invitations", bearer: token, json: body)
         guard let id = made["invitation_id"] as? String, let secret = made["secret"] as? String else {
             throw RunnerError(message: "The Obysphere's invitation came without its secret.")
         }
-        return InviteLink(server: server.base, sphere: sphere, name: name, by: by, owner: person, obi: obi, id: id, secret: secret)
+        return InviteLink(server: server.base, sphere: sphere, name: name, by: by, owner: person, obi: person.map { "obi-\($0)" },
+                          id: id, secret: secret, domain: made["domain"] as? String)
+    }
+
+    /// A message in the owner's mail app to `emails` with `link`, for them to send.
+    static func mail(_ link: InviteLink, to emails: [String]) {
+        var parts = URLComponents()
+        parts.scheme = "mailto"
+        parts.path = emails.joined(separator: ",")
+        parts.queryItems = [
+            URLQueryItem(name: "subject", value: "Join \(link.name) on Oby"),
+            URLQueryItem(name: "body", value: "\(link.by.isEmpty ? "You're" : "\(link.by) has") invited you to \(link.name), where our Obys work together.\n\nIn Oby on your Mac, open Settings › Obysphere and paste this link:\n\n\(link.link)\n\nIt works for 7 days."),
+        ]
+        if let url = parts.url { NSWorkspace.shared.open(url) }
     }
 
     // MARK: Member
 
+    /// What the Sphere says of `invite` (sphere-api.md section 4, "Preview"): its name, how many are
+    /// in it, and the Workspace it's limited to; the link's own words are only a guess until then.
+    func preview(_ invite: InviteLink) async throws -> InviteLink {
+        let seen = try await SphereServer(base: invite.server).call("POST", "spheres/\(invite.sphere)/invitations/\(invite.id)/preview", json: ["secret": invite.secret])
+        var invite = invite
+        invite.name = seen["name"] as? String ?? invite.name
+        invite.domain = seen["domain"] as? String
+        invite.members = seen["member_count"] as? Int
+        return invite
+    }
+
     /// Joins with `invite` (docs/runner-api.md, `POST /v1/obid/sphere/join`): obid's key, its card
-    /// signed here with the owner key, and the owner's delegation to it.
+    /// signed here with the owner key, and the owner's delegation to it; first a sign-in with Google
+    /// when the link is for one Workspace's people.
     func join(_ invite: InviteLink) async throws {
         let runner = try runner()
         let membership: Membership = try await runner.call("GET", "v1/obid/sphere")
         if let mismatch = invite.mismatch(owner: membership.owner) { throw RunnerError(message: mismatch) }
         let key = try OwnerKey.of(membership.owner)
         let url = invite.server.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let obi = invite.obi ?? "obi-\(membership.owner)"
+        var invitation: [String: Any] = ["id": invite.id, "secret": invite.secret]
+        if invite.owner == nil, try await preview(invite).domain != nil {
+            invitation["signin"] = try await SphereServer(base: invite.server).signIn(key: key)
+        }
         _ = try await runner.send("POST", "v1/obid/sphere/key")
         let made = try await raw(runner, "POST", "v1/obid/sphere/card", [
-            "url": url, "sphere": invite.sphere, "obiId": invite.obi, "name": "\(membership.owner)'s Oby",
+            "url": url, "sphere": invite.sphere, "obiId": obi, "name": "\(membership.owner)'s Oby",
             "ownerKey": key.publicKey, "accepts": Self.accepts,
         ])
         guard let card = made["card"] as? [String: Any] else { throw RunnerError(message: "obid made no card.") }
         _ = try await raw(runner, "POST", "v1/obid/sphere/join", [
-            "url": url, "sphere": invite.sphere, "invitation": ["id": invite.id, "secret": invite.secret],
+            "url": url, "sphere": invite.sphere, "invitation": invitation,
             "card": try key.sign(card: card),
-            "delegation": try key.assertion(owner: membership.owner, sphere: invite.sphere, scope: Self.obiScopes, mayAct: invite.obi),
+            "delegation": try key.assertion(owner: membership.owner, sphere: invite.sphere, scope: Self.obiScopes, mayAct: obi),
         ])
         try await refresh()
     }

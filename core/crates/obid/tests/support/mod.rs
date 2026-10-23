@@ -725,7 +725,7 @@ impl TestObi {
         let client = obi_protocol::client::Client::new(&sphere.url, SPHERE).unwrap();
         let (invitation, secret) = sphere.invite(&owner.id, id);
         client
-            .redeem(&invitation, &secret, &owner_key, &signed)
+            .redeem(&invitation, &secret, &owner_key, &signed, None)
             .await
             .unwrap();
         let actor = obi_protocol::identity::actor_assertion(
@@ -873,6 +873,8 @@ pub struct SphereState {
     pub relayed: Vec<u8>,
     /// Runner statuses, by Obi, as put.
     pub runners: HashMap<String, Value>,
+    /// Each redeem's `signin`, as it arrived (sphere-api.md section 3.1).
+    pub signins: Vec<Value>,
     /// A head the audit chain names in place of its last entry's.
     pub head: Option<Value>,
 }
@@ -1059,6 +1061,7 @@ async fn redeem(
         );
     }
     state.invitations.remove(&id);
+    state.signins.push(body["signin"].clone());
     let owner_key = params["owner_key"].as_str().unwrap().to_owned();
     state.bound.insert(owner.clone(), owner_key.clone());
     let member = json!({

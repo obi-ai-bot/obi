@@ -18,5 +18,8 @@
 	<!-- Remote access's control plane (Engine/ControlPlane.swift), from apps/config/Signing.xcconfig. -->
 	<key>ObyControlPlaneURL</key>
 	<string>$(OBY_CONTROL_PLANE_URL)</string>
+	<!-- The Obysphere server (apps/mac/app/Sphere.swift, SphereModel.server), from apps/config/Signing.xcconfig. -->
+	<key>ObySphereURL</key>
+	<string>$(OBY_SPHERE_URL)</string>
 </dict>
 </plist>

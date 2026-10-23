@@ -338,6 +338,9 @@ fn is_loopback(authority: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// What `POST /v1/obid/sphere/join` takes as `invitation`.
+const INVITATION_SHAPE: &str = "invitation is {\"id\", \"secret\"}, and {\"signin\": {\"state\", \"code\"}} for one limited to a domain.";
+
 /// An id the Sphere makes (an invitation id) or a secret: what may go in a path or a body.
 fn is_token_text(text: &str) -> bool {
     (1..=256).contains(&text.len())
@@ -1492,9 +1495,12 @@ impl Link {
         let invitation = map
             .get("invitation")
             .and_then(Value::as_object)
-            .ok_or_else(|| invalid("invitation is {\"id\", \"secret\"}.".into()))?;
-        if invitation.keys().any(|k| k != "id" && k != "secret") {
-            return Err(invalid("invitation is {\"id\", \"secret\"}.".into()));
+            .ok_or_else(|| invalid(INVITATION_SHAPE.into()))?;
+        if invitation
+            .keys()
+            .any(|k| !matches!(k.as_str(), "id" | "secret" | "signin"))
+        {
+            return Err(invalid(INVITATION_SHAPE.into()));
         }
         let invitation_id = text_field(invitation, "id")?;
         let secret = text_field(invitation, "secret")?;
@@ -1503,6 +1509,20 @@ impl Link {
                 "The invitation's id and secret are what the Sphere gave, unchanged.".into(),
             ));
         }
+        // The owner's sign-in with the Sphere, for an invitation limited to a domain: passed on
+        // to the redeem as it is, and kept nowhere.
+        let signin = match invitation.get("signin") {
+            None => None,
+            Some(Value::Object(s))
+                if s.len() == 2
+                    && ["state", "code"]
+                        .iter()
+                        .all(|k| s.get(*k).and_then(Value::as_str).is_some_and(is_token_text)) =>
+            {
+                invitation.get("signin")
+            }
+            Some(_) => return Err(invalid(INVITATION_SHAPE.into())),
+        };
         let card = map
             .get("card")
             .filter(|c| c.is_object())
@@ -1557,7 +1577,7 @@ impl Link {
 
         let client = Client::new(&url, &sphere).map_err(|e| from_client(&e))?;
         client
-            .redeem(invitation_id, secret, &owner_key, &card)
+            .redeem(invitation_id, secret, &owner_key, &card, signin)
             .await
             .map_err(|e| from_client(&e))?;
         let membership = Membership {

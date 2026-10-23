@@ -395,12 +395,16 @@ private struct ArchivedRow: View {
     }
 }
 
-/// The far-left column: one icon per place (Home, the conversation with Oby), your account's
-/// picture at the foot, which opens your account's menu (Settings is in it).
+/// The far-left column: one icon per place (Home, the conversation with Oby), below a line your
+/// Obysphere and the + that makes one (Sangam's), your account's picture at the foot, which opens
+/// your account's menu (Settings is in it).
 private struct IconStrip: View {
     let model: IslandModel
     let state: ChatState
     let work: [WorkList.Item<SidebarSections.JobRow>]
+    @State private var creating = false
+    /// The Obysphere this Oby is in, by name, once read; nil while it's in none.
+    @State private var sphere: String?
 
     private var homeDot: Color? {
         if work.contains(where: { $0.status == .needs }) { return Tokens.needs }
@@ -421,8 +425,32 @@ private struct IconStrip: View {
                 if sections { state.section = .conversations } else { state.open() }
             }
                 .accessibilityLabel(SidebarSections.obyLabel(last: model.thread.last?.text, unread: model.unreadReply))
+            Tokens.edge.frame(width: 20, height: 1).accessibilityHidden(true)
+            // ponytail: one Obysphere, since obid joins one; Sangam's strip lists several and keeps the + under them.
+            if let sphere {
+                Button { withAnimation(Tokens.warm) { state.openSettings(.sphere) } } label: {
+                    SphereTile(name: sphere, image: SphereTile.kept).frame(width: 32, height: 32).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).help(sphere).accessibilityLabel(sphere)
+            } else {
+                RailButton(symbol: "plus", label: "Create an Obysphere", on: false) { creating = true }
+            }
             Spacer(minLength: 0)
             account
+        }
+        .sheet(isPresented: $creating) {
+            CreateSphereSheet(feed: model.feed, done: { _ in
+                creating = false
+                withAnimation(Tokens.warm) { state.openSettings(.sphere) }
+            }, close: { creating = false })
+        }
+        // Read when Oby's engine is up, and again once one is made.
+        .task(id: "\(model.feed.runner != nil) \(creating)") {
+            let read = SphereModel(feed: model.feed)
+            try? await read.refresh()
+            // Joined shows its tile even when the Sphere itself doesn't answer, so the + never offers a second one.
+            guard read.membership != nil else { return }
+            sphere = read.joined ? read.name ?? read.membership?.sphere : nil
         }
         .padding(.top, state.chrome.bar).padding(.bottom, 10)
         .frame(width: Tokens.rail)

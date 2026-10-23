@@ -73,7 +73,7 @@ final class RemoteAccess {
 
     init(plane: ControlPlane = ControlPlane(), secrets: any VaultStore = KeychainVault(service: RemoteAccess.service),
          defaults: UserDefaults = .standard, host: (any TunnelHost)? = nil,
-         authenticate: @escaping @MainActor (URL) async throws -> URL = WebSignIn.run) {
+         authenticate: @escaping @MainActor (URL) async throws -> URL = { try await WebSignIn.run($0) }) {
         self.plane = plane
         self.authenticate = authenticate
         self.secrets = secrets
@@ -352,9 +352,11 @@ enum WebSignIn {
     private static var session: ASWebAuthenticationSession?
     private static let anchor = Anchor()
 
-    static func run(_ url: URL) async throws -> URL {
+    /// `scheme` is where the page sends the sheet when it's done: the control plane's
+    /// `oby-signin://`, or an Obysphere's `obi-sphere://` (Sphere.swift).
+    static func run(_ url: URL, scheme: String = "oby-signin") async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
-            let sheet = ASWebAuthenticationSession(url: url, callback: .customScheme("oby-signin")) { callback, error in
+            let sheet = ASWebAuthenticationSession(url: url, callback: .customScheme(scheme)) { callback, error in
                 session = nil
                 if let callback { return continuation.resume(returning: callback) }
                 let cancelled = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
