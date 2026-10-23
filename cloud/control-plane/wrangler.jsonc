@@ -49,8 +49,9 @@
         // Members-only refuses Apple, which has no Workspace; kept for when that changes.
         "APPLE_CLIENT_ID": "com.deskree.oby.signin",
         "APPLE_REDIRECT_URI": "https://oby-control.deskree.com/v1/auth/apple/callback",
-        // Empty until the OAuth client exists in Deskree's Google Cloud project: Google answers 503.
-        "GOOGLE_CLIENT_ID": "",
+        // The "Oby remote access" Web client in Google Cloud project oby-remote-access (deskree.com
+        // organization, consent screen Internal). Public: the ID token flow uses no client secret.
+        "GOOGLE_CLIENT_ID": "578493178552-e166j16pbst6jhrbend0cgtkndmctqr9.apps.googleusercontent.com",
         "GOOGLE_REDIRECT_URI": "https://oby-control.deskree.com/v1/auth/google/callback",
         "WORKSPACE_DOMAIN_ENDPOINTS": "100",
         "WORKSPACE_DOMAIN_REGISTRATIONS": "50",
