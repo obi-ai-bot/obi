@@ -11,13 +11,14 @@
 // installations are swept.
 //
 // Nothing secret is kept: D1 holds public keys, and a tunnel's run token is fetched from
-// Cloudflare when the Mac asks.
+// Cloudflare when the Mac asks. A hook's delivery while its Mac is away is kept only sealed to that
+// Mac's obid (#1315), so nothing kept can be read here.
 
 import { CloudflareError, CloudflareSetupError, type TunnelAPI, type TunnelStatus } from "./cloudflare";
 import type { Env } from "./env";
 import { counted as countedSoFar, type Limit, takeOne } from "./limits";
 import { type KeyCache, sha256Hex, TokenError, verifyAppleToken, verifyGoogleToken } from "./signin";
-import { addressBucket, canonicalKey, networkBucket, newId, opaqueLabel, randomBytes, registrableDomain, tunnelSecret, verifyP256 } from "./tokens";
+import { addressBucket, base64, canonicalKey, fromBase64url, networkBucket, newId, opaqueLabel, randomBytes, registrableDomain, tunnelSecret, verifyP256 } from "./tokens";
 
 export interface Deps {
   tunnels: TunnelAPI;
@@ -126,6 +127,12 @@ export const HOOK_HEADERS = [
 ];
 /// What the Mac signs, before the body's bytes: the version, then one field a line.
 export const SIGNED_PREFIX = "oby-control-v1";
+/// Kept deliveries (#1315): the biggest body kept, how many and how many sealed bytes one
+/// installation may have kept, how long, and how many one call hands over. Past a bound the answer
+/// is 503, as when nothing is kept.
+export const QUEUE = { bodyMax: 256 * 1024, perInstallation: 100, bytesPerInstallation: 2 * 1024 * 1024, hours: 72, batch: 20 };
+/// HKDF's `info` when a delivery is sealed; obid opens with the same.
+export const QUEUE_INFO = "oby-hook-queue/1";
 
 /// An answer with an error: thrown anywhere, sent as `{"error": …}` with its status.
 class Reply extends Error {
@@ -207,6 +214,10 @@ async function route(request: Request, env: Env, deps: Deps, now: () => Date): P
   if (path === "/v1/installations/self/endpoint/token" && method === "GET") return endpointToken(request, env, deps, now);
   if (path === "/v1/installations/self/hooks" && method === "POST") return createHook(request, env, now);
   if (path === "/v1/installations/self/hooks" && method === "GET") return listHooks(request, env, now);
+  if (path === "/v1/installations/self/queue-key" && method === "PUT") return setQueueKey(request, env, now);
+  if (path === "/v1/installations/self/hooks/queue" && method === "GET") return keptItems(request, env, now);
+  const kept = /^\/v1\/installations\/self\/hooks\/queue\/([a-z0-9]{32})$/.exec(path);
+  if (kept?.[1] && method === "DELETE") return removeKept(request, env, now, kept[1]);
   const hook = /^\/v1\/installations\/self\/hooks\/([a-z0-9]{32})$/.exec(path);
   if (hook?.[1] && method === "DELETE") return removeHook(request, env, now, hook[1]);
   const delivery = /^\/h\/([^/]+)$/.exec(path);
@@ -625,6 +636,7 @@ async function remove(db: D1Database, tunnels: TunnelAPI, row: InstallationRow):
   const endpoint = await endpointOf(db, row.id);
   if (endpoint) await tearDown(db, tunnels, endpoint);
   await db.batch([
+    db.prepare("DELETE FROM hook_queue WHERE installation_id = ?1").bind(row.id),
     db.prepare("DELETE FROM hooks WHERE installation_id = ?1").bind(row.id),
     db.prepare("DELETE FROM installations WHERE id = ?1").bind(row.id),
   ]);
@@ -662,15 +674,20 @@ async function listHooks(request: Request, env: Env, now: () => Date): Promise<R
 
 async function removeHook(request: Request, env: Env, now: () => Date, id: string): Promise<Response> {
   const row = await signedInstallation(request, env, now);
-  const gone = await env.DB.prepare("DELETE FROM hooks WHERE id = ?1 AND installation_id = ?2").bind(id, row.id).run();
-  if (!gone.meta.changes) throw new Reply(404, "This Mac has no such hook.");
+  // What was kept for it goes with it.
+  const [, gone] = await env.DB.batch([
+    env.DB.prepare("DELETE FROM hook_queue WHERE hook_id = ?1 AND installation_id = ?2").bind(id, row.id),
+    env.DB.prepare("DELETE FROM hooks WHERE id = ?1 AND installation_id = ?2").bind(id, row.id),
+  ]);
+  if (!gone?.meta.changes) throw new Reply(404, "This Mac has no such hook.");
   return new Response(null, { status: 204 });
 }
 
 /// A sender's delivery: checked for what needs no secret (the hook, the size, the rate), then passed
 /// to the Mac's gateway with the body as it came and only HOOK_HEADERS. obid checks the
 /// signature with the secret only it holds. The sender gets obid's status with a fixed body of the
-/// Worker's own, so nothing obid says reaches it; nothing of a delivery is kept or logged.
+/// Worker's own, so nothing obid says reaches it. With the Mac away, it's kept sealed (`keep`);
+/// nothing of a delivery is logged.
 async function deliver(request: Request, env: Env, deps: Deps, now: () => Date, id: string): Promise<Response> {
   const hook = /^[a-z0-9]{32}$/.test(id) ? await env.DB.prepare("SELECT * FROM hooks WHERE id = ?1").bind(id).first<HookRow>() : null;
   if (!hook) throw new Reply(404, "No such hook.");
@@ -685,32 +702,135 @@ async function deliver(request: Request, env: Env, deps: Deps, now: () => Date, 
   if ((await countedSoFar(env.DB, day, LIMITS.deliveriesPerHookDay, now())) >= LIMITS.deliveriesPerHookDay.max) {
     throw new Reply(429, "Too many deliveries to this hook today. Try again tomorrow.");
   }
-  const endpoint = await endpointOf(env.DB, hook.installation_id);
-  if (!endpoint) throw new Reply(503, "That Oby isn't reachable now.");
   const headers = new Headers();
   for (const name of HOOK_HEADERS) {
     const value = request.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
+  const endpoint = await endpointOf(env.DB, hook.installation_id);
   const forward = deps.forward ?? ((url: string, init: RequestInit) => fetch(url, init));
-  let status: number;
-  try {
-    const answer = await forward(`https://${endpoint.hostname}/v1/hooks/${id}/deliver`, {
-      method: "POST",
-      headers,
-      body,
-      redirect: "manual",
-      signal: AbortSignal.timeout(HOOK_WAIT_MS),
-    });
-    status = answer.status;
-  } catch {
-    throw new Reply(503, "That Oby isn't reachable now.");
+  let status = 0;
+  if (endpoint) {
+    try {
+      const answer = await forward(`https://${endpoint.hostname}/v1/hooks/${id}/deliver`, {
+        method: "POST",
+        headers,
+        body,
+        redirect: "manual",
+        signal: AbortSignal.timeout(HOOK_WAIT_MS),
+      });
+      status = answer.status;
+    } catch {
+      // The Mac didn't answer: kept below.
+    }
   }
   // Cloudflare's own answers for a tunnel that's down (502, 530 and the like) are the Mac away.
-  if (status >= 500 || status < 200 || (status >= 300 && status < 400)) throw new Reply(503, "That Oby isn't reachable now.");
+  if (status >= 500 || status < 200 || (status >= 300 && status < 400)) return keep(env, now, hook, headers, body);
   if (status !== 401) await takeOne(env.DB, day, LIMITS.deliveriesPerHookDay, now());
   console.log(`hook ${id}: ${status}`);
   return json({ ok: status < 300 }, status);
+}
+
+/// The Mac is away (#1315): the delivery is kept, sealed to its obid's queue key, for QUEUE.hours,
+/// and the sender gets 202 so it doesn't retry into a growing pile. With no queue key, or past a
+/// bound, nothing is kept and the answer is 503, as before. What's kept is unverified until obid
+/// opens it and checks it as a live one.
+async function keep(env: Env, now: () => Date, hook: HookRow, headers: Headers, body: Uint8Array): Promise<Response> {
+  const away = new Reply(503, "That Oby isn't reachable now.");
+  const owner = await env.DB.prepare("SELECT queue_key FROM installations WHERE id = ?1").bind(hook.installation_id).first<{ queue_key: string | null }>();
+  const key = owner?.queue_key ? fromBase64url(owner.queue_key) : null;
+  if (!key || body.byteLength > QUEUE.bodyMax) throw away;
+  const total = whole(env.QUEUE_TOTAL_MIB, "QUEUE_TOTAL_MIB", 1, 10_000) * 1024 * 1024;
+  const plain = new TextEncoder().encode(JSON.stringify({ receivedAt: iso(now()), headers: Object.fromEntries(headers), body: base64(body) }));
+  const sealed = await seal(key, hook.id, plain);
+  // ponytail: counted, then inserted: deliveries at once can overshoot a bound by a few; the
+  // per-hook rates keep that small.
+  const [theirs, everyone] = await env.DB.batch<{ n: number; bytes: number }>([
+    env.DB.prepare("SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM hook_queue WHERE installation_id = ?1").bind(hook.installation_id),
+    env.DB.prepare("SELECT count(*) AS n, coalesce(sum(size), 0) AS bytes FROM hook_queue"),
+  ]);
+  const mine = theirs?.results[0] ?? { n: 0, bytes: 0 };
+  const all = (everyone?.results[0]?.bytes ?? 0) + sealed.byteLength;
+  if (mine.n >= QUEUE.perInstallation || mine.bytes + sealed.byteLength > QUEUE.bytesPerInstallation || all > total) throw away;
+  await env.DB.prepare("INSERT INTO hook_queue (id, hook_id, installation_id, received_at, size, sealed) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+    .bind(opaqueLabel(32), hook.id, hook.installation_id, iso(now()), sealed.byteLength, sealed)
+    .run();
+  // Kept, so it counts against the hook's day as a delivery obid takes does.
+  await takeOne(env.DB, `deliveries:day:${hook.id}`, LIMITS.deliveriesPerHookDay, now());
+  // Workers Logs keep it, as MAX_ENDPOINTS's warning.
+  if (all >= total * 0.8) console.warn(`hook queue: ${all} of ${total} bytes kept, past 80% of QUEUE_TOTAL_MIB`);
+  console.log(`hook ${hook.id}: kept, ${sealed.byteLength} bytes`);
+  return json({ ok: true, message: "Kept for that Oby." }, 202);
+}
+
+/// Seals `plain` to `queueKey` (an uncompressed P-256 point) so only the obid holding its private
+/// half can open it: an ephemeral P-256 key, ECDH, HKDF-SHA-256 (salt: the ephemeral public key
+/// then `queueKey`; info QUEUE_INFO) to an AES-256-GCM key, a random 96-bit nonce, and the hook's id
+/// as associated data. The box: the ephemeral public key (65 bytes), the nonce (12), then the
+/// ciphertext and its tag.
+export async function seal(queueKey: Uint8Array, hook: string, plain: Uint8Array): Promise<Uint8Array> {
+  const curve = { name: "ECDH", namedCurve: "P-256" };
+  const peer = await crypto.subtle.importKey("raw", queueKey, curve, false, []);
+  const ephemeral = (await crypto.subtle.generateKey(curve, true, ["deriveBits"])) as CryptoKeyPair;
+  const shared = await crypto.subtle.deriveBits({ name: "ECDH", public: peer } as SubtleCryptoDeriveKeyAlgorithm, ephemeral.privateKey, 256);
+  const mine = new Uint8Array((await crypto.subtle.exportKey("raw", ephemeral.publicKey)) as ArrayBuffer);
+  const base = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+  const salt = joined(mine, queueKey);
+  const info = new TextEncoder().encode(QUEUE_INFO);
+  const key = await crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt, info }, base, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
+  const nonce = randomBytes(12);
+  const box = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: new TextEncoder().encode(hook) }, key, plain);
+  return joined(mine, nonce, new Uint8Array(box));
+}
+
+function joined(...parts: Uint8Array[]): Uint8Array {
+  const all = new Uint8Array(parts.reduce((n, part) => n + part.byteLength, 0));
+  let at = 0;
+  for (const part of parts) {
+    all.set(part, at);
+    at += part.byteLength;
+  }
+  return all;
+}
+
+/// The Mac registers its obid's queue key (#1315): `{"key": <X9.63, base64url>}`, a P-256 point.
+async function setQueueKey(request: Request, env: Env, now: () => Date): Promise<Response> {
+  const { row, body } = await signedCall(request, env, now);
+  const key = typeof body.key === "string" ? canonicalKey(body.key) : null;
+  if (!key) throw new Reply(422, "key is a P-256 public key: X9.63, base64url.");
+  // A point not on the curve is refused now, not when the first delivery is sealed to it.
+  try {
+    await crypto.subtle.importKey("raw", fromBase64url(key)!, { name: "ECDH", namedCurve: "P-256" }, false, []);
+  } catch {
+    throw new Reply(422, "key is a P-256 public key: X9.63, base64url.");
+  }
+  await env.DB.prepare("UPDATE installations SET queue_key = ?2 WHERE id = ?1").bind(row.id, key).run();
+  return new Response(null, { status: 204 });
+}
+
+/// What was kept for this Mac, oldest first, QUEUE.batch at a time, sealed as kept; and how many
+/// more there are.
+async function keptItems(request: Request, env: Env, now: () => Date): Promise<Response> {
+  const row = await signedInstallation(request, env, now);
+  const [items, count] = await env.DB.batch<Record<string, unknown>>([
+    env.DB.prepare("SELECT id, hook_id, received_at, sealed FROM hook_queue WHERE installation_id = ?1 ORDER BY received_at, id LIMIT ?2").bind(row.id, QUEUE.batch),
+    env.DB.prepare("SELECT count(*) AS n FROM hook_queue WHERE installation_id = ?1").bind(row.id),
+  ]);
+  const listed = (items?.results ?? []).map((item) => ({
+    id: item.id,
+    hook: item.hook_id,
+    receivedAt: item.received_at,
+    sealed: base64url(new Uint8Array(item.sealed as ArrayBuffer)),
+  }));
+  return json({ items: listed, left: Number(count?.results[0]?.n ?? 0) - listed.length }, 200, noStore);
+}
+
+/// The Mac handed one to obid: it goes.
+async function removeKept(request: Request, env: Env, now: () => Date, id: string): Promise<Response> {
+  const row = await signedInstallation(request, env, now);
+  const gone = await env.DB.prepare("DELETE FROM hook_queue WHERE id = ?1 AND installation_id = ?2").bind(id, row.id).run();
+  if (!gone.meta.changes) throw new Reply(404, "This Mac has no such kept delivery.");
+  return new Response(null, { status: 204 });
 }
 
 /// The request's body, read as a stream and cut off past `max` bytes (null then): never buffered
@@ -741,7 +861,8 @@ async function boundedBody(request: Request, max: number): Promise<Uint8Array | 
 
 // MARK: The sweep
 
-/// Cron's job, every minute (wrangler.jsonc): spent nonces and rate-limit windows a day old go;
+/// Cron's job, every minute (wrangler.jsonc): spent nonces, rate-limit windows a day old and
+/// deliveries kept past QUEUE.hours go;
 /// installations that never made an endpoint go after UNUSED_HOURS, in one statement; up to
 /// SWEEP_BATCH installations no Mac has signed a call for in IDLE_DAYS go with their tunnels and
 /// hostnames; and STATUS_BATCH endpoints, never-checked first, are asked about at Cloudflare:
@@ -751,14 +872,18 @@ export async function sweep(env: Env, deps: Deps): Promise<{ removed: number; re
   const now = (deps.now ?? (() => new Date()))();
   const seconds = Math.floor(now.getTime() / 1000);
   const unusedBefore = iso(new Date(now.getTime() - UNUSED_HOURS * 3_600_000));
-  const [, , , , unused] = await env.DB.batch([
+  const unusedOnes = "SELECT id FROM installations WHERE created_at < ?1 AND endpoint_at IS NULL AND NOT EXISTS (SELECT 1 FROM endpoints e WHERE e.installation_id = installations.id)";
+  const [, , , , , , unused] = await env.DB.batch([
     env.DB.prepare("DELETE FROM nonces WHERE expires_at < ?1").bind(seconds),
     env.DB.prepare("DELETE FROM sign_ins WHERE expires_at < ?1").bind(seconds),
     // Every window is an hour or less: a day-old one counts nothing.
     env.DB.prepare("DELETE FROM rate_limits WHERE window_start < ?1").bind(seconds - 86_400),
-    // Never made an endpoint: one whose endpoint was reclaimed stays (`endpoint_at`). Its hooks
-    // go first.
-    env.DB.prepare("DELETE FROM hooks WHERE installation_id IN (SELECT id FROM installations WHERE created_at < ?1 AND endpoint_at IS NULL AND NOT EXISTS (SELECT 1 FROM endpoints e WHERE e.installation_id = installations.id))").bind(unusedBefore),
+    // Kept deliveries (#1315) last QUEUE.hours.
+    env.DB.prepare("DELETE FROM hook_queue WHERE received_at < ?1").bind(iso(new Date(now.getTime() - QUEUE.hours * 3_600_000))),
+    // Never made an endpoint: one whose endpoint was reclaimed stays (`endpoint_at`). What it kept
+    // and its hooks go first.
+    env.DB.prepare(`DELETE FROM hook_queue WHERE installation_id IN (${unusedOnes})`).bind(unusedBefore),
+    env.DB.prepare(`DELETE FROM hooks WHERE installation_id IN (${unusedOnes})`).bind(unusedBefore),
     env.DB.prepare("DELETE FROM installations WHERE created_at < ?1 AND endpoint_at IS NULL AND NOT EXISTS (SELECT 1 FROM endpoints e WHERE e.installation_id = installations.id)").bind(unusedBefore),
   ]);
   let removed = 0;
@@ -847,6 +972,11 @@ async function spend(db: D1Database, call: Signed): Promise<void> {
 
 /// The installation the signing key belongs to; it was seen now.
 async function signedInstallation(request: Request, env: Env, now: () => Date): Promise<InstallationRow> {
+  return (await signedCall(request, env, now)).row;
+}
+
+/// The same, with the call's JSON body.
+async function signedCall(request: Request, env: Env, now: () => Date): Promise<{ row: InstallationRow; body: Record<string, unknown> }> {
   const call = await signed(request, env, now());
   const row = await byKey(env.DB, call.key);
   // 410, apart from 401 (a bad signature) and 404 (no such route): the Mac should register again.
@@ -854,7 +984,7 @@ async function signedInstallation(request: Request, env: Env, now: () => Date): 
   await spend(env.DB, call);
   const at = iso(now());
   await env.DB.prepare("UPDATE installations SET last_seen_at = ?2 WHERE id = ?1").bind(row.id, at).run();
-  return { ...row, last_seen_at: at };
+  return { row: { ...row, last_seen_at: at }, body: call.body };
 }
 
 async function byKey(db: D1Database, key: string): Promise<InstallationRow | null> {

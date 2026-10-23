@@ -1,9 +1,12 @@
 import Foundation
+import OSLog
 
 /// Webhooks into obid (#1128; docs/runner-api.md, "obid only: webhooks"): each hook has an address on
 /// Oby's control plane, which passes deliveries through this Mac's tunnel to obid, and a secret only
 /// obid holds, in its vault. There's no screen for hooks (the owner's decision of 2026-10-23, #1117):
 /// a monitoring tool's row in Settings › Connectors makes its hook behind the scenes (#1311, #1312).
+/// While this Mac is away, the control plane keeps a hook's deliveries sealed to obid's queue key,
+/// and this Mac hands them to obid unopened when it's back (#1315, `HookQueue`).
 extension ControlPlane {
     /// A hook's address, as the control plane answers it.
     struct Hook: Codable, Equatable, Sendable {
@@ -29,12 +32,40 @@ extension ControlPlane {
         _ = try await hookCall("DELETE", "v1/installations/self/hooks/\(id)", signer: signer)
     }
 
+    /// A delivery kept while this Mac was away (#1315), sealed to obid's queue key: only obid opens it.
+    struct Kept: Decodable, Equatable, Sendable {
+        var id: String
+        var hook: String
+        var sealed: String
+    }
+
+    /// Registers obid's queue key: from then on, a delivery while this Mac is away is kept sealed to it.
+    func setQueueKey(_ key: String, _ signer: Signer) async throws {
+        _ = try await hookCall("PUT", "v1/installations/self/queue-key", body: ["key": key], signer: signer)
+    }
+
+    /// What was kept for this Mac, oldest first, a batch at a time, and how many more there are.
+    func kept(_ signer: Signer) async throws -> (items: [Kept], left: Int) {
+        struct Answer: Decodable { var items: [Kept]; var left: Int }
+        let answer = try Self.decoded(Answer.self, try await hookCall("GET", "v1/installations/self/hooks/queue", signer: signer))
+        return (answer.items, answer.left)
+    }
+
+    /// obid answered one: it goes.
+    func removeKept(_ id: String, _ signer: Signer) async throws {
+        _ = try await hookCall("DELETE", "v1/installations/self/hooks/queue/\(id)", signer: signer)
+    }
+
     /// A signed call, as the control plane's own (`send`, private to Engine/, which stays unchanged).
-    private func hookCall(_ method: String, _ path: String, signer: Signer) async throws -> Data {
+    private func hookCall(_ method: String, _ path: String, body: [String: String]? = nil, signer: Signer) async throws -> Data {
         var request = URLRequest(url: base.appending(path: path))
         request.httpMethod = method
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let body {
+            request.httpBody = try JSONEncoder().encode(body)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         try sign(&request, with: signer)
         let (data, status) = try await transport(request)
         guard (200..<300).contains(status) else { throw Self.failure(data, status: status) }
@@ -88,6 +119,44 @@ extension Runner {
 
     func removeHook(_ id: String) async throws {
         try await send("DELETE", "v1/hooks/\(id)")
+    }
+
+    /// obid's queue key's public half (#1315), X9.63 base64url: its private half never leaves obid.
+    func queueKey() async throws -> String {
+        struct Answer: Decodable { var key: String }
+        let answer: Answer = try await call("GET", "v1/hooks/queue-key")
+        return answer.key
+    }
+
+    /// Hands obid a kept delivery, unopened; obid opens it and checks it as a live one.
+    func handOver(_ kept: ControlPlane.Kept) async throws {
+        struct Body: Encodable { var hook: String; var sealed: String }
+        try await send("POST", "v1/hooks/queued", body: Body(hook: kept.hook, sealed: kept.sealed))
+    }
+}
+
+/// Deliveries the control plane kept while this Mac was away (#1315): obid's queue key registered
+/// there, then what was kept handed to obid unopened, and removed once obid answered. One obid
+/// refused (a wrong signature, a box that doesn't open) goes too, since it would be refused again;
+/// with obid away or failing, the rest wait for the next try.
+enum HookQueue {
+    static func register(plane: ControlPlane, signer: ControlPlane.Signer, obid: Runner) async throws {
+        try await plane.setQueueKey(try await obid.queueKey(), signer)
+    }
+
+    static func collect(plane: ControlPlane, signer: ControlPlane.Signer, obid: Runner) async throws {
+        while true {
+            let (items, left) = try await plane.kept(signer)
+            for item in items {
+                do {
+                    try await obid.handOver(item)
+                } catch let refused as RunnerError where (refused.status ?? 500) < 500 {
+                    Logger.remote.notice("obid refused a kept delivery: \(refused.localizedDescription, privacy: .public)")
+                }
+                try await plane.removeKept(item.id, signer)
+            }
+            if items.isEmpty || left == 0 { return }
+        }
     }
 }
 

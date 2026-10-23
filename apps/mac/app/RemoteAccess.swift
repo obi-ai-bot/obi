@@ -44,7 +44,11 @@ final class RemoteAccess {
     private(set) var on: Bool
     /// This Mac's hostname, once it has one: oby-<opaque>.<the control plane's device domain>.
     private(set) var hostname: String?
-    private(set) var tunnel = TunnelState.off
+    private(set) var tunnel = TunnelState.off {
+        didSet { if tunnel == .connected && oldValue != .connected { onConnected() } }
+    }
+    /// The tunnel is up again: what the control plane kept while it was down goes to obid (#1315).
+    @ObservationIgnored var onConnected: () -> Void = {}
     private(set) var busy = false
     /// What went wrong last, for Settings to show; nil once something works.
     private(set) var problem: String?

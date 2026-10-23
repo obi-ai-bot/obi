@@ -5,6 +5,10 @@
 //! (in the vault as `oby.hook.<name>`), and a body seen in the last 24 hours. A delivery is data
 //! from the moment it arrives; what it becomes (an offer, a read) is its source's handler's, and
 //! nothing here reads the body but the signature check. The registry's routes are loopback only.
+//!
+//! While the Mac is away, the control plane keeps a delivery sealed to obid's queue key (#1315), whose
+//! private half is only in the vault as `oby.hooks.queue`; the Mac app hands it over to
+//! `POST /v1/hooks/queued` when it's back, and obid opens it and makes the same checks.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,6 +48,10 @@ const SKEW_SECONDS: i64 = 300;
 const ALERTS_PER_DELIVERY: usize = 20;
 /// The most quoted text an alert keeps (#1124's `data.text`).
 const QUOTED_MAX: usize = 16 * 1024;
+/// The vault's name for the private half of obid's queue key (#1315).
+const QUEUE_KEY: &str = "oby.hooks.queue";
+/// HKDF's `info` for a kept delivery's box, as the control plane seals it.
+const QUEUE_INFO: &[u8] = b"oby-hook-queue/1";
 
 /// What the last delivery to a hook came to.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -98,6 +106,8 @@ pub struct Hooks {
     seen: Mutex<Digests>,
     /// Per hook: when its deliveries of the last minute came.
     rate: Mutex<HashMap<String, Vec<i64>>>,
+    /// Held while the queue key is read or made, so it's made once.
+    queue: Mutex<()>,
 }
 
 /// The vault's name for a hook's secret.
@@ -170,6 +180,7 @@ impl Hooks {
             events,
             seen: Mutex::new(seen),
             rate: Mutex::default(),
+            queue: Mutex::default(),
         })
     }
 
@@ -363,9 +374,55 @@ impl Hooks {
         false
     }
 
-    /// One delivery, as the gateway got it: checked, then handed to its source's handler. The
-    /// answer's body is obid's few words; the Worker passes on only its status.
-    pub fn deliver(&self, id: &str, headers: &HeaderMap, body: &[u8]) -> (StatusCode, Value) {
+    /// obid's queue key's public half (X9.63), made the first time it's asked for; its private half
+    /// is only in the vault.
+    pub fn queue_key(&self) -> Result<Vec<u8>, String> {
+        let key = self.queue_private()?;
+        let public = key
+            .compute_public_key()
+            .map_err(|_| "obid couldn't read its queue key.".to_owned())?;
+        Ok(public.as_ref().to_vec())
+    }
+
+    fn queue_private(&self) -> Result<aws_lc_rs::agreement::PrivateKey, String> {
+        use aws_lc_rs::agreement::{ECDH_P256, PrivateKey};
+        use aws_lc_rs::encoding::AsBigEndian;
+        let _making = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(kept) = self.vault.value(QUEUE_KEY)? {
+            let bytes = hex::decode(kept).map_err(|_| "obid's queue key isn't readable.")?;
+            return PrivateKey::from_private_key(&ECDH_P256, &bytes)
+                .map_err(|_| "obid's queue key isn't readable.".to_owned());
+        }
+        let key =
+            PrivateKey::generate(&ECDH_P256).map_err(|_| "obid couldn't make its queue key.")?;
+        let bytes: aws_lc_rs::encoding::EcPrivateKeyBin = key
+            .as_be_bytes()
+            .map_err(|_| "obid couldn't make its queue key.")?;
+        self.vault.add(&hex::encode(bytes.as_ref()), QUEUE_KEY)?;
+        Ok(key)
+    }
+
+    /// A box the control plane kept for `hook` while the Mac was away, opened: when it came, its
+    /// headers and its body. `Ok(None)` when it doesn't open; `Err` when the vault can't be read.
+    pub fn open_kept(
+        &self,
+        hook: &str,
+        sealed: &[u8],
+    ) -> Result<Option<(i64, HeaderMap, Vec<u8>)>, String> {
+        let key = self.queue_private()?;
+        Ok(open_box(&key, hook, sealed).and_then(|plain| kept(&plain)))
+    }
+
+    /// One delivery, as the gateway got it (or the control plane kept it, `received` being when it
+    /// came): checked, then handed to its source's handler. The answer's body is obid's few words;
+    /// the Worker passes on only its status.
+    pub fn deliver(
+        &self,
+        id: &str,
+        headers: &HeaderMap,
+        body: &[u8],
+        received: i64,
+    ) -> (StatusCode, Value) {
         let Some(hook) = self.get(id) else {
             return (StatusCode::NOT_FOUND, json!({"error": "No such hook."}));
         };
@@ -407,12 +464,13 @@ impl Hooks {
             "pagerduty" => pagerduty_signed(&secret, body, header("x-pagerduty-signature")),
             // Datadog can't sign either: the token, as Alertmanager's (#1313).
             "datadog" => token(&secret, header("x-oby-token")),
+            // A kept delivery's timestamp is checked against when the control plane got it.
             "grafana" => grafana_signed(
                 &secret,
                 body,
                 header("x-grafana-alerting-signature"),
                 header("x-grafana-alerting-timestamp"),
-                now,
+                received,
             ),
             _ => false,
         };
@@ -431,6 +489,72 @@ impl Hooks {
         // ponytail: no handler yet; #1129, #1130, #1311 and #1312 give each source one here.
         (StatusCode::ACCEPTED, json!({"accepted": true}))
     }
+}
+
+/// Opens a box sealed as the control plane seals one (cloud/control-plane, `seal`): the ephemeral
+/// public key (65 bytes), the nonce (12), then the AES-256-GCM ciphertext and tag; the key from
+/// ECDH with `key`, HKDF-SHA-256 with the ephemeral key then obid's own as salt and [`QUEUE_INFO`];
+/// the hook's id as associated data. `None` when it doesn't open.
+fn open_box(key: &aws_lc_rs::agreement::PrivateKey, hook: &str, sealed: &[u8]) -> Option<Vec<u8>> {
+    use aws_lc_rs::{aead, agreement, hkdf};
+    if sealed.len() < 65 + 12 + 16 {
+        return None;
+    }
+    let (ephemeral, rest) = sealed.split_at(65);
+    let (nonce, boxed) = rest.split_at(12);
+    let ours = key.compute_public_key().ok()?;
+    let peer = agreement::UnparsedPublicKey::new(&agreement::ECDH_P256, ephemeral);
+    let mut aes = [0u8; 32];
+    agreement::agree(key, peer, (), |shared| {
+        let salt = [ephemeral, ours.as_ref()].concat();
+        hkdf::Salt::new(hkdf::HKDF_SHA256, &salt)
+            .extract(shared)
+            .expand(&[QUEUE_INFO], hkdf::HKDF_SHA256)
+            .and_then(|okm| okm.fill(&mut aes))
+            .map_err(|_| ())
+    })
+    .ok()?;
+    let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_256_GCM, &aes).ok()?);
+    let nonce = aead::Nonce::try_assume_unique_for_key(nonce).ok()?;
+    let mut plain = boxed.to_vec();
+    let opened = key
+        .open_in_place(nonce, aead::Aad::from(hook.as_bytes()), &mut plain)
+        .ok()?
+        .len();
+    plain.truncate(opened);
+    Some(plain)
+}
+
+/// What a box holds, as the control plane sealed it: `{"receivedAt", "headers", "body"}` (the body
+/// base64). `None` when it isn't that.
+fn kept(plain: &[u8]) -> Option<(i64, HeaderMap, Vec<u8>)> {
+    use base64::Engine;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Kept {
+        received_at: String,
+        headers: HashMap<String, String>,
+        body: String,
+    }
+    let kept: Kept = serde_json::from_slice(plain).ok()?;
+    let received = kept
+        .received_at
+        .parse::<jiff::Timestamp>()
+        .ok()?
+        .as_second();
+    let body = base64::engine::general_purpose::STANDARD
+        .decode(kept.body)
+        .ok()?;
+    let mut headers = HeaderMap::new();
+    for (name, value) in kept.headers {
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::from_bytes(name.as_bytes()),
+            axum::http::HeaderValue::from_str(&value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+    Some((received, headers, body))
 }
 
 /// `POST /v1/hooks/{id}/deliver`, on the gateway's own router (crate::gateway): no device token,
@@ -456,10 +580,32 @@ pub async fn deliver(
         )
             .into_response();
     };
+    handle(shared, id, headers, bytes, None).await
+}
+
+/// A delivery's checks, then what it becomes. `kept`: when the control plane got one it kept while
+/// the Mac was away (#1315); its offer says so, and its times are that one.
+async fn handle(
+    shared: &Arc<Shared>,
+    id: &str,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+    kept: Option<i64>,
+) -> Response {
+    let received = kept.unwrap_or_else(time::now);
+    let late = |mut item: crate::sphere::inbox::Item| {
+        if kept.is_some() {
+            item.text.push_str(&format!(
+                " Arrived at {} while your Mac was away.",
+                clock(received)
+            ));
+        }
+        item
+    };
     // The checks read the vault and write files: off the async workers.
-    let (hooks, owned, given) = (shared.hooks.clone(), id.to_owned(), bytes.clone());
+    let (hooks, owned, given) = (shared.hooks.clone(), id.to_owned(), body.clone());
     let (status, answer) =
-        tokio::task::spawn_blocking(move || hooks.deliver(&owned, &headers, &given))
+        tokio::task::spawn_blocking(move || hooks.deliver(&owned, &headers, &given, received))
             .await
             .unwrap_or_else(|_| {
                 (
@@ -467,19 +613,20 @@ pub async fn deliver(
                     json!({"error": "obid can't check deliveries now."}),
                 )
             });
+    let bytes: &[u8] = &body;
     if status == StatusCode::ACCEPTED
         && let Some(hook) = shared.hooks.get(id)
         && hook.source == "datadog"
     {
-        match monitor(&hook, &bytes) {
+        match monitor(&hook, bytes) {
             Some(found) if found.triggered => {
-                crate::rules::offer(shared, monitor_item(&hook, &found, time::now()));
+                crate::rules::offer(shared, late(monitor_item(&hook, &found, received)));
             }
             Some(found) if found.recovered => {
                 let item_id = crate::sphere::inbox::plugin_event_item_id("datadog", &found.key);
                 shared.link.settle_event(
                     &item_id,
-                    &format!("Resolved at the source at {}", clock(time::now())),
+                    &format!("Resolved at the source at {}", clock(received)),
                 );
             }
             Some(_) => {}
@@ -489,11 +636,11 @@ pub async fn deliver(
         && let Some(hook) = shared.hooks.get(id)
         && hook.source == "pagerduty"
     {
-        if let Some(incident) = incident(&hook, &bytes) {
+        if let Some(incident) = incident(&hook, bytes) {
             if incident.opened {
-                crate::rules::offer(shared, incident_item(&hook, &incident, time::now()));
+                crate::rules::offer(shared, late(incident_item(&hook, &incident, received)));
             } else {
-                let answer = format!("Resolved at the source at {}", clock(time::now()));
+                let answer = format!("Resolved at the source at {}", clock(received));
                 shared.link.settle_events(
                     |item| {
                         item.plugin.as_ref().is_some_and(|p| {
@@ -517,17 +664,17 @@ pub async fn deliver(
     {
         // Every resolved alert settles its offer; at most ALERTS_PER_DELIVERY new offers a delivery.
         let mut offered = 0;
-        for alert in alerts(&hook, &bytes) {
+        for alert in alerts(&hook, bytes) {
             let item_id = crate::sphere::inbox::plugin_event_item_id(&hook.source, &alert.key);
             if alert.firing {
                 if matches!(alert.severity, "critical" | "error") && offered < ALERTS_PER_DELIVERY {
                     offered += 1;
-                    crate::rules::offer(shared, alert_item(&hook, &alert, time::now()));
+                    crate::rules::offer(shared, late(alert_item(&hook, &alert, received)));
                 }
             } else {
                 shared.link.settle_event(
                     &item_id,
-                    &format!("Resolved at the source at {}", clock(time::now())),
+                    &format!("Resolved at the source at {}", clock(received)),
                 );
             }
         }
@@ -1055,8 +1202,62 @@ pub fn alert_item(hook: &Hook, alert: &Alert, now: i64) -> crate::sphere::inbox:
 pub fn router() -> Router<Arc<Shared>> {
     Router::new()
         .route("/v1/hooks", get(list).post(add))
+        .route("/v1/hooks/queue-key", get(queue_key))
+        .route("/v1/hooks/queued", axum::routing::post(queued))
         .route("/v1/hooks/{id}", delete(remove))
         .route("/v1/obid/repos", get(repos))
+}
+
+/// `GET /v1/hooks/queue-key`: the public half the Mac registers at the control plane (#1315).
+async fn queue_key(State(shared): State<Arc<Shared>>) -> Response {
+    use base64::Engine;
+    match shared.hooks.queue_key() {
+        Ok(key) => {
+            Json(json!({"key": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key)}))
+                .into_response()
+        }
+        Err(why) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why).into_response(),
+    }
+}
+
+/// `POST /v1/hooks/queued` `{"hook", "sealed"}`: a delivery the control plane kept while the Mac was
+/// away, handed over unopened by the Mac app (#1315). Opened, then exactly a live delivery's checks
+/// and handling; the answer is the live one's. A box that doesn't open is 422, and the Mac drops it.
+async fn queued(State(shared): State<Arc<Shared>>, body: axum::body::Bytes) -> Response {
+    use base64::Engine;
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Given {
+        hook: String,
+        sealed: String,
+    }
+    let Ok(given) = serde_json::from_slice::<Given>(&body) else {
+        return ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Send {\"hook\", \"sealed\"}.",
+        )
+        .into_response();
+    };
+    if shared.hooks.get(&given.hook).is_none() {
+        return ApiError::new(StatusCode::NOT_FOUND, "No such hook.").into_response();
+    }
+    let sealed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(given.sealed.trim_end_matches('='))
+        .unwrap_or_default();
+    match shared.hooks.open_kept(&given.hook, &sealed) {
+        Ok(Some((received, headers, bytes))) => {
+            handle(&shared, &given.hook, headers, bytes.into(), Some(received)).await
+        }
+        Ok(None) => {
+            shared.hooks.note(&given.hook, "unreadable");
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "That kept delivery doesn't open.",
+            )
+            .into_response()
+        }
+        Err(why) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why).into_response(),
+    }
 }
 
 /// `GET /v1/obid/repos`: obid's repositories, the ones a hook's alerts may be about.
@@ -1217,6 +1418,48 @@ mod tests {
         assert!(!hooks.remove(ID).unwrap());
     }
 
+    /// A box sealed with WebCrypto exactly as the control plane's `seal` does (made once with
+    /// Node's WebCrypto: a fixed queue scalar and what it sealed), so the two sides agree.
+    #[test]
+    fn a_box_sealed_like_the_worker_opens() {
+        use aws_lc_rs::agreement::{ECDH_P256, PrivateKey};
+        use base64::Engine;
+        const SCALAR: &str = "34f2d5f60a632fafcc7046052fcfeee0efc178baef1d7f488057e74485bbcb22";
+        const PUBLIC: &str = "BAit06H2HgPmvB566vemvNpE6tlRdiitElcwYsWYbGy0cTD65rIAY8o1orrD9dYjzSOXgamX5rZF5V3TPGPWpW0";
+        const SEALED: &str = "BKY-ee1M8KTMFVGVyub4DIliMSuvqIdcEnUsJxpcPsiUjdaTb8PlmfwIvSK655tOYEJqCxH-GMI8XbqTDgxNEz-X8JLhCmOLSyYkApRWlyhXFknBl2gpGv-gwliNfdXBo88G6BceN1u7fsEkdJzUQq6vz8kQV_2cFfflqWAO2Jg0EzV_brdX9tFobny7JBR0UtKhfpGw2ALqlz3mJKfi7vO1LAzvA_oKFMa8PRY4TTMDHiG5zqj_UhNn";
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let ours = PrivateKey::from_private_key(&ECDH_P256, &hex::decode(SCALAR).unwrap()).unwrap();
+        assert_eq!(
+            ours.compute_public_key().unwrap().as_ref(),
+            b64.decode(PUBLIC).unwrap().as_slice()
+        );
+        let sealed = b64.decode(SEALED).unwrap();
+        let plain = open_box(&ours, ID, &sealed).expect("it opens");
+        let (received, headers, body) = kept(&plain).unwrap();
+        assert_eq!(time::format(received), "2026-10-23T03:12:00Z");
+        assert_eq!(headers.get("x-oby-token").unwrap(), "t");
+        assert_eq!(body, br#"{"a":1}"#);
+        // For another hook, with another key, or changed by one bit, it doesn't.
+        assert!(open_box(&ours, &"b".repeat(32), &sealed).is_none());
+        let other = PrivateKey::generate(&ECDH_P256).unwrap();
+        assert!(open_box(&other, ID, &sealed).is_none());
+        let mut flipped = sealed.clone();
+        *flipped.last_mut().unwrap() ^= 1;
+        assert!(open_box(&ours, ID, &flipped).is_none());
+        assert!(open_box(&ours, ID, &sealed[..80]).is_none());
+    }
+
+    /// The queue key is made once, its private half only in the vault.
+    #[test]
+    fn the_queue_key_is_made_once_in_the_vault() {
+        let hooks = hooks("queue-key");
+        let first = hooks.queue_key().unwrap();
+        assert_eq!((first.len(), first[0]), (65, 4));
+        assert_eq!(hooks.queue_key().unwrap(), first);
+        let kept = hooks.vault.value(QUEUE_KEY).unwrap().unwrap();
+        assert_eq!(kept.len(), 64);
+    }
+
     #[test]
     fn a_delivery_is_checked_before_it_is_accepted() {
         let hooks = hooks("deliver");
@@ -1231,11 +1474,11 @@ mod tests {
             headers
         };
         assert_eq!(
-            hooks.deliver("unknown", &headers("x"), body).0,
+            hooks.deliver("unknown", &headers("x"), body, time::now()).0,
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            hooks.deliver(ID, &HeaderMap::new(), body).0,
+            hooks.deliver(ID, &HeaderMap::new(), body, time::now()).0,
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
@@ -1243,12 +1486,15 @@ mod tests {
             "bad signature"
         );
         let good = headers(&sign(&secret(), body));
-        assert_eq!(hooks.deliver(ID, &good, body).0, StatusCode::ACCEPTED);
+        assert_eq!(
+            hooks.deliver(ID, &good, body, time::now()).0,
+            StatusCode::ACCEPTED
+        );
         assert_eq!(
             hooks.get(ID).unwrap().last_delivery.unwrap().result,
             "accepted"
         );
-        let again = hooks.deliver(ID, &good, body);
+        let again = hooks.deliver(ID, &good, body, time::now());
         assert_eq!(again, (StatusCode::OK, json!({"duplicate": true})));
         // A restart doesn't forget it: the same body is still a duplicate.
         let home = hooks.file.parent().unwrap().to_owned();
@@ -1256,7 +1502,9 @@ mod tests {
         assert_eq!(restarted.deliver(ID, &good, body).0, StatusCode::OK);
         let big = vec![b'x'; BODY_MAX + 1];
         assert_eq!(
-            hooks.deliver(ID, &headers(&sign(&secret(), &big)), &big).0,
+            hooks
+                .deliver(ID, &headers(&sign(&secret(), &big)), &big, time::now())
+                .0,
             StatusCode::PAYLOAD_TOO_LARGE
         );
         // GitHub's header is GitHub's alone: a generic hook doesn't read it.
@@ -1266,7 +1514,7 @@ mod tests {
             sign(&secret(), b"{}").parse().unwrap(),
         );
         assert_eq!(
-            hooks.deliver(ID, &github, b"{}").0,
+            hooks.deliver(ID, &github, b"{}", time::now()).0,
             StatusCode::UNAUTHORIZED
         );
     }
@@ -1665,13 +1913,13 @@ mod tests {
                 sign(&secret(), body.as_bytes()).parse().unwrap(),
             );
             assert_eq!(
-                hooks.deliver(ID, &headers, body.as_bytes()).0,
+                hooks.deliver(ID, &headers, body.as_bytes(), time::now()).0,
                 StatusCode::ACCEPTED,
                 "{n}"
             );
         }
         assert_eq!(
-            hooks.deliver(ID, &HeaderMap::new(), b"{}").0,
+            hooks.deliver(ID, &HeaderMap::new(), b"{}", time::now()).0,
             StatusCode::TOO_MANY_REQUESTS
         );
     }

@@ -18,6 +18,8 @@ final class IslandController {
     let talkKey = TalkKey()
     let stopAllKey = StopAllKey()
     private var pill: TalkPillPanel?
+    /// Handing kept hook deliveries to obid (#1315), while it runs.
+    private var collecting: Task<Void, Never>?
     private var observingAvailability = false
     /// Every repository the user pushed to lately: names the voice listens for. Fetched when you
     /// first talk, and again each time until it works.
@@ -41,6 +43,40 @@ final class IslandController {
         model.vault = .shared
         // A restart never interrupts a check this Mac runs for the runner.
         updater.busy = { [weak feed] in feed?.checks.current != nil }
+        feed.onLive = { [weak self] in self?.collectKept() }
+        remote.onConnected = { [weak self] in self?.collectKept() }
+    }
+
+    /// Deliveries the control plane kept while this Mac or its obid was away (#1315): whenever obid
+    /// comes up (at launch, after a restart or sleep) or the tunnel does, obid's queue key is
+    /// registered and what was kept handed over; again every 5 minutes while some still wait. Only
+    /// with remote access set up and obid on this Mac.
+    func collectKept() {
+        guard collecting == nil else { return }
+        collecting = Task { [weak self] in
+            while let self, !Task.isCancelled {
+                if await handOverKept() { break }
+                try? await Task.sleep(for: .seconds(300))
+            }
+            self?.collecting = nil
+        }
+    }
+
+    /// One try: true when nothing (more) waits, or this obid or control plane has no queue yet.
+    private func handOverKept() async -> Bool {
+        guard remote.hostname != nil, feed.local, let obid = feed.runner, let signer = try? remote.signer() else { return true }
+        do {
+            try await HookQueue.register(plane: remote.plane, signer: signer, obid: obid)
+            try await HookQueue.collect(plane: remote.plane, signer: signer, obid: obid)
+            return true
+        } catch let old as RunnerError where old.status == 404 {
+            return true
+        } catch let old as ControlPlane.Failure where old.status == 404 {
+            return true
+        } catch {
+            Logger.remote.error("kept deliveries: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
     func start() {

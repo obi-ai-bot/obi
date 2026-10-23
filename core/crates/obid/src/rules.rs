@@ -21,6 +21,8 @@ use crate::sphere::inbox::{self, Item};
 pub const FROM_NOW_ON: &str = "Look into it, and from now on for";
 /// At most this many starts per rule per UTC day; past it, the offer as usual.
 pub const DAILY: usize = 5;
+/// An offer older than this (a delivery kept while the Mac was away, #1315) isn't started by a rule.
+pub const LATE_SECONDS: i64 = 3600;
 
 /// The answer a rule's claimed offer has until its job exists: one a restart cut short opens again.
 pub const STARTING_ANSWER: &str = "Starting by your rule";
@@ -77,6 +79,14 @@ pub fn offer(shared: &Arc<Shared>, mut item: Item) {
         shared.link.add_event_item(item);
         return;
     };
+    // One the control plane kept while the Mac was away (#1315) and that came over an hour ago is
+    // the owner's to start.
+    if time::now() - item.created > LATE_SECONDS {
+        item.text
+            .push_str(" It came over an hour ago, so your rule left it to you.");
+        shared.link.add_event_item(item);
+        return;
+    }
     // Checked and reserved under one lock, so alerts arriving together can't all pass.
     let refused = {
         let mut starting = STARTING.lock().unwrap_or_else(|e| e.into_inner());

@@ -77,6 +77,39 @@ struct HooksTests {
         #expect(given["secret"] as? String == theirs && given["source"] as? String == "pagerduty")
     }
 
+    /// Deliveries kept while this Mac was away (#1315): obid's queue key registered, then each one
+    /// handed to obid unopened and removed once obid answered, a refused one too; with obid failing,
+    /// the rest wait.
+    @Test func keptDeliveriesAreHandedToObidThenRemoved() async throws {
+        let hook = "abcdefghij0123456789abcdefghij01"
+        let kept = (1...3).map { #"{"id": "k\#($0)", "hook": "\#(hook)", "receivedAt": "2026-10-23T03:12:00.000Z", "sealed": "BOX\#($0)"}"# }
+        let plane = Plane([(204, ""), (200, #"{"items": [\#(kept.joined(separator: ","))], "left": 0}"#), (204, ""), (204, "")])
+        let obid = RunnerStub { request in
+            switch (request.method, request.json?["sealed"] as? String) {
+            case ("GET", _): (200, #"{"key": "BKEY"}"#)
+            case (_, "BOX1"): (202, #"{"accepted": true}"#)
+            case (_, "BOX2"): (401, #"{"error": "That signature doesn't match."}"#)
+            default: (503, #"{"error": "obid can't check deliveries now."}"#)
+            }
+        }
+        let control = ControlPlane(base: URL(string: "https://oby-control.test")!, transport: plane.transport)
+        try await HookQueue.register(plane: control, signer: signer, obid: obid.runner)
+        await #expect(throws: (any Error).self) {
+            try await HookQueue.collect(plane: control, signer: signer, obid: obid.runner)
+        }
+        #expect(plane.requests.map { "\($0.httpMethod ?? "") \($0.url?.path() ?? "")" } == [
+            "PUT /v1/installations/self/queue-key", "GET /v1/installations/self/hooks/queue",
+            "DELETE /v1/installations/self/hooks/queue/k1", "DELETE /v1/installations/self/hooks/queue/k2",
+        ], "the one obid couldn't take stays kept")
+        let registered = try #require(plane.requests.first?.httpBody)
+        #expect(String(decoding: registered, as: UTF8.self) == #"{"key":"BKEY"}"#)
+        #expect(plane.requests.allSatisfy { $0.value(forHTTPHeaderField: "Oby-Signature") != nil })
+        let handed = obid.requests.filter { $0.method == "POST" }
+        #expect(handed.map(\.path) == Array(repeating: "/v1/hooks/queued", count: 3))
+        #expect(handed.compactMap { $0.json?["sealed"] as? String } == ["BOX1", "BOX2", "BOX3"], "handed over unopened")
+        #expect(handed.allSatisfy { $0.json?["hook"] as? String == hook })
+    }
+
     @Test func aHookObidRefusesIsRemovedFromTheControlPlane() async throws {
         let plane = Plane([(201, Self.made), (204, "")])
         let obid = RunnerStub { _ in (422, #"{"error": "name is up to 32 lower-case letters, digits or dashes."}"#) }

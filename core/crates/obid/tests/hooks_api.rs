@@ -835,3 +835,324 @@ fn from_now_on_saves_a_rule_that_starts_the_next_alert_itself() {
     assert!(again["done"].is_null());
     assert!(obid.stop().success());
 }
+
+/// A GET on the gateway, with no device token: its status.
+fn gateway_get(obid: &Obid, path: &str) -> u16 {
+    let mut stream = TcpStream::connect(("127.0.0.1", obid.gateway.expect("a gateway"))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let text = format!(
+        "GET {path} HTTP/1.1\r\nHost: oby-abc.oby-devices.test\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(text.as_bytes()).unwrap();
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    String::from_utf8_lossy(&raw)
+        .split(' ')
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Seals a delivery to obid's queue key for `hook` as the control plane does (#1315; its `seal`).
+fn seal(queue: &[u8], hook: &str, received: i64, headers: Value, body: &[u8]) -> String {
+    use aws_lc_rs::{aead, agreement, hkdf};
+    use base64::Engine;
+    let at = jiff::Timestamp::from_second(received).unwrap().to_string();
+    let plain = json!({"receivedAt": at, "headers": headers,
+                       "body": base64::engine::general_purpose::STANDARD.encode(body)});
+    let ephemeral = agreement::PrivateKey::generate(&agreement::ECDH_P256).unwrap();
+    let mine = ephemeral.compute_public_key().unwrap().as_ref().to_vec();
+    let mut aes = [0u8; 32];
+    let peer = agreement::UnparsedPublicKey::new(&agreement::ECDH_P256, queue);
+    agreement::agree(&ephemeral, peer, (), |shared| {
+        hkdf::Salt::new(hkdf::HKDF_SHA256, &[mine.as_slice(), queue].concat())
+            .extract(shared)
+            .expand(&[b"oby-hook-queue/1"], hkdf::HKDF_SHA256)
+            .and_then(|okm| okm.fill(&mut aes))
+            .map_err(|_| ())
+    })
+    .unwrap();
+    let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_256_GCM, &aes).unwrap());
+    // A new ephemeral key each time, so one nonce is never used twice with one AES key.
+    let nonce = [7u8; 12];
+    let mut boxed = plain.to_string().into_bytes();
+    key.seal_in_place_append_tag(
+        aead::Nonce::assume_unique_for_key(nonce),
+        aead::Aad::from(hook.as_bytes()),
+        &mut boxed,
+    )
+    .unwrap();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode([mine.as_slice(), &nonce, &boxed].concat())
+}
+
+/// An obid with an Alertmanager hook, and its queue key's public half.
+fn kept_setup(name: &str) -> (Folder, Obid, String, Vec<u8>) {
+    use base64::Engine;
+    let folder = Folder::new(name);
+    let obid = started(&folder);
+    let token = secret();
+    assert_eq!(
+        call(
+            &obid,
+            "POST",
+            "/v1/hooks",
+            Some(&json!({"id": ID,
+        "url": format!("https://oby-control.tetrix.pro/h/{ID}"), "name": "prometheus",
+        "source": "alertmanager", "secret": token, "repo": "obi-e2e/fixture-app"}))
+        )
+        .status,
+        201
+    );
+    let key = call(&obid, "GET", "/v1/hooks/queue-key", None);
+    assert_eq!(key.status, 200, "{}", key.text);
+    let queue = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(key.body["key"].as_str().unwrap())
+        .unwrap();
+    (folder, obid, token, queue)
+}
+
+fn hand_over(obid: &Obid, hook: &str, sealed: &str) -> support::Answer {
+    call(
+        obid,
+        "POST",
+        "/v1/hooks/queued",
+        Some(&json!({"hook": hook, "sealed": sealed})),
+    )
+}
+
+/// `HH:MM` in this machine's zone, as obid writes when a kept delivery came.
+fn clock(seconds: i64) -> String {
+    jiff::Timestamp::from_second(seconds)
+        .unwrap()
+        .to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%H:%M")
+        .to_string()
+}
+
+fn now() -> i64 {
+    jiff::Timestamp::now().as_second()
+}
+
+/// obid's queue key (#1315): one P-256 point, the same each time, its private half only in the
+/// vault (never in a log or obid's other files), and asked for on loopback only.
+#[test]
+fn the_queue_key_is_in_the_vault_and_on_loopback_only() {
+    let (_folder, mut obid, _token, queue) = kept_setup("hooks-queue-key");
+    assert_eq!((queue.len(), queue[0]), (65, 4));
+    let again = call(&obid, "GET", "/v1/hooks/queue-key", None).body;
+    assert_eq!(again, call(&obid, "GET", "/v1/hooks/queue-key", None).body);
+    assert_ne!(gateway_get(&obid, "/v1/hooks/queue-key"), 200);
+    let vault = std::fs::read_to_string(obid.home.join("vault/secrets.json")).unwrap();
+    let vault: Value = serde_json::from_str(&vault).unwrap();
+    let scalar = vault["secrets"]["oby.hooks.queue"]
+        .as_str()
+        .expect("in the vault")
+        .to_owned();
+    assert_eq!(scalar.len(), 64);
+    assert!(!obid.log().contains(&scalar));
+    assert!(
+        !std::fs::read_to_string(obid.home.join("hooks.json"))
+            .unwrap()
+            .contains(&scalar)
+    );
+    assert!(obid.stop().success());
+}
+
+/// A kept delivery is opened and checked as a live one: the token, Grafana's timestamp (against
+/// when the control plane got it), the duplicate; it becomes the same offer, saying when it came.
+#[test]
+fn a_kept_delivery_opens_and_passes_the_live_checks() {
+    let (_folder, mut obid, token, queue) = kept_setup("hooks-kept");
+    let came = now() - 2 * 3600;
+    let body = alertmanager(json!([firing("firing", "critical")]));
+    let sealed = seal(
+        &queue,
+        ID,
+        came,
+        json!({"x-oby-token": token, "content-type": "application/json"}),
+        &body,
+    );
+    let handed = hand_over(&obid, ID, &sealed);
+    assert_eq!(handed.status, 202, "{}", handed.text);
+    let offer = within(10, "the kept alert's offer", || {
+        inbox_item(&obid, "Alert: api (critical)", "open")
+    });
+    assert_eq!(
+        offer["text"],
+        format!(
+            "Alertmanager says an alert fired on api. Arrived at {} while your Mac was away.",
+            clock(came)
+        )
+    );
+    assert_eq!(
+        offer["created"],
+        jiff::Timestamp::from_second(came).unwrap().to_string()
+    );
+    // Handed over twice (the Mac's removal failed): a duplicate, no second card.
+    assert_eq!(hand_over(&obid, ID, &sealed).status, 200);
+    // Grafana's signature is fresh for when the control plane got it, not for now.
+    let grafana = "c".repeat(32);
+    let grafana_secret = secret();
+    assert_eq!(call(&obid, "POST", "/v1/hooks", Some(&json!({"id": grafana,
+        "url": format!("https://oby-control.tetrix.pro/h/{grafana}"), "name": "grafana", "source": "grafana",
+        "secret": grafana_secret, "repo": "obi-e2e/fixture-app"}))).status, 201);
+    let mut alert = firing("firing", "error");
+    alert["labels"]["service"] = json!("web");
+    let body = alertmanager(json!([alert]));
+    let stamp = came.to_string();
+    let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, grafana_secret.as_bytes());
+    let signature = hex::encode(
+        aws_lc_rs::hmac::sign(&key, &[format!("{stamp}:").as_bytes(), &body].concat()).as_ref(),
+    );
+    let headers =
+        json!({"x-grafana-alerting-signature": signature, "x-grafana-alerting-timestamp": stamp});
+    assert_eq!(
+        hand_over(
+            &obid,
+            &grafana,
+            &seal(&queue, &grafana, came, headers.clone(), &body)
+        )
+        .status,
+        202
+    );
+    // The same signature, but the control plane got it now: stale.
+    let mut other = alertmanager(json!([alert]));
+    other.push(b' ');
+    let late = hex::encode(
+        aws_lc_rs::hmac::sign(&key, &[format!("{stamp}:").as_bytes(), &other].concat()).as_ref(),
+    );
+    let headers =
+        json!({"x-grafana-alerting-signature": late, "x-grafana-alerting-timestamp": stamp});
+    assert_eq!(
+        hand_over(
+            &obid,
+            &grafana,
+            &seal(&queue, &grafana, now(), headers, &other)
+        )
+        .status,
+        401
+    );
+    assert!(obid.stop().success());
+}
+
+/// A kept delivery with the wrong token makes nothing, and the hook's row says why.
+#[test]
+fn a_kept_delivery_with_a_wrong_signature_makes_nothing() {
+    let (_folder, mut obid, _token, queue) = kept_setup("hooks-kept-wrong");
+    let body = alertmanager(json!([firing("firing", "critical")]));
+    let sealed = seal(
+        &queue,
+        ID,
+        now() - 600,
+        json!({"x-oby-token": secret()}),
+        &body,
+    );
+    assert_eq!(hand_over(&obid, ID, &sealed).status, 401);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(inbox_item(&obid, "Alert: api (critical)", "open").is_none());
+    assert_eq!(
+        call(&obid, "GET", "/v1/hooks", None).body[0]["lastDelivery"]["result"],
+        "bad signature"
+    );
+    assert!(obid.stop().success());
+}
+
+/// A box that doesn't open (sealed to another key, for another hook, or not a box) is refused, and
+/// one for a hook obid doesn't have is 404.
+#[test]
+fn a_box_that_doesnt_open_is_refused() {
+    let (_folder, mut obid, token, queue) = kept_setup("hooks-kept-shut");
+    let body = alertmanager(json!([firing("firing", "critical")]));
+    let headers = json!({"x-oby-token": token});
+    let mut stranger = queue.clone();
+    let other =
+        aws_lc_rs::agreement::PrivateKey::generate(&aws_lc_rs::agreement::ECDH_P256).unwrap();
+    stranger.copy_from_slice(other.compute_public_key().unwrap().as_ref());
+    for sealed in [
+        seal(&stranger, ID, now(), headers.clone(), &body),
+        seal(&queue, &"d".repeat(32), now(), headers.clone(), &body),
+        "not-a-box".to_owned(),
+    ] {
+        let refused = hand_over(&obid, ID, &sealed);
+        assert_eq!(refused.status, 422, "{}", refused.text);
+    }
+    assert_eq!(
+        call(&obid, "GET", "/v1/hooks", None).body[0]["lastDelivery"]["result"],
+        "unreadable"
+    );
+    assert_eq!(
+        hand_over(
+            &obid,
+            &"z".repeat(32),
+            &seal(&queue, &"z".repeat(32), now(), headers, &body)
+        )
+        .status,
+        404
+    );
+    assert!(inbox_item(&obid, "Alert: api (critical)", "open").is_none());
+    assert!(obid.stop().success());
+}
+
+/// A kept delivery's offer says when it came, and a standing rule (#1314) starts one only when it
+/// came within the hour.
+#[test]
+fn a_late_offer_says_when_it_arrived() {
+    let (_folder, mut obid, token, queue) = kept_setup("hooks-kept-late");
+    let headers = json!({"x-oby-token": token});
+    let fire = |at: i64| {
+        let mut alert = firing("firing", "critical");
+        alert["startsAt"] = json!(jiff::Timestamp::from_second(at).unwrap().to_string());
+        alertmanager(json!([alert]))
+    };
+    // A rule for api's critical alerts, saved from a live offer.
+    let first = seal(&queue, ID, now(), headers.clone(), &fire(now() - 5 * 3600));
+    assert_eq!(hand_over(&obid, ID, &first).status, 202);
+    let offer = within(10, "an offer", || {
+        inbox_item(&obid, "Alert: api (critical)", "open")
+    });
+    let saved = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{}/answer", offer["id"].as_str().unwrap()),
+        Some(&json!({"answer": "Look into it, and from now on for api"})),
+    );
+    assert_eq!(saved.status, 200, "{}", saved.text);
+    // Two hours late: an offer, left to the owner.
+    let came = now() - 2 * 3600;
+    assert_eq!(
+        hand_over(
+            &obid,
+            ID,
+            &seal(&queue, ID, came, headers.clone(), &fire(came))
+        )
+        .status,
+        202
+    );
+    let late = within(10, "the late offer", || {
+        inbox_item(&obid, "Alert: api (critical)", "open")
+    });
+    assert_eq!(
+        late["text"],
+        format!(
+            "Alertmanager says an alert fired on api. Arrived at {} while your Mac was away. It came over an hour ago, so your rule left it to you.",
+            clock(came)
+        )
+    );
+    // Ten minutes late: the rule starts it.
+    let came = now() - 600;
+    assert_eq!(
+        hand_over(&obid, ID, &seal(&queue, ID, came, headers, &fire(came))).status,
+        202
+    );
+    within(15, "the rule's start", || {
+        let done = call(&obid, "GET", "/v1/inbox?state=done", None).body;
+        done.as_array()?
+            .iter()
+            .find(|i| i["answer"] == "Started by your rule")
+            .cloned()
+    });
+    assert!(obid.stop().success());
+}
