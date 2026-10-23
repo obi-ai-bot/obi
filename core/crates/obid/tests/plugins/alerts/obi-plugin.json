@@ -1,0 +1,13 @@
+{
+  "manifest": "obi-plugin/0.2",
+  "id": "alerts",
+  "name": "Alerts",
+  "version": "0.2.0",
+  "description": "obid's tests' obi-plugin/0.2 events plug-in (tests/plugins_api.rs): a failed deploy, an alert and a ticket.",
+  "kinds": ["events"],
+  "run": {"command": "bin/alerts", "args": []},
+  "events": {"kinds": ["deploy.failed", "alert.fired", "ticket.assigned"]},
+  "network": [],
+  "config": {"type": "object", "additionalProperties": false,
+             "properties": {"text": {"type": "string", "maxLength": 1000}}}
+}

@@ -70,12 +70,13 @@ nonisolated struct WatchStatus: Decodable, Equatable, Sendable {
     }
 }
 
-/// A `watch` or `listen` inbox item (obid only: the watcher and the channel listener), as the Mac's
-/// inbox card and notification show it. Engine's inbox doesn't know these kinds. Only obid's own
-/// words are shown (`title`, `text`), and the link when it's https on slack.com or github.com:
-/// never what was written (`watch.quoted`).
+/// A `watch`, `listen` or `pluginEvent` inbox item (obid only: the watcher, the channel listener, a
+/// plug-in's or Sentry's offer), as the Mac's inbox card and notification show it. Engine's inbox
+/// doesn't know these kinds. Only obid's own words are shown (`title`, `text`), and the link when it's
+/// https on slack.com or github.com (sentry.io for Sentry's): never what was written (`watch.quoted`,
+/// `plugin.quoted`).
 nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
-    static let kinds: Set<String> = ["watch", "listen"]
+    static let kinds: Set<String> = ["watch", "listen", "pluginEvent"]
 
     var kind: String
     var id: String
@@ -89,15 +90,18 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
     var later: Date?
     /// The message's or the pull request's page: https on slack.com or github.com only.
     var url: URL?
-    /// Where it came from, as obid says (`watch.source`): `slack` or `github`.
+    /// Where it came from, as obid says: `watch.source` (`slack` or `github`), or a `pluginEvent`'s
+    /// `plugin.id` (`sentry`, or a plug-in's id).
     var source: String
     /// On a listener's finished review (`watch.review`): exactly what Approve posts on GitHub, the
     /// review an agent wrote, after obid's secret scan. Shown as plain text, never as Markdown.
     var review: String?
 
-    private enum Keys: String, CodingKey { case kind, id, job, title, text, options, created, done, later, watch }
+    private enum Keys: String, CodingKey { case kind, id, job, title, text, options, created, done, later, watch, plugin }
     private struct Place: Decodable { var source: String?; var url: String?; var pr: PR?; var review: String? }
     private struct PR: Decodable { var url: String? }
+    private struct Plugin: Decodable { var id: String?; var quoted: Quoted? }
+    private struct Quoted: Decodable { var url: String? }
 
     init(kind: String = "watch", id: String, job: String = "", title: String, text: String, options: [String] = ["Dismiss"], created: Date,
          done: Date? = nil, later: Date? = nil, url: URL? = nil, source: String = "slack", review: String? = nil) {
@@ -117,18 +121,22 @@ nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
         done = try? keys.decodeIfPresent(Date.self, forKey: .done)
         later = try? keys.decodeIfPresent(Date.self, forKey: .later)
         let place = try? keys.decodeIfPresent(Place.self, forKey: .watch)
-        url = (place?.pr?.url ?? place?.url).flatMap(Self.link)
+        let plugin = try? keys.decodeIfPresent(Plugin.self, forKey: .plugin)
+        source = place?.source ?? plugin?.id ?? "slack"
+        let sentry = source == "sentry"
+        // What a plug-in wrote never opens; only Sentry's own offer links to its issue, on sentry.io.
+        let issue = sentry ? plugin?.quoted?.url.flatMap { Self.link($0, on: ["sentry.io"]) } : nil
+        url = (place?.pr?.url ?? place?.url).flatMap { Self.link($0) } ?? issue
         review = place?.review
-        source = place?.source ?? "slack"
     }
 
-    /// `text` as a link the card may open: https, no login, on slack.com or github.com (or a
-    /// subdomain), with nothing that could end it early.
-    static func link(_ text: String) -> URL? {
+    /// `text` as a link the card may open: https, no login, on one of `hosts` (slack.com or github.com)
+    /// or a subdomain, with nothing that could end it early.
+    static func link(_ text: String, on hosts: [String] = ["slack.com", "github.com"]) -> URL? {
         guard !text.contains(where: { $0.isWhitespace || $0.isNewline || "<>|\"".contains($0) }),
               let url = URL(string: text), url.scheme == "https", url.user() == nil, url.password() == nil,
               let host = url.host()?.lowercased() else { return nil }
-        let allowed = ["slack.com", "github.com"].contains { host == $0 || host.hasSuffix("." + $0) }
+        let allowed = hosts.contains { host == $0 || host.hasSuffix("." + $0) }
         return allowed ? url : nil
     }
 

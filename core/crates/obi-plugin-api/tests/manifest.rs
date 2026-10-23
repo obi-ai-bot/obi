@@ -693,10 +693,44 @@ fn a_server_url_must_be_http() {
 }
 
 #[test]
-fn the_protocol_must_be_obi_plugin_0_1() {
+fn the_protocol_is_obi_plugin_0_1_or_0_2() {
     let mut value = tetrix();
+    value["manifest"] = json!("obi-plugin/0.3");
+    let reason = refused(&value);
+    assert!(
+        reason.contains("obi-plugin/0.1") && reason.contains("obi-plugin/0.2"),
+        "{reason}"
+    );
     value["manifest"] = json!("obi-plugin/0.2");
-    assert!(refused(&value).contains("obi-plugin/0.1"));
+    assert!(parse(&value).is_ok());
+}
+
+/// A 0.2 manifest may declare the kinds for work from anywhere; a 0.1 one keeps the five
+/// GitHub kinds, as before.
+#[test]
+fn a_0_2_manifest_declares_the_new_kinds() {
+    let new = ["deploy.failed", "alert.fired", "ticket.assigned"];
+    let mut value = events_plugin();
+    value["manifest"] = json!("obi-plugin/0.2");
+    value["events"]["kinds"] = json!(new);
+    let manifest = parse(&value).unwrap();
+    assert_eq!(
+        manifest.events.unwrap().kinds,
+        [
+            EventKind::DeployFailed,
+            EventKind::AlertFired,
+            EventKind::TicketAssigned
+        ]
+    );
+    for kind in new {
+        let mut value = events_plugin();
+        value["events"]["kinds"] = json!(["mention", kind]);
+        let reason = refused(&value);
+        assert!(
+            reason.contains(kind) && reason.contains("obi-plugin/0.2"),
+            "{reason}"
+        );
+    }
 }
 
 #[test]

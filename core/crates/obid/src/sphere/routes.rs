@@ -169,7 +169,59 @@ pub async fn answer(
     }
     // A tap is the owner back (#594): after a while away, it gets a recap.
     crate::brain::recap::tapped(&shared);
-    Ok(json(StatusCode::OK, shared.link.answer(&id, &body).await?))
+    // Only the owner's tap confirms (#776): a Confirm on a `confirm` item carries a registered
+    // device's signature over `oby-confirm\n<id>\n<title>\n<signedAt>`. Cancel, done and later
+    // need none. A refusal names the title to sign, as connections do.
+    let mut map: serde_json::Map<String, Value> = match serde_json::from_slice(&body) {
+        Ok(Value::Object(map)) => map,
+        _ => return Ok(json(StatusCode::OK, shared.link.answer(&id, &body).await?)),
+    };
+    let approval = map.remove("approval");
+    let rest = serde_json::to_vec(&Value::Object(map.clone())).unwrap_or_default();
+    let confirming = map.get("answer").and_then(Value::as_str) == Some(super::inbox::CONFIRM);
+    let confirm_item = shared.link.item(&id).filter(|i| i.kind == "confirm");
+    if approval.is_some() && !(confirming && confirm_item.is_some()) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "An approval goes only with Confirm on a confirm item.",
+        ));
+    }
+    // Not a Confirm of an open confirm item: answered as before (one already done says so).
+    let Some(item) = confirm_item.filter(|i| confirming && i.done.is_none()) else {
+        return Ok(json(StatusCode::OK, shared.link.answer(&id, &rest).await?));
+    };
+    let refuse = |why: &str| {
+        json(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({"error": why, "action": item.title}),
+        )
+    };
+    let Some(approval) = approval else {
+        return Ok(refuse(super::link::NEEDS_YOUR_TAP));
+    };
+    let Ok(approval) = serde_json::from_value::<crate::approval::Approval>(approval) else {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "An approval is {\"device\", \"action\", \"signedAt\", \"signature\"}.",
+        ));
+    };
+    let key = shared.devices.public_key(&approval.device);
+    if let Err(why) = shared.jobs.approvals().check_confirm(
+        &approval,
+        &id,
+        &item.title,
+        key.as_deref(),
+        obi_protocol::time::now(),
+    ) {
+        return Ok(refuse(&why));
+    }
+    Ok(json(
+        StatusCode::OK,
+        shared
+            .link
+            .answer_confirmed(&id, &rest, &item.title)
+            .await?,
+    ))
 }
 
 /// `GET /v1/obid/sharing`.

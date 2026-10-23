@@ -425,6 +425,9 @@ pub struct NewJob {
     /// The routine whose run it is (crate::routines).
     #[serde(default)]
     pub routine: Option<crate::job::RoutineMark>,
+    /// The standing rule that started it (crate::rules). Never from the API.
+    #[serde(skip)]
+    pub rule: Option<crate::job::RuleMark>,
     /// One part of a stalled job's split (crate::brain::supervisor): its parts follow it up side
     /// by side, each on a branch of its own. Never from the API, never kept.
     #[serde(skip)]
@@ -2203,11 +2206,26 @@ impl Jobs {
         job.follow_up_of = new.follow_up_of;
         job.runs_on = new.runs_on;
         job.routine = new.routine;
+        // A follow-up of a rule's job is the rule's too (#1314): it publishes only when the owner
+        // does. A Start item's job never carries `rule` (it's never from the API): found here.
+        job.rule = new.rule.or_else(|| {
+            job.follow_up_of
+                .as_deref()
+                .and_then(|of| self.get(of))
+                .and_then(|of| of.rule)
+        });
         job.mode = Some(if job.read_only() {
             Mode::Plan.as_str().to_owned()
         } else {
-            new.mode
-                .unwrap_or_else(|| self.default_mode().as_str().to_owned())
+            let mode = new
+                .mode
+                .unwrap_or_else(|| self.default_mode().as_str().to_owned());
+            // An alert's text led a rule's job, with no tap: never Bypass, whatever the default.
+            if job.rule.is_some() && mode == Mode::Bypass.as_str() {
+                Mode::Sandbox.as_str().to_owned()
+            } else {
+                mode
+            }
         });
         job.base = Some(new.base.unwrap_or_else(|| repo.default_branch.clone()));
         job.branch = match new
@@ -4552,6 +4570,7 @@ impl Jobs {
                 AgentEvent::Delta(_)
                 | AgentEvent::Said(_)
                 | AgentEvent::Thought { .. }
+                | AgentEvent::Thinking { .. }
                 | AgentEvent::Plan(_) => {}
             }
         };
@@ -5653,6 +5672,9 @@ impl Jobs {
                         }),
                     ),
                 );
+                if round == 1 {
+                    self.transcribed(id, self.transcripts.asked(id, &job.request));
+                }
                 let turn = self
                     .turn(
                         id,
@@ -5964,12 +5986,18 @@ impl Jobs {
             // One whose own publish failed isn't tried again by itself, unless this run made new
             // commits; one a restart cut short (its publish never ran) carries on and publishes.
             let made_now = before_head.as_deref() != Some(head.as_str());
-            if !ended.can_publish() || (!made_now && job.publish_error.is_some()) {
+            // A job a standing rule started with no tap publishes only by hand (#1314): what an
+            // alert's text led its agent to write is the owner's to send.
+            let by_rule = job.rule.is_some();
+            if !ended.can_publish() || (!made_now && job.publish_error.is_some()) || by_rule {
                 // Still waiting for Publish by hand: why its own publish failed still holds.
                 let waiting = ended.can_publish();
                 self.end_done(id, commits, pushed, |job| {
                     if !waiting {
                         job.publish_error = None;
+                    }
+                    if by_rule && waiting {
+                        job.reason = Some("Your standing rule started this job, so it publishes only when you do: Publish opens its pull request.".into());
                     }
                 });
                 if job.kind == "review" {

@@ -191,7 +191,28 @@ private struct SessionRow: View {
     }
 
     /// Its thinking, folded: "Thought for 9s".
-    private var thought: some View {
+    /// Its thinking: "Thinking…" with the working dot while it goes on (Claude Code says it thinks
+    /// but not what, #1328's follow-up), then "Thought for 12s", which opens only when it has words.
+    @ViewBuilder private var thought: some View {
+        if entry.running {
+            HStack(spacing: 6) {
+                WorkMarkView(mark: .working, dot: 6)
+                Text("Thinking…").font(Tokens.font(Tokens.textMd)).italic().foregroundStyle(Tokens.muted)
+            }
+            .frame(minHeight: compact ? 44 : 20)
+            .padding(.leading, 32)
+            .accessibilityElement(children: .combine)
+        } else if (entry.text ?? "").isEmpty {
+            Text(entry.seconds.map { "Thought for \(JobPageText.took($0))" } ?? "Thought")
+                .font(Tokens.font(Tokens.textMd)).italic().foregroundStyle(Tokens.muted)
+                .frame(minHeight: compact ? 44 : 20)
+                .padding(.leading, 32)
+        } else {
+            thoughtWithWords
+        }
+    }
+
+    private var thoughtWithWords: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button { withAnimation(Tokens.warm) { open.toggle() } } label: {
                 HStack(spacing: 4) {

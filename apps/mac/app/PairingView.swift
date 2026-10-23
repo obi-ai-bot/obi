@@ -50,7 +50,7 @@ struct PairingView: View {
                 if routes.count > 1 {
                     SetRow("Pair over") {
                         SetSelect("Pair over", selection: Binding { route } set: { chosen = $0 },
-                                  options: routes.map { (Optional($0), $0.label) })
+                                  options: routes.map { (Optional($0), $0.name) })
                     }
                 }
                 SetRow(routes.count == 1 ? route?.label ?? "" : "") {
@@ -202,6 +202,15 @@ nonisolated enum PairingRoute: Hashable, Sendable {
 
     var hostname: String {
         switch self { case .remote(let host), .tailscale(let host): host }
+    }
+
+    /// The pop-up's short name; the hostname is under the QR code (`label`), so a long one can't
+    /// squeeze the row's title.
+    var name: String {
+        switch self {
+        case .remote: "Remote access"
+        case .tailscale: "Tailscale"
+        }
     }
 
     var label: String {

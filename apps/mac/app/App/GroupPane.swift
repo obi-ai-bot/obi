@@ -37,8 +37,17 @@ struct GroupPane: View {
     /// Routines only: each routine's next run.
     private var upcoming: [RunnerRoutine] { kind == .routines ? RunnerRoutine.upcoming(feed.routines) : [] }
     /// To do is where the page opens, unless a job runs or needs you, only when it has something:
-    /// GitHub's items, or Connect GitHub.
-    private var opensOnToDo: Bool { gitHub && (!toDo.isEmpty || connect == .signedOut) }
+    /// GitHub's items, an alert to look into, or Connect GitHub.
+    private var opensOnToDo: Bool { gitHub && (!toDo.isEmpty || !offers.isEmpty || connect == .signedOut) }
+    /// Issues only: the alerts and incidents offered to look into (Sentry, Prometheus, Grafana,
+    /// PagerDuty, a plug-in's), as Sangam's design lists an outside incident under Issues.
+    private var offers: [WatchNotice] { Self.offers(feed.notices, kind: kind) }
+
+    /// The open offers to start (`Look into it`, `Fix it`) a kind's To do lists: Issues' only.
+    static func offers(_ notices: [WatchNotice], kind: WorkType, now: Date = .now) -> [WatchNotice] {
+        guard kind == .issues else { return [] }
+        return notices.filter { $0.kind == "pluginEvent" && $0.waiting(at: now) && $0.options.contains { ["Look into it", "Fix it"].contains($0) } }
+    }
     private var toDo: [GitHubWork.Column] { gitHub ? feed.gitHubWork?.toDo(kind, later: feed.gitHubLater) ?? [] : [] }
 
     static let archivedLink = "Older ones are in Archived"
@@ -51,7 +60,7 @@ struct GroupPane: View {
                 Text(kind.label).font(Tokens.font(28, .semibold)).foregroundStyle(Tokens.ink)
                     .padding(.bottom, 16).accessibilityAddTraits(.isHeader)
                 let columns = GitHubWork.columns(toDo, picked: GitHubWork.projectSet(projectRaw.wrappedValue), repos: GitHubWork.projectSet(repoRaw.wrappedValue), milestones: GitHubWork.projectSet(milestoneRaw.wrappedValue))
-                LineTabs(tab: tab, counts: WorkList.counts(items, toDo: gitHub ? columns.reduce(0) { $0 + $1.items.count } : nil, upcoming: upcoming.count)) {
+                LineTabs(tab: tab, counts: WorkList.counts(items, toDo: gitHub ? columns.reduce(0) { $0 + $1.items.count } + offers.count : nil, upcoming: upcoming.count)) {
                     picked = $0
                 }
                 .contentShape(Rectangle())
@@ -62,9 +71,13 @@ struct GroupPane: View {
                 }
                 let cards = WorkList.items(ranked, in: tab)
                 if tab == .todo {
-                    GitHubToDo(kind: kind, work: feed.gitHubWork, columns: columns,
-                               connect: connect == .signedOut ? ConnectGitHubCard(line: Self.connectLine, connect: onConnectGitHub) : nil,
+                    // Connect GitHub stays on top; the offers come next, then GitHub's items.
+                    let signedOut = connect == .signedOut
+                    if signedOut { ConnectGitHubCard(line: Self.connectLine, connect: onConnectGitHub) }
+                    ForEach(offers) { InlineNotice(notice: $0, feed: feed) }
+                    GitHubToDo(kind: kind, work: feed.gitHubWork, columns: columns, connect: nil,
                                loading: gitHub && feed.gitHubWork == nil && !feed.gitHubListed && !feed.down,
+                               others: offers.count + (signedOut ? 1 : 0),
                                start: { try await feed.startGitHubWork($0.id) }, later: { feed.gitHubLater.insert($0.id) })
                 }
                 // A routine waiting for its next run says when (Sangam's tasks.ts).

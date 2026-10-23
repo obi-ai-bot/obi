@@ -46,12 +46,26 @@ export type Ask = {
   item?: string;      // the inbox item that settles it, if any
   later: boolean;     // put off, still open
   answer?: string;    // answered from this page, until obid settles it
+  source?: string;    // a plug-in's event: where it came from (`plugin.id`)
 };
 export const ASK_LABEL: Record<string, string> = {
   question: 'Question', permission: 'Permission', review: 'Out of reviews', failed: 'Failed',
   limit: 'Out of usage', start: 'Start it?', merge: 'Not merged', obiRequest: 'Another Oby asks',
   pluginEvent: 'From a plug-in', audit: 'Issue audit', failure: 'Oby failure', confirm: 'Confirm it?',
 };
+// obid's own alerting sources, by their tools' names (#1127, #1311, #1312)
+export const SOURCE_LABEL: Record<string, string> = {
+  sentry: 'Sentry', alertmanager: 'Prometheus', grafana: 'Grafana', pagerduty: 'PagerDuty', datadog: 'Datadog',
+};
+// A decision's label: a plug-in's event says where it came from
+export const askLabel = (ask: Pick<Ask, 'kind' | 'source'>): string =>
+  ask.kind === 'pluginEvent' && ask.source
+    ? SOURCE_LABEL[ask.source] ?? `From the ${ask.source} plug-in`
+    : ASK_LABEL[ask.kind] ?? ask.kind;
+// an open offer to look into an alert or fix a ticket: Issues' work, as Sangam's design lists an
+// outside incident; put off, it's the inbox's (as on the Mac)
+const isOffer = (i: InboxItem) =>
+  i.kind === 'pluginEvent' && i.state !== 'later' && i.options.some((o) => o === 'Look into it' || o === 'Fix it');
 
 // A job as the screens show it. created and finished are minutes ago.
 export type JobView = {
@@ -153,11 +167,11 @@ function itemTask(s: Live, i: InboxItem, now: number): Task {
   const owner = i.kind === 'obiRequest' ? ownerOf(i.obi?.fromOwner) : undefined;
   const ask: Ask = i.kind === 'confirm' ? itemAsk(s, i) : {
     kind: i.kind, headline: i.headline ?? i.title, text: i.text, options: i.options, recommended: i.recommended ?? undefined, item: i.id,
-    later: i.state === 'later', answer: s.answering[i.id],
+    later: i.state === 'later', answer: s.answering[i.id], source: i.plugin?.id ?? undefined,
   };
   return {
     // (no agent's mark: it shows Oby's, TaskMark)
-    id: `inbox:${i.id}`, type: owner ? teammate(owner).id : 'inbox', title: ask.headline, who: owner, brand: BRANDS.github, status: 'needs',
+    id: `inbox:${i.id}`, type: owner ? teammate(owner).id : isOffer(i) ? 'issues' : 'inbox', title: ask.headline, who: owner, brand: BRANDS.github, status: 'needs',
     fresh: false,
     job: {
       id: i.id, agent: null, account: '', model: '', repo: '', branch: '—', base: '—', status: 'queued', step: '', stages: [],
@@ -299,7 +313,7 @@ export const firstTab = (s: Live, type: string): Tab => {
 // who has it, as one line: "Claude Code · Personal · oby"
 export function metaOf(t: Task) {
   const j = t.job;
-  if (!j.agent) return ASK_LABEL[j.ask?.kind ?? ''] ?? 'Inbox';
+  if (!j.agent) return j.ask?.kind === 'pluginEvent' ? askLabel(j.ask) : ASK_LABEL[j.ask?.kind ?? ''] ?? 'Inbox';
   const repo = j.repo.includes('/') ? j.repo.split('/')[1] : j.repo;
   return [AGENTS[j.agent]?.name ?? j.agent, j.account, repo].filter(Boolean).join(' · ');
 }

@@ -82,6 +82,8 @@ struct GitHubToDo: View {
     let connect: ConnectGitHubCard?
     /// GitHub hasn't answered yet: cards are placeholders, not "Nothing to do".
     var loading = false
+    /// Other cards the page shows in To do (the Mac's alert offers under Issues): not "Nothing to do" then.
+    var others = 0
     let start: (GitHubWork.Item) async throws -> Void
     let later: (GitHubWork.Item) -> Void
 
@@ -105,7 +107,7 @@ struct GitHubToDo: View {
         if let problem = work?.error {
             Text(verbatim: GitHubWork.plain(problem)).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).padding(.horizontal, 4)
         }
-        if columns.isEmpty && connect == nil {
+        if columns.isEmpty && connect == nil && others == 0 {
             if loading {
                 CardBones()
             } else {

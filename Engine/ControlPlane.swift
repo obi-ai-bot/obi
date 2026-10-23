@@ -18,7 +18,10 @@ nonisolated struct ControlPlane: Sendable {
     /// The clock the calls' timestamps come from.
     var now: @Sendable () -> Date = { Date() }
 
-    static let defaultURL = URL(string: "https://oby-control.tetrix.pro")!
+    /// The app's ObyControlPlaneURL (OBY_CONTROL_PLANE_URL in apps/config/Signing.xcconfig), else
+    /// Deskree's own instance.
+    static let defaultURL = (Bundle.main.object(forInfoDictionaryKey: "ObyControlPlaneURL") as? String)
+        .flatMap { $0.isEmpty ? nil : URL(string: $0) } ?? URL(string: "https://oby-control.deskree.com")!
     /// What's signed before the method, the path, the timestamp, the nonce and the body.
     static let signedPrefix = "oby-control-v1"
 
@@ -48,8 +51,16 @@ nonisolated struct ControlPlane: Sendable {
         var createdAt: Date
     }
 
+    /// The account an installation signed in with: the provider (`apple` or `google`), and for
+    /// Google the domain the control plane keeps (its Workspace's, else its email's), never an email.
+    struct Account: Codable, Equatable, Sendable {
+        var provider: String
+        var domain: String?
+    }
+
     struct Installation: Codable, Equatable, Sendable {
         var id: String
+        var account: Account?
         var name: String
         var platform: String
         var createdAt: Date
@@ -74,9 +85,20 @@ nonisolated struct ControlPlane: Sendable {
 
     /// Who a new installation signs in with, on the web.
     enum Provider: String, CaseIterable, Sendable {
-        case apple, google
+        case google, apple
         /// What Settings' button and messages call it: "Sign in with Apple".
         var name: String { self == .apple ? "Apple" : "Google" }
+    }
+
+    /// What this control plane takes before it signs anyone in (`GET /v1/auth`, unsigned): its
+    /// providers, set up and allowed, and the Google Workspaces it's for when it's members-only.
+    struct SignInOptions: Decodable, Equatable, Sendable {
+        var providers: [String]
+        var workspaces: [String]
+    }
+
+    func signInOptions() async throws -> SignInOptions {
+        try await call("GET", "v1/auth", signer: nil)
     }
 
     /// A sign-in this Mac starts: the provider's authorization page, and the state that names it.
@@ -140,7 +162,7 @@ nonisolated struct ControlPlane: Sendable {
 
     // MARK: Calls
 
-    private func call<Answer: Decodable>(_ method: String, _ path: String, body: [String: String]? = nil, signer: Signer) async throws -> Answer {
+    private func call<Answer: Decodable>(_ method: String, _ path: String, body: [String: String]? = nil, signer: Signer?) async throws -> Answer {
         let data = try await send(method, path, body: body, signer: signer)
         do {
             return try Self.decoder.decode(Answer.self, from: data)
@@ -150,7 +172,7 @@ nonisolated struct ControlPlane: Sendable {
     }
 
     @discardableResult
-    private func send(_ method: String, _ path: String, body: [String: String]? = nil, signer: Signer) async throws -> Data {
+    private func send(_ method: String, _ path: String, body: [String: String]? = nil, signer: Signer?) async throws -> Data {
         var request = URLRequest(url: base.appending(path: path))
         request.httpMethod = method
         request.timeoutInterval = 30
@@ -159,7 +181,7 @@ nonisolated struct ControlPlane: Sendable {
             request.httpBody = try JSONEncoder().encode(body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        try sign(&request, with: signer)
+        if let signer { try sign(&request, with: signer) }
         let (data, status) = try await transport(request)
         guard (200..<300).contains(status) else { throw Self.failure(data, status: status) }
         return data

@@ -206,8 +206,9 @@ impl Seen {
             || item.id.starts_with("orchestrator-")
             // Already the owner's to decide: escalating would only leave a second item for it.
             || matches!(item.kind.as_str(), "confirm" | "start" | "permission" | "plan" | "question" | "github")
-            // What someone said, told to the owner: never the brain's to act on.
-            || matches!(item.kind.as_str(), "watch" | "listen")
+            // What someone said, told to the owner, and what a plug-in sent: never the brain's
+            // to act on (#1124).
+            || matches!(item.kind.as_str(), "watch" | "listen" | "pluginEvent")
         {
             return vec![];
         }
@@ -882,6 +883,8 @@ mod tests {
         assert!(seen.item(&item("p1", "permission")).is_empty());
         assert!(seen.item(&item("q1", "question")).is_empty());
         assert_eq!(seen.item(&item("f1", "failed")).len(), 1);
+        // What a plug-in sent is never the orchestrator's to act on (#1124).
+        assert!(seen.item(&item("ev-vercel-1", "pluginEvent")).is_empty());
     }
 
     /// Each job event is read as the job was when it was sent: a failure that comes back after a

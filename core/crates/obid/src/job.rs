@@ -372,6 +372,18 @@ pub struct Job {
     /// The routine whose run started it (crate::routines), or none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine: Option<RoutineMark>,
+    /// The standing rule that started it with no tap (crate::rules, #1314), or none. Such a job
+    /// publishes only when the owner publishes it by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<RuleMark>,
+}
+
+/// Which standing rule started a job (#1314): the rule's id and type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuleMark {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 /// Which routine's run a job is (docs/runner-api.md, "obid only: routines"): the routine, its
@@ -532,6 +544,7 @@ impl Job {
             usage_seen: None,
             window_share: None,
             routine: None,
+            rule: None,
             ran_secs: None,
             budget_from: None,
         }
@@ -809,6 +822,10 @@ impl Job {
         });
         if let Some(activity) = &self.activity {
             value["activity"] = activity.clone();
+        }
+        // A standing rule's job (#1314) says which rule started it.
+        if let Some(rule) = &self.rule {
+            value["rule"] = json!({"id": rule.id, "type": rule.kind});
         }
         value["teammates"] = json!(self.teammates);
         if let Some(context) = &self.context {

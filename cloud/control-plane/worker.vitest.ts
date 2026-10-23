@@ -10,14 +10,16 @@ export default defineConfig(async () => {
     plugins: [
       cloudflareTest({
         wrangler: { configPath: "./wrangler.jsonc" },
-        // The tests' own device domain, and Sign in with Apple and Google clients.
+        // The tests' own instance: wrangler.jsonc's top level is a template with nothing set.
         miniflare: {
           bindings: {
             TEST_MIGRATIONS: migrations,
+            PRODUCT_DOMAIN: "oby.test",
             DEVICE_DOMAIN: "oby-devices.test",
             APPLE_CLIENT_ID: "com.deskree.oby.signin.test",
-            APPLE_REDIRECT_URI: "https://oby-control.tetrix.pro/v1/auth/apple/callback",
+            APPLE_REDIRECT_URI: "https://oby-control.oby.test/v1/auth/apple/callback",
             GOOGLE_CLIENT_ID: "1234-oby.apps.googleusercontent.com",
+            GOOGLE_REDIRECT_URI: "https://oby-control.oby.test/v1/auth/google/callback",
           },
         },
       }),

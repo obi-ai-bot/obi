@@ -457,7 +457,20 @@ export async function dismissJob(id: string) {
 }
 
 // A decision answered (POST /v1/inbox/{id}/answer): Later puts it off an hour
+// Only the owner's tap confirms (#776): a device signs it, and a browser has no device key.
+export const CONFIRM_IN_APP = 'Confirm it in Oby on your Mac or iPhone: it asks for Touch ID or Face ID. A browser can’t approve it.';
+
+// The line a Confirm on a confirm item shows instead of being sent, or null for anything else.
+export function confirmsInBrowser(item: { kind: string } | undefined, option: string): string | null {
+  return option === 'Confirm' && item?.kind === 'confirm' ? CONFIRM_IN_APP : null;
+}
+
 export async function answerItem(itemId: string, option: string) {
+  const blocked = confirmsInBrowser(state.inbox.find((i) => i.id === itemId), option);
+  if (blocked) {
+    say(blocked);
+    return;
+  }
   const session = authSession;
   set({ answering: { ...state.answering, [itemId]: option } });
   try {

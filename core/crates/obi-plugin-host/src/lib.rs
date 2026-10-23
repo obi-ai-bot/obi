@@ -232,6 +232,10 @@ impl PluginHost {
                 Found::Valid(manifest) => manifest.kinds.clone(),
                 Found::Invalid { .. } => Vec::new(),
             };
+            let protocol = match &found {
+                Found::Valid(manifest) => manifest.manifest.clone(),
+                Found::Invalid { .. } => PROTOCOL.to_owned(),
+            };
             let event_kinds = match &found {
                 Found::Valid(manifest) => manifest
                     .events
@@ -251,7 +255,7 @@ impl PluginHost {
             let plugin = Plugin {
                 dir: home.join("plugins").join(id.as_str()),
                 data_dir: home.join("plugin-data").join(id.as_str()),
-                peer: Arc::new(Peer::new(id.clone(), kinds, event_kinds)),
+                peer: Arc::new(Peer::new(id.clone(), protocol, kinds, event_kinds)),
                 found,
                 live: Mutex::new(Live {
                     enabled,
@@ -842,7 +846,7 @@ async fn run_started(
 
     let config = lock(&plugin.live).config.clone();
     let params = InitializeParams {
-        protocol: PROTOCOL.to_owned(),
+        protocol: plugin.peer.protocol.clone(),
         obid: rpc::ObidInfo {
             version: env!("CARGO_PKG_VERSION").to_owned(),
         },
@@ -932,7 +936,7 @@ fn check_initialize(plugin: &Plugin, result: InitializeResult) -> Result<Vec<Kin
     let Found::Valid(manifest) = &plugin.found else {
         return Err(PluginError::Protocol("its manifest is invalid".into()));
     };
-    conn::initialize_kinds(&manifest.kinds, result)
+    conn::initialize_kinds(&manifest.manifest, &manifest.kinds, result)
 }
 
 /// `shutdown`, then stdin closes; still running `grace` after `shutdown` was sent, it is

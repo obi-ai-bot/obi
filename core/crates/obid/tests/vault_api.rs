@@ -892,24 +892,24 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
     assert_eq!(
         kinds,
         [
-            "start", "said", "tool", "tool", "tool", "tool", "tool", "plan", "said", "tool",
+            "start", "you", "said", "tool", "tool", "tool", "tool", "tool", "plan", "said", "tool",
             "tool", "tool"
         ],
         "{}",
         answer.text
     );
     let ns: Vec<u64> = entries.iter().map(|e| e["n"].as_u64().unwrap()).collect();
-    assert_eq!(ns, (1..=12).collect::<Vec<u64>>());
+    assert_eq!(ns, (1..=13).collect::<Vec<u64>>());
     assert_eq!(entries[0]["summary"], "Started on Claude Code");
     assert_eq!(
-        entries[1]["summary"],
+        entries[2]["summary"],
         "Looking for where a blocked scan ends the job."
     );
-    assert_eq!(entries[2]["tool"], "Read");
-    assert_eq!(entries[2]["summary"], "Reading scan.rs");
-    assert_eq!(entries[7]["summary"], "1 of 2 done");
+    assert_eq!(entries[3]["tool"], "Read");
+    assert_eq!(entries[3]["summary"], "Reading scan.rs");
+    assert_eq!(entries[8]["summary"], "1 of 2 done");
     assert_eq!(
-        entries[7]["todos"][1],
+        entries[8]["todos"][1],
         json!({"text": "Fix it", "state": "running"})
     );
     // The agent's words whole (#784): all 41 lines, the summary their first 300 characters.
@@ -920,8 +920,8 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
         "Found it. Fixing it, with [vault: staging-api-key] for staging ([vault: staging-api-key], [vault: staging-api-key]).\n{}",
         steps.join("\n")
     );
-    assert_eq!(entries[8]["text"], whole.as_str());
-    let summary = entries[8]["summary"].as_str().unwrap();
+    assert_eq!(entries[9]["text"], whole.as_str());
+    let summary = entries[9]["summary"].as_str().unwrap();
     assert!(summary.starts_with("Found it. Fixing it, with [vault: staging-api-key] for staging ([vault: staging-api-key], [vault: staging-api-key]). Step 1:"), "{summary}");
     assert!(summary.chars().count() <= 300, "{summary}");
     for tool in entries.iter().filter(|e| e["kind"] == "tool") {
@@ -931,39 +931,39 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
         );
     }
     assert_eq!(
-        entries[2..7]
+        entries[3..8]
             .iter()
             .map(|e| &e["state"])
             .collect::<Vec<_>>(),
         [&json!("done"); 5]
     );
     assert_eq!(
-        (&entries[9]["added"], &entries[9]["removed"]),
+        (&entries[10]["added"], &entries[10]["removed"]),
         (&json!(3), &json!(2))
     );
-    assert_eq!(entries[11]["tool"], "Bash");
-    assert_eq!(entries[11]["state"], "failed");
-    assert_eq!(entries[11]["activity"], "test");
+    assert_eq!(entries[12]["tool"], "Bash");
+    assert_eq!(entries[12]["state"], "failed");
+    assert_eq!(entries[12]["activity"], "test");
     assert!(
-        entries[11]["summary"]
+        entries[12]["summary"]
             .as_str()
             .unwrap()
             .starts_with("Running export STAGING_KEY=[vault: staging-api-key]"),
         "{}",
-        entries[11]
+        entries[12]
     );
 
-    // Only what came or changed since entry 9 first came: 9 itself came again once its words
+    // Only what came or changed since entry 10 first came: 10 itself came again once its words
     // were whole.
     let since = call(
         &obid,
         "GET",
-        &format!("/v1/jobs/{id}/transcript?after=9"),
+        &format!("/v1/jobs/{id}/transcript?after=10"),
         None,
     );
     assert_eq!(
         since.body,
-        json!({"entries": entries[8..], "next": null}),
+        json!({"entries": entries[9..], "next": null}),
         "{}",
         since.text
     );
@@ -1002,7 +1002,7 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
         if data["entry"].is_object() {
             streamed.push(data["entry"].clone());
         } else {
-            assert_eq!(data["n"], 9, "{data}");
+            assert_eq!(data["n"], 10, "{data}");
             appended.push_str(data["append"].as_str().unwrap());
             appends += 1;
         }
@@ -1034,10 +1034,10 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
 
     // An entry opened (#784): the call's whole command, the last 200 of its 304 lines with its
     // exit code, the vault's value as its name in every form, and only the token's own line hidden.
-    let bash = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/12"), None);
+    let bash = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/13"), None);
     assert_eq!(bash.status, 200, "{}", bash.text);
     let detail = &bash.body["detail"];
-    assert_eq!(bash.body["n"], 12);
+    assert_eq!(bash.body["n"], 13);
     assert_eq!(
         detail["input"]["command"],
         "export STAGING_KEY=[vault: staging-api-key] KEY64=[vault: staging-api-key] && node --test"
@@ -1061,7 +1061,7 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
         text[at + 2]
     );
     assert_eq!(text[at + 3], "ok 297 - test 297");
-    let edit = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/10"), None);
+    let edit = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/11"), None);
     assert_eq!(
         edit.body["detail"]["diff"],
         json!([{"path": "src/scan.rs",
@@ -1069,7 +1069,7 @@ fn a_jobs_transcript_has_each_call_and_no_vault_secret() {
         "{}",
         edit.text
     );
-    let words = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/9"), None);
+    let words = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/10"), None);
     assert_eq!(words.body["text"], whole.as_str());
     assert!(words.body.get("detail").is_none(), "{}", words.text);
     let missing = call(&obid, "GET", &format!("/v1/jobs/{id}/transcript/99"), None);

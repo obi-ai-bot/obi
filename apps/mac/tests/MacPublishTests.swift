@@ -85,6 +85,41 @@ struct MacPublishTests {
         #expect(!stub.requests.contains { $0.path.hasSuffix("/publish") })
     }
 
+    /// The owner's Confirm (#776): Touch ID signs the item's own title, over its id, and that's
+    /// what goes with the answer.
+    @Test func confirmSignsTheItemsTitle() async throws {
+        let title = "Delete Vault tests (its worktree and local branch go)"
+        let item = #"{"id": "i9", "kind": "confirm", "job": "ab12cd34", "title": "\#(title)", "text": "", "options": ["Confirm", "Cancel"], "created": "2026-10-22T09:00:00Z", "done": "2026-10-22T09:01:00Z", "later": null, "answer": "Confirm", "confirm": {"action": "delete_job", "target": "ab12cd34", "payload": null}}"#
+        let stub = RunnerStub { request in
+            request.path == "/v1/devices" ? (200, #"{"id": "d7c1"}"#) : (200, item)
+        }
+        let key = FakeKey()
+        let device = MacDevice(key: key, name: "Mac", defaults: stub.defaults)
+        let answered = try await device.confirm("i9", title: title, with: stub.runner)
+        #expect(answered.id == "i9")
+        let sent = try #require(stub.requests.last { $0.path == "/v1/inbox/i9/answer" }?.json)
+        #expect(sent["answer"] as? String == "Confirm")
+        let approval = try #require(sent["approval"] as? [String: Any])
+        #expect(approval["device"] as? String == "d7c1" && approval["action"] as? String == title)
+        let signedAt = try #require(approval["signedAt"] as? String)
+        let der = try #require((approval["signature"] as? String).flatMap { Data(base64Encoded: $0) })
+        let signature = try P256.Signing.ECDSASignature(derRepresentation: der)
+        #expect(key.signing.publicKey.isValidSignature(signature, for: Approval.confirmMessage(item: "i9", title: title, signedAt: signedAt)))
+        #expect(String(decoding: Approval.confirmMessage(item: "i9", title: "T", signedAt: "S"), as: UTF8.self) == "oby-confirm\ni9\nT\nS")
+    }
+
+    /// A cancelled Touch ID on a Confirm sends nothing, so the card stays open.
+    @Test func cancelledTouchIDConfirmsNothing() async throws {
+        let stub = RunnerStub { request in request.path == "/v1/devices" ? (200, #"{"id": "d7c1"}"#) : (500, #"{"error": "No."}"#) }
+        let device = MacDevice(key: FakeKey(cancels: true), name: "Mac", defaults: stub.defaults)
+        await #expect(throws: ConfirmCancelled.self) { try await device.confirm("i9", title: "Delete it", with: stub.runner) }
+        #expect(!stub.requests.contains { $0.path.hasSuffix("/answer") })
+        // A Mac with no Touch ID says where to confirm, and sends nothing either.
+        let none = MacDevice(key: FakeKey(isAvailable: false), name: "Mac", defaults: stub.defaults)
+        let error = await #expect(throws: RunnerError.self) { try await none.confirm("i9", title: "Delete it", with: stub.runner) }
+        #expect(error?.message == MacDevice.noTouchID)
+    }
+
     /// A Mac without Touch ID neither registers nor publishes, and says why.
     @Test func noTouchIDNoKey() async {
         let stub = RunnerStub { _ in (200, #"{"id": "d7c1"}"#) }
@@ -140,6 +175,13 @@ nonisolated struct FakeKey: PublishingKey {
         let signedAt = ISO8601DateFormatter().string(from: .now)
         let signature = try signing.signature(for: Approval.connectionMessage(action: action, signedAt: signedAt))
         return Approval(device: device, action: action, signedAt: signedAt, signature: signature.derRepresentation.base64EncodedString())
+    }
+
+    func approveConfirm(item: String, title: String, device: String) async throws -> Approval {
+        if cancels { throw ConfirmCancelled() }
+        let signedAt = ISO8601DateFormatter().string(from: .now)
+        let signature = try signing.signature(for: Approval.confirmMessage(item: item, title: title, signedAt: signedAt))
+        return Approval(device: device, action: title, signedAt: signedAt, signature: signature.derRepresentation.base64EncodedString())
     }
 }
 

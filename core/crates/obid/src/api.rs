@@ -12,7 +12,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use obi_protocol::time;
 use serde::Serialize;
 
@@ -70,6 +70,10 @@ pub struct Shared {
     pub github_work: Arc<crate::github_work::Feed>,
     /// Oby's Slack login (crate::slack).
     pub slack: Arc<crate::slack::Slack>,
+    /// Oby's Sentry login (crate::sentry).
+    pub sentry: Arc<crate::sentry::Sentry>,
+    /// The webhooks outside systems send through the control plane (crate::hooks).
+    pub hooks: Arc<crate::hooks::Hooks>,
     /// The watcher: one person's words about what the owner watches, told to them (crate::watch).
     pub watch: Arc<crate::watch::Watch>,
     /// The Slack channels the owner picked, heard through Socket Mode (crate::listen).
@@ -78,6 +82,8 @@ pub struct Shared {
     pub push: crate::push::Push,
     /// True once obid is stopping: streams end.
     pub stopping: tokio::sync::watch::Receiver<bool>,
+    /// The Cloudflare Tunnel phones reach this Mac through from anywhere (crate::tunnel, #896).
+    pub tunnel: Arc<crate::tunnel::Tunnel>,
 }
 
 /// What `status.cleanup` says: the job worktrees' folder and the disk space it took when last
@@ -196,6 +202,8 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .merge(crate::connections::router())
         .merge(crate::tetrix::router())
         .merge(crate::slack::router())
+        .merge(crate::sentry::router())
+        .merge(crate::hooks::router())
         .merge(crate::watch::router())
         .merge(crate::listen::router())
         .route("/v1/checks/next", get(crate::routes::next_check))
@@ -287,6 +295,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
             "/v1/memory/suggestions/{id}/dismiss",
             post(crate::memory::dismiss),
         )
+        .route("/v1/obid/tunnel", put(tunnel_put).delete(tunnel_delete))
         .route("/v1/obid/plugins", get(crate::plugins::list))
         .route(
             "/v1/obid/plugins/{id}",
@@ -590,6 +599,8 @@ pub struct Status {
     pub cleanup: Option<CleanupJson>,
     /// Whether obid copies Claude Code's Keychain login, and whether it chose that itself.
     pub claude_keychain: KeychainJson,
+    /// The tunnel phones reach this Mac through (crate::tunnel): `{state, detail}`.
+    pub tunnel: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -790,7 +801,47 @@ async fn status(State(shared): State<Arc<Shared>>) -> Result<axum::Json<Status>,
             on: crate::jobs::keychain_on(),
             auto: crate::jobs::keychain_auto(),
         },
+        tunnel: shared.tunnel.json(),
     }))
+}
+
+/// `PUT /v1/obid/tunnel` `{"token"}` (#896): keeps the tunnel's run token in the vault and runs
+/// cloudflared on it. `204`; `409` for an obid with no cloudflared, `422` for a bad body or token.
+async fn tunnel_put(
+    State(shared): State<Arc<Shared>>,
+    body: axum::body::Bytes,
+) -> Result<axum::response::Response, ApiError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Body {
+        token: String,
+    }
+    let body: Body = serde_json::from_slice(&body).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "The body is {\"token\": \"…\"}.",
+        )
+    })?;
+    shared.tunnel.put(&body.token).map_err(|(status, why)| {
+        ApiError::new(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::CONFLICT),
+            why,
+        )
+    })?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// `DELETE /v1/obid/tunnel` (#896): stops cloudflared and forgets its token. `204`.
+async fn tunnel_delete(
+    State(shared): State<Arc<Shared>>,
+) -> Result<axum::response::Response, ApiError> {
+    shared.tunnel.delete().map_err(|(status, why)| {
+        ApiError::new(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+            why,
+        )
+    })?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// The disk space allocated under `path`, each file counted once however many links it has; 0 when

@@ -723,6 +723,8 @@ nonisolated enum RunnerEvent: Equatable, Sendable {
     case watchNotice(WatchNotice)
     /// obid's Slack changed: connected, signed out (obid only).
     case slack(SlackStatus)
+    /// obid's Sentry changed: connected, signed out, a read's problem (obid only; no `repos`).
+    case sentry(SentryStatus)
     /// The watcher's rules or runs changed (obid only).
     case watch(WatchStatus)
     #endif
@@ -1444,6 +1446,18 @@ nonisolated struct Runner: Sendable {
 
     // Approvals come from the iPhone's Face ID key or the Mac's Touch ID key (apps/shared/DeviceKey.swift).
     #if os(iOS) || os(macOS)
+    /// The owner's Confirm of a confirm item, with the device's signature over its title (#776).
+    func settle(_ id: String, answer: String, approval: Approval) async throws -> InboxItem {
+        struct Body: Encodable { var answer: String; var approval: Approval }
+        #if os(macOS)
+        let data = try await send("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, approval: approval))
+        guard let item = InboxItem.runner(data) else { throw RunnerError(message: "The runner's answer couldn't be read.") }
+        return item
+        #else
+        return try await call("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, approval: approval))
+        #endif
+    }
+
     func publish(_ id: String, approval: Approval) async throws -> URL {
         struct Answer: Decodable { var url: URL }
         let answer: Answer = try await call("POST", "v1/jobs/\(id)/publish", body: approval)
@@ -1988,6 +2002,7 @@ nonisolated struct EventParser {
             case "check": return (try? Runner.decoder.decode(MacCheck.self, from: json)).map(RunnerEvent.check)
             case "tetrix": return (try? Runner.decoder.decode(TetrixStatus.self, from: json)).map(RunnerEvent.tetrix)
             case "slack": return (try? Runner.decoder.decode(SlackStatus.self, from: json)).map(RunnerEvent.slack)
+            case "sentry": return (try? Runner.decoder.decode(SentryStatus.self, from: json)).map(RunnerEvent.sentry)
             case "watch": return (try? Runner.decoder.decode(WatchStatus.self, from: json)).map(RunnerEvent.watch)
             case "cleanup": return (try? Runner.decoder.decode(RunnerStatus.Cleanup.self, from: json)).map(RunnerEvent.cleanup)
             #endif

@@ -23,6 +23,7 @@ pub mod conversation;
 pub mod decisions;
 pub mod detail;
 pub mod devices;
+pub mod event_work;
 pub mod events;
 pub mod facts;
 pub mod failures;
@@ -31,6 +32,7 @@ pub mod git;
 pub mod github;
 pub mod github_login;
 pub mod github_work;
+pub mod hooks;
 pub mod job;
 pub mod jobs;
 pub mod limits;
@@ -47,9 +49,11 @@ pub mod push;
 pub mod review;
 pub mod routes;
 pub mod routines;
+pub mod rules;
 pub mod sandbox;
 pub mod scan;
 pub mod secrets;
+pub mod sentry;
 pub mod settings;
 pub mod slack;
 pub mod sphere;
@@ -58,6 +62,7 @@ pub mod teammates;
 pub mod tetrix;
 pub mod token;
 pub mod transcript;
+pub mod tunnel;
 pub mod usage;
 pub mod vault;
 pub mod watch;
@@ -294,6 +299,8 @@ pub async fn serve(
         path: config.home.join("exchanges"),
         source,
     })?;
+    // A rule's start that a stop cut short is an offer again (#1314).
+    link.reopen_claims();
     // The plug-ins obid ships, installed where missing (disabled), then the host, which starts
     // the ones the owner enabled without waiting for them.
     stopwatch.lap("sphere");
@@ -337,8 +344,24 @@ pub async fn serve(
         events.clone(),
     );
     jobs.use_slack(slack.clone());
+    let sentry = sentry::Sentry::open(
+        &config.home,
+        vault::shared().expect("the vault is installed first"),
+        events.clone(),
+    );
+    link.use_sentry(sentry.clone());
+    let hooks = hooks::Hooks::open(
+        &config.home,
+        vault::shared().expect("the vault is installed first"),
+        events.clone(),
+    );
     let watch = watch::Watch::open(&config.home, events.clone());
     let listen = listen::Listen::open(&config.home, events.clone());
+    let tunnel = tunnel::Tunnel::open(
+        &config.home,
+        vault::shared().expect("the vault is installed first"),
+        events.clone(),
+    );
     let shared = Arc::new(api::Shared {
         config,
         token,
@@ -364,10 +387,13 @@ pub async fn serve(
         pages: web::Sessions::default(),
         github_work: github.clone(),
         slack,
+        sentry,
+        hooks,
         watch,
         listen,
         push: pushes,
         stopping: stopping_rx.clone(),
+        tunnel: tunnel.clone(),
     });
     let app = api::router(shared.clone());
 
@@ -405,6 +431,8 @@ pub async fn serve(
     // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
     jobs.resume();
     link.start();
+    // The tunnel phones reach this Mac through, when the owner turned remote access on (#896).
+    tunnel.spawn(stopping_rx.clone());
     github.spawn(stopping_rx.clone());
     // Job alerts to Android phones through FCM (crate::push).
     push::spawn(shared.clone());
@@ -435,6 +463,8 @@ pub async fn serve(
     // Routines run on their schedules (#395).
     shared.routines.attach(&shared);
     routines::spawn(shared.clone());
+    // Sentry's followed projects, every 5 minutes (crate::sentry).
+    sentry::spawn(shared.clone());
     // The watcher, every 15 minutes on weekdays (crate::watch).
     watch::spawn(shared.clone());
     // The Slack channels the owner picked, live and caught up every 15 minutes (crate::listen).
@@ -446,10 +476,10 @@ pub async fn serve(
     // Every event a plug-in emits becomes a `pluginEvent` inbox item. The receiver ends once
     // the host has shut down.
     if let Some(mut events) = plugins.take_events() {
-        let link = link.clone();
+        let shared = shared.clone();
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
-                link.plugin_event(event);
+                rules::offer(&shared, shared.link.plugin_event_offer(&event));
             }
         });
     }
