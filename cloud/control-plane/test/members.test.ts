@@ -14,6 +14,15 @@ describe("a members-only instance", () => {
     expect(registered.status).toBe(201);
   });
 
+  it("tells a Mac what it may sign in with, and shows the account it signed in with", async () => {
+    const open = await testApp().raw("GET", "/v1/auth");
+    expect(open.body).toEqual({ providers: ["apple", "google"], workspaces: [] });
+    const app = testApp({}, MEMBERS);
+    expect((await app.raw("GET", "/v1/auth")).body).toEqual({ providers: ["google"], workspaces: ["deskree.com"] });
+    const registered = await app.registerWithGoogle(await Mac.make(), "member-3", "carol@deskree.com", "deskree.com");
+    expect(registered.body.installation.account).toEqual({ provider: "google", domain: "deskree.com" });
+  });
+
   it("refuses Apple, which has no Workspace, before it starts", async () => {
     const app = testApp({}, MEMBERS);
     const { started } = await app.startSignIn(await Mac.make());

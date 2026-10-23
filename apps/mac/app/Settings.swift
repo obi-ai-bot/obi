@@ -245,54 +245,67 @@ struct RunnerSettingsView: View {
     }
 }
 
-/// Settings › Remote access: reach this Mac from anywhere (#285, apps/mac/app/RemoteAccess.swift).
-/// Turn it on: the first time, this Mac signs in with Apple or Google and registers with
-/// Oby's control plane by a key of its own, gets a hostname, and runs its tunnel. The iPhone connects to the hostname when it's
-/// away from home.
+/// Settings › Remote access (#285, apps/mac/app/RemoteAccess.swift), as Sangam's Remote page: the
+/// Oby account first, then the switch, the hostname, the status and Forget. Signed out, the account's
+/// card holds the sign-in buttons, in each provider's own colours (beyond his mock, which signs in
+/// by email), only those the control plane takes; signing in turns remote access on.
 struct RemoteAccessSettingsView: View {
     let remote: RemoteAccess
     @Environment(\.openSettingsPage) private var openSettings
     @State private var forgetting = false
+    /// The button pressed, which shows it's working until the sign-in ends.
+    @State private var signingIn: ControlPlane.Provider?
 
-    /// Pair a device sent you here: the switch is ringed.
+    /// Pair a device sent you here: the switch, or the sign-in, is ringed.
     private var pointed: Bool { openSettings.spotlight == .remoteAccess }
 
+    private var accountFooter: String {
+        let who = remote.workspaces.isEmpty ? "" : " For \(remote.workspaces.joined(separator: ", ")) accounts."
+        return "Sign in to give this Mac an address of its own." + who
+    }
+
     var body: some View {
-        SetGroup("Remote access", footer: "The first time, you sign in with Apple or Google: Oby asks Apple for no name or email, and keeps only your Google account’s domains, never the email. One account has up to 5 Macs: a sixth takes the place of the one used longest ago. On, this Mac runs its Cloudflare Tunnel outbound, with no port to open: away from home, your iPhone reaches the gateway, and nothing else, at the hostname. Off keeps the hostname for a while: after 3 days off, asleep or offline, this Mac gets a new one when it’s back, and your iPhone pairs again. Forget removes this Mac from Oby’s control plane, and the hostname stops answering.",
-                 problem: remote.problem) {
-            SetRow("Reach this Mac from anywhere") {
-                if remote.signsInFirst {
-                    HStack(spacing: 8) {
-                        ForEach(RemoteAccess.signInButtons, id: \.provider) { button in
-                            Button(button.title) { Task { await remote.turnOn(with: button.provider) } }
-                                .buttonStyle(.set)
-                                .disabled(remote.busy)
+        VStack(alignment: .leading, spacing: 0) {
+            if remote.signsInFirst {
+                SetGroup("Oby account", footer: accountFooter, problem: remote.problem) {
+                    VStack(spacing: 10) {
+                        ForEach(remote.providers, id: \.self) { provider in
+                            Button { signIn(with: provider) } label: {
+                                SignInLabel(provider: provider, working: signingIn == provider)
+                            }
+                            .buttonStyle(SignInButtonStyle(provider: provider))
+                            .disabled(remote.busy)
                         }
                     }
-                } else {
-                    Toggle("Reach this Mac from anywhere", isOn: Binding(get: { remote.on }, set: { on in
-                        if on { Task { await remote.turnOn() } } else { remote.turnOff() }
-                    }))
-                    .toggleStyle(.set)
-                    .disabled(remote.busy)
+                    .padding(16)
+                    .spotlit(pointed, id: .remoteAccess)
+                }
+            } else {
+                SetGroup("Oby account") {
+                    SetRow("Signed in with") { SetValue(remote.accountName ?? "Your Oby account") }
                 }
             }
-            .spotlit(pointed && !remote.on, id: .remoteAccess)
-            if let hostname = remote.hostname {
-                SetRow("Hostname") { SetValue(hostname) }
-            }
-            SetRow("Status") {
-                let status = remote.busy ? "Setting up…" : remote.status
-                SetValue(status, connected: status == "Connected")
-            }
-            if remote.hostname != nil {
-                SetRow("") {
-                    Button("Forget This Mac", role: .destructive) { forgetting = true }
-                        .buttonStyle(.set)
-                        .disabled(remote.busy)
+            SetGroup("Remote access", footer: "Your iPhone reaches this Mac away from home, with no port to open.",
+                     problem: remote.signsInFirst ? nil : remote.problem) {
+                // Ringed when Pair a device sent you, unless the sign-in above is (one spotlight id).
+                if remote.signsInFirst { switchRow } else { switchRow.spotlit(pointed && !remote.on, id: .remoteAccess) }
+                if let hostname = remote.hostname {
+                    SetRow("Hostname") { SetValue(hostname) }
+                }
+                SetRow("Status") {
+                    let status = remote.busy ? "Setting up…" : remote.signsInFirst ? "Not set up" : remote.status
+                    SetValue(status, connected: status == "Connected")
+                }
+                if remote.hostname != nil {
+                    SetRow("") {
+                        Button("Forget This Mac", role: .destructive) { forgetting = true }
+                            .buttonStyle(.set)
+                            .disabled(remote.busy)
+                    }
                 }
             }
         }
+        .task { if remote.signsInFirst { await remote.loadSignInOptions() } }
         // On, and Pair a device sent you: straight back to it, its button ringed.
         .onChange(of: remote.on) { _, on in
             if on, pointed { openSettings(.runner, spotlight: .pairDevice) }
@@ -304,6 +317,75 @@ struct RemoteAccessSettingsView: View {
         } message: {
             Text("Its tunnel and hostname are removed from Oby’s control plane. Turning remote access on again makes a new hostname.")
         }
+    }
+
+    private var switchRow: some View {
+        SetRow("Reach this Mac from anywhere") {
+            Toggle("Reach this Mac from anywhere", isOn: Binding(get: { remote.on }, set: { on in
+                if on { Task { await remote.turnOn() } } else { remote.turnOff() }
+            }))
+            .toggleStyle(.set)
+            .disabled(remote.busy || remote.signsInFirst)
+        }
+    }
+
+    private func signIn(with provider: ControlPlane.Provider) {
+        signingIn = provider
+        Task {
+            await remote.turnOn(with: provider)
+            signingIn = nil
+        }
+    }
+}
+
+/// A sign-in button's face: the provider's mark and "Sign in with Google", or a spinner while it works.
+private struct SignInLabel: View {
+    let provider: ControlPlane.Provider
+    let working: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if working {
+                ProgressView().controlSize(.small)
+            } else if provider == .google {
+                Image("Brands/google").resizable().scaledToFit().frame(width: 18, height: 18)
+            } else {
+                Image(systemName: "apple.logo").font(.system(size: 16, weight: .medium))
+            }
+            Text("Sign in with \(provider.name)")
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The providers' own buttons, by their guidelines, in Sangam's 8-round frame: Google's white
+/// button (#1F1F1F words on a #747775 line) and Apple's black one (white words, a faint white line
+/// so it shows on a dark card). 40 tall, the card's width; dimmer pressed, faded when it can't be
+/// pressed.
+private struct SignInButtonStyle: ButtonStyle {
+    let provider: ControlPlane.Provider
+    @Environment(\.isEnabled) private var enabled
+    @State private var hovering = false
+
+    private var fill: Color { provider == .google ? .white : .black }
+    private var ink: Color { provider == .google ? Color(hex: 0x1F1F1F) : .white }
+    private var edge: Color {
+        provider == .google ? Color(hex: 0x747775) : Color(dark: Color.white.opacity(0.22), light: .clear)
+    }
+
+    func makeBody(configuration: Configuration) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        configuration.label
+            .font(Tokens.font(Tokens.textBase, .medium))
+            .foregroundStyle(ink)
+            .frame(maxWidth: .infinity).frame(height: 40)
+            .background(fill, in: shape)
+            .overlay(shape.strokeBorder(edge))
+            .overlay(shape.fill(Color.gray.opacity(configuration.isPressed ? 0.18 : hovering && enabled ? 0.08 : 0)))
+            .contentShape(shape)
+            .opacity(enabled ? 1 : 0.5)
+            .onHover { hovering = $0 }
+            .animation(Tokens.fade, value: hovering)
     }
 }
 

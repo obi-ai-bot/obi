@@ -169,6 +169,7 @@ async function route(request: Request, env: Env, deps: Deps, now: () => Date): P
   const path = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
   const method = request.method;
   if (path === "/v1/health" && method === "GET") return json({ ok: true });
+  if (path === "/v1/auth" && method === "GET") return json(signInOptions(env));
   for (const provider of ["apple", "google"] as const) {
     if (path === `/v1/auth/${provider}/start` && method === "POST") return startSignIn(request, env, now, provider);
     if (path === `/v1/auth/${provider}/callback` && method === "POST") return finishSignIn(request, env, deps, now, provider);
@@ -316,6 +317,17 @@ function domainAllowance(env: Env, workspace: boolean): { endpoints: number; reg
 }
 
 /// A provider's setting from wrangler.jsonc, or the control plane says it isn't set up.
+/// What a Mac shows before it signs in (`GET /v1/auth`): the providers this instance takes, set up
+/// and allowed (a members-only instance refuses Apple), and the Workspaces it's for, if it's
+/// members-only. Nothing secret: the same as the refusals say.
+function signInOptions(env: Env): { providers: Provider[]; workspaces: string[] } {
+  const workspaces = memberWorkspaces(env);
+  const providers = (Object.keys(PROVIDERS) as Provider[]).filter(
+    (p) => String(env[PROVIDERS[p].client] ?? "").trim() && !(p === "apple" && workspaces.length),
+  );
+  return { providers, workspaces };
+}
+
 function setting(env: Env, provider: Provider, which: "client" | "redirect"): string {
   const name = PROVIDERS[provider][which];
   const text = String(env[name] ?? "").trim();
@@ -708,8 +720,15 @@ async function endpointOf(db: D1Database, installation: string): Promise<Endpoin
 
 async function publicInstallation(db: D1Database, row: InstallationRow) {
   const endpoint = await endpointOf(db, row.id);
+  // The account it's signed in with, as Settings shows it: the provider, and for Google the
+  // domain kept (its Workspace's, else its email's). Never an email: none is kept.
+  const user = row.user_sub
+    ? await db.prepare("SELECT provider, workspace_domain, email_domain FROM users WHERE sub = ?1").bind(row.user_sub)
+        .first<{ provider: string; workspace_domain: string | null; email_domain: string | null }>()
+    : null;
   return {
     id: row.id,
+    account: user ? { provider: user.provider, domain: user.workspace_domain ?? user.email_domain } : null,
     name: row.name,
     platform: row.platform,
     createdAt: row.created_at,

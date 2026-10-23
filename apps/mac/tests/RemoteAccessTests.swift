@@ -65,7 +65,7 @@ struct RemoteAccessTests {
         #expect(!remote.on)
         #expect(remote.status == "Off")
 
-        await remote.turnOn()
+        await remote.turnOn(with: .apple)
         #expect(remote.problem == nil)
         #expect(remote.on)
         #expect(remote.hostname == "oby-abcdefghij0123456789.tetrix.pro")
@@ -118,17 +118,15 @@ struct RemoteAccessTests {
 
 
 
-    /// Settings offers two buttons while this Mac has no hostname, Apple's then Google's, in place
-    /// of the switch; Google's signs in at Google (the control plane's Google URL in the sheet) and
+    /// Settings offers the sign-in buttons while this Mac has no hostname, Google's then Apple's,
+    /// until the control plane says what it takes; Google's signs in at Google (the control plane's Google URL in the sheet) and
     /// registers with that sign-in. Set up, the switch is back.
     @Test @MainActor func turningOnOffersAppleAndGoogle() async throws {
-        #expect(RemoteAccess.signInButtons.map(\.title) == ["Sign in with Apple", "Sign in with Google"])
-        #expect(RemoteAccess.signInButtons.map(\.provider) == [.apple, .google])
         let google = #"{"url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=1234-oby.apps.googleusercontent.com&state=s1", "state": "s1"}"#
         let exchange = Exchange([
             (410, Self.unregistered),
             (201, google),
-            (201, #"{"installation": \#(Self.installation)}"#),
+            (201, #"{"installation": \#(Self.installation.replacingOccurrences(of: #""id": "i1","#, with: #""id": "i1", "account": {"provider": "google", "domain": "deskree.com"},"#))}"#),
             (201, #"{"endpoint": {"hostname": "oby-abcdefghij0123456789.oby-devices.test", "tunnelId": "t1", "createdAt": "2026-10-12T12:00:01.000Z"}}"#),
             (200, #"{"token": "eyJ-run-token", "hostname": "oby-abcdefghij0123456789.oby-devices.test"}"#),
         ])
@@ -146,6 +144,7 @@ struct RemoteAccessTests {
         #expect(remote.problem == nil)
         #expect(remote.on)
         #expect(!remote.signsInFirst)
+        #expect(remote.accountName == "Google · deskree.com")
         #expect(exchange.requests.prefix(3).map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == [
             "GET /v1/installations/self", "POST /v1/auth/google/start", "POST /v1/installations",
         ])
@@ -155,6 +154,29 @@ struct RemoteAccessTests {
         // Off keeps the hostname: the switch, not the buttons.
         remote.turnOff()
         #expect(!remote.signsInFirst)
+    }
+
+    /// Before signing in, Settings asks the control plane what it takes: a members-only one offers
+    /// Google alone and says whose accounts; one that doesn't answer leaves both buttons.
+    @Test @MainActor func signInOptionsComeFromTheControlPlane() async throws {
+        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.remote.tests-\(UUID().uuidString)"))
+        let members = Exchange([(200, #"{"providers": ["google"], "workspaces": ["deskree.com"]}"#)])
+        let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: members.transport),
+                                  secrets: KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)"), defaults: defaults,
+                                  runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }), authenticate: { $0 })
+        #expect(remote.providers == [.google, .apple])
+        await remote.loadSignInOptions()
+        #expect(remote.providers == [.google])
+        #expect(remote.workspaces == ["deskree.com"])
+        #expect(members.requests.map { "\($0.httpMethod ?? "") \($0.url?.path ?? "")" } == ["GET /v1/auth"])
+        #expect(members.requests.first?.value(forHTTPHeaderField: "Oby-Signature") == nil)
+
+        let down = Exchange([(503, #"{"error": "down"}"#)])
+        let offline = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: down.transport),
+                                   secrets: KeychainVault(service: "com.deskree.oby.remote.tests-\(UUID().uuidString)"), defaults: defaults,
+                                   runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }), authenticate: { $0 })
+        await offline.loadSignInOptions()
+        #expect(offline.providers == [.google, .apple])
     }
 
     /// A Google sign-in that comes back failed names Google.
@@ -185,7 +207,7 @@ struct RemoteAccessTests {
             let remote = RemoteAccess(plane: ControlPlane(base: URL(string: "https://oby-control.test")!, transport: exchange.transport),
                                       secrets: secrets, defaults: defaults,
                                       runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }), authenticate: Sheet(back).run)
-            await remote.turnOn()
+            await remote.turnOn(with: .apple)
             #expect(!remote.on)
             #expect(remote.problem == said)
             #expect(exchange.requests.count == 2)
@@ -210,7 +232,7 @@ struct RemoteAccessTests {
                                   runner: TunnelRunner(binary: URL(filePath: "/usr/bin/true"), launch: { _ in }),
                                   authenticate: Sheet("oby-signin://done?state=s1&code=c1").run)
         defer { remote.stop() }
-        await remote.turnOn()
+        await remote.turnOn(with: .apple)
         #expect(remote.on)
         #expect(remote.problem == "Your account had 5 Macs with remote access, so “Old iMac”, the one used longest ago, was removed to make room.")
     }
