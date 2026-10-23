@@ -34,7 +34,10 @@ pub async fn start(jobs: &Arc<Jobs>, config: &Config, item: &Item) -> Result<Job
             format!("obid doesn't work in {repo:?}: there's nothing to start."),
         ));
     }
-    let file = format!("event-{}.md", item.id.trim_start_matches("ev-"));
+    let file = format!(
+        "event-{}.md",
+        item.id.strip_prefix("ev-").unwrap_or(&item.id)
+    );
     let quoted = format!("What it sent is quoted in .obi/inputs/{file}.");
     let (project, environment) = (text("project"), text("environment"));
     let (severity, ticket) = (text("severity"), text("ticket"));
@@ -129,13 +132,14 @@ pub fn render(event: &Value, nonce: &str) -> String {
     out.join("\n") + "\n"
 }
 
-/// `text` as an agent may get it, line by line: the secrets obid knows and the vault's taken out,
-/// and a line the secret scan still flags left out. Fails when the vault can't be read.
+/// `text` as an agent may get it: the secrets obid knows and the vault's taken out (one vault read
+/// for the whole text), then, line by line, a line the secret scan still flags left out. Fails
+/// when the vault can't be read.
 fn for_agent(text: &str) -> Result<String, String> {
-    let known = crate::secrets::known();
+    let clean = crate::vault::for_agent(&crate::secrets::known().redact(text))?;
     let mut kept = Vec::new();
-    for line in text.lines() {
-        let line = crate::vault::for_agent(&known.redact(line))?;
+    for line in clean.lines() {
+        let line = line.to_owned();
         if crate::scan::matches(&line).is_empty() {
             kept.push(line);
         } else {

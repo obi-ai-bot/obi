@@ -394,6 +394,19 @@ impl Reader {
         event
             .check(&self.peer.event_kinds)
             .map_err(|error| (code::INVALID_PARAMS, error.to_string()))?;
+        // A 0.1 plug-in works as it always did: the 0.2 fields aren't its to send.
+        let subject = &event.subject;
+        let newer = !event.data.text.is_empty()
+            || subject.project.is_some()
+            || subject.environment.is_some()
+            || subject.severity.is_some()
+            || subject.ticket.is_some();
+        if newer && self.peer.protocol == obi_plugin_api::PROTOCOL {
+            return Err((
+                code::INVALID_PARAMS,
+                "data.text and subject.project, environment, severity and ticket are obi-plugin/0.2's".into(),
+            ));
+        }
 
         let accepted = serde_json::json!({"accepted": true});
         let mut seen = lock(&self.peer.seen);

@@ -1701,7 +1701,8 @@ fn look_into_it_starts_an_investigation_with_the_event_quoted() {
         )
     };
 
-    // The vault can't be read: nothing starts, and the offer stays open.
+    // The vault can't be read: nothing starts, and the offer stays open. (The API's own vault gate
+    // answers this one; event_work's check is what a start that doesn't come through the API meets.)
     use std::os::unix::fs::PermissionsExt;
     let vault = obid.home.join("vault/secrets.json");
     std::fs::set_permissions(&vault, std::fs::Permissions::from_mode(0o644)).unwrap();

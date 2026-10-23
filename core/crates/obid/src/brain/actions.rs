@@ -965,7 +965,10 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
                 },
             )
         }
-        "permission" | "pluginEvent" => Owners::No,
+        "permission" => Owners::No,
+        // Dismissing an event is one-off; starting its work (Look into it, Fix it) is the owner's
+        // to confirm, as a GitHub offer's is (#1124).
+        "pluginEvent" if words == crate::sphere::inbox::DISMISS => Owners::No,
         // Saying no once to another Obi is one-off; accepting its request at all, remembering
         // either way, or answering its question in words (they leave for the other Obi) aren't.
         "obiRequest" if words == DECLINE => Owners::No,
@@ -1426,6 +1429,17 @@ mod tests {
         }
         let event = item("pluginEvent", "ev-x-1", "Build failed", &["Dismiss"]);
         assert_eq!(owners_call(&event, "Dismiss", None), Owners::No);
+        // Starting an event's work is never one-off: the owner confirms it.
+        let offer = item(
+            "pluginEvent",
+            "ev-x-2",
+            "Ticket assigned: ENG-1",
+            &["Fix it", "Dismiss"],
+        );
+        assert_eq!(
+            title(&owners_call(&offer, "Fix it", None)),
+            "Fix it: Ticket assigned: ENG-1"
+        );
         let request = item("obiRequest", "obi-1", "Review request from ernesto", &[]);
         assert_eq!(owners_call(&request, "Decline", None), Owners::No);
         let start = item("start", "start-1", "Fix", &["Start", "Cancel"]);
