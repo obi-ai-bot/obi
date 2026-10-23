@@ -32,6 +32,8 @@ export interface Env {
   MAX_ENDPOINTS: string;
   /// What every tunnel routes to on the Mac: the gateway, http://127.0.0.1:8810.
   GATEWAY: string;
+  /// The most sealed bytes kept for every Mac together (#1315), in MiB: a whole number.
+  QUEUE_TOTAL_MIB: string;
 
   // Secrets: `wrangler secret put`, or .dev.vars. Never in D1 and never logged.
   /// A Cloudflare API token with Cloudflare Tunnel: Edit on the account and DNS: Edit on the zone.

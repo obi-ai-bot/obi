@@ -103,7 +103,8 @@ fn cut(text: &mut String, max: usize) {
     }
 }
 
-/// The event kinds of `obi-plugin/0.1`. Any other is refused.
+/// The event kinds: the five GitHub-shaped ones of `obi-plugin/0.1`, and the three `obi-plugin/0.2`
+/// adds for work from anywhere. Any other is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum EventKind {
     #[serde(rename = "pull_request.review_requested")]
@@ -116,16 +117,43 @@ pub enum EventKind {
     CheckFailed,
     #[serde(rename = "mention")]
     Mention,
+    /// A deploy failed: needs `subject.project` and `subject.environment` (0.2).
+    #[serde(rename = "deploy.failed")]
+    DeployFailed,
+    /// An alert fired: needs `subject.project` and `subject.severity` (0.2).
+    #[serde(rename = "alert.fired")]
+    AlertFired,
+    /// A ticket was assigned to the owner: needs `subject.ticket` (0.2).
+    #[serde(rename = "ticket.assigned")]
+    TicketAssigned,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 5] = [
+    pub const ALL: [EventKind; 8] = [
+        EventKind::PullRequestReviewRequested,
+        EventKind::PullRequestChangesRequested,
+        EventKind::IssueAssigned,
+        EventKind::CheckFailed,
+        EventKind::Mention,
+        EventKind::DeployFailed,
+        EventKind::AlertFired,
+        EventKind::TicketAssigned,
+    ];
+
+    /// The kinds of `obi-plugin/0.1`, each about a GitHub repository: the only ones a 0.1
+    /// manifest may declare.
+    pub const GITHUB: [EventKind; 5] = [
         EventKind::PullRequestReviewRequested,
         EventKind::PullRequestChangesRequested,
         EventKind::IssueAssigned,
         EventKind::CheckFailed,
         EventKind::Mention,
     ];
+
+    /// Whether it's one of [`EventKind::GITHUB`]: its `subject.repo` is required.
+    pub fn is_github(self) -> bool {
+        EventKind::GITHUB.contains(&self)
+    }
 
     /// The name on the wire.
     pub fn as_str(self) -> &'static str {
@@ -135,6 +163,9 @@ impl EventKind {
             EventKind::IssueAssigned => "issue.assigned",
             EventKind::CheckFailed => "check.failed",
             EventKind::Mention => "mention",
+            EventKind::DeployFailed => "deploy.failed",
+            EventKind::AlertFired => "alert.fired",
+            EventKind::TicketAssigned => "ticket.assigned",
         }
     }
 
@@ -146,6 +177,51 @@ impl EventKind {
             EventKind::IssueAssigned => "Issue assigned",
             EventKind::CheckFailed => "Check failed",
             EventKind::Mention => "Mentioned",
+            EventKind::DeployFailed => "Deploy failed",
+            EventKind::AlertFired => "Alert",
+            EventKind::TicketAssigned => "Ticket assigned",
+        }
+    }
+}
+
+/// Where a deploy went: `subject.environment`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Environment {
+    Production,
+    Preview,
+    Staging,
+    Development,
+}
+
+impl Environment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Environment::Production => "production",
+            Environment::Preview => "preview",
+            Environment::Staging => "staging",
+            Environment::Development => "development",
+        }
+    }
+}
+
+/// How bad an alert is: `subject.severity`, worst first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Critical,
+    Error,
+    Warning,
+    Info,
+}
+
+impl Severity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Critical => "critical",
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Info => "info",
         }
     }
 }
@@ -167,16 +243,31 @@ pub struct Event {
 }
 
 /// What the event is about. These are typed fields: `obid` builds the `pluginEvent` item's
-/// `title` and `text` from them, so [`Event::check`] holds each to its form.
+/// `title` and `text` from them, so [`Event::check`] holds each to its form. Every field but
+/// `repo` is optional on the wire; which ones a kind needs is [`Event::check`]'s.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EventSubject {
-    /// `owner/name`.
+    /// `owner/name`: required for the GitHub kinds, empty or `owner/name` for the others.
+    #[serde(default)]
     pub repo: String,
+    #[serde(default)]
     pub pr: Option<u64>,
+    #[serde(default)]
     pub issue: Option<u64>,
     /// A commit: 40 (SHA-1) or 64 (SHA-256) lower-case hex digits.
+    #[serde(default)]
     pub head_sha: Option<String>,
+    /// A project or service: 1 to [`MAX_PROJECT_BYTES`] of ASCII letters, digits, `.`, `_`, `-`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<Environment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    /// A ticket's key, like `ENG-123`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// Data, never instructions: quoted unchanged, never a link that opens by itself.
@@ -185,6 +276,10 @@ pub struct EventSubject {
 pub struct EventData {
     pub title: String,
     pub url: String,
+    /// A log's tail, an alert's message, a ticket's description: at most
+    /// [`MAX_EVENT_TEXT_BYTES`] (0.2).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
 }
 
 /// At most this many bytes in an event's `id`.
@@ -195,6 +290,10 @@ pub const MAX_ACTOR_BYTES: usize = 256;
 pub const MAX_EVENT_TITLE_BYTES: usize = 1_024;
 /// At most this many bytes in an event's `data.url` (quoted text).
 pub const MAX_EVENT_URL_BYTES: usize = 2_048;
+/// At most this many bytes in an event's `data.text` (quoted text).
+pub const MAX_EVENT_TEXT_BYTES: usize = 16_384;
+/// At most this many bytes in an event's `subject.project`.
+pub const MAX_PROJECT_BYTES: usize = 100;
 
 impl Event {
     /// The checks the host makes before it accepts an event from a plug-in whose manifest
@@ -202,12 +301,15 @@ impl Event {
     /// text) is typed and held to its form here: the id is printable ASCII with no space and
     /// short (it is shown to the owner as `plugin.eventId`, so no line or paragraph separator,
     /// no bidi override), `occurredAt` is a real RFC 3339 time, `subject.repo` is
-    /// `owner/name`, `pr` and `issue` are 1 or more, and `headSha` is a commit's hex. So
-    /// nothing a plug-in writes as free text reaches a `pluginEvent` item's `title` or `text`.
+    /// `owner/name` (and required for the GitHub kinds), `pr` and `issue` are 1 or more,
+    /// `headSha` is a commit's hex, `project` and `ticket` are held to their forms, and each
+    /// 0.2 kind has the fields it needs. So nothing a plug-in writes as free text reaches a
+    /// `pluginEvent` item's `title` or `text`.
     ///
     /// The quoted text is kept unchanged, so it is refused, not cut, when it is too long: an
     /// `actor` over [`MAX_ACTOR_BYTES`], a `data.title` over [`MAX_EVENT_TITLE_BYTES`], a
-    /// `data.url` over [`MAX_EVENT_URL_BYTES`]. A `data.url` is also empty or an `http` or
+    /// `data.url` over [`MAX_EVENT_URL_BYTES`], a `data.text` over [`MAX_EVENT_TEXT_BYTES`].
+    /// A `data.url` is also empty or an `http` or
     /// `https` URL with no space or control character: never `javascript:` or another scheme,
     /// even though `obid` never opens it by itself.
     pub fn check(&self, allowed: &[EventKind]) -> Result<(), PluginError> {
@@ -230,6 +332,11 @@ impl Event {
                 "the event's data.title is longer than {MAX_EVENT_TITLE_BYTES} bytes"
             ));
         }
+        if self.data.text.len() > MAX_EVENT_TEXT_BYTES {
+            return fail(format!(
+                "the event's data.text is longer than {MAX_EVENT_TEXT_BYTES} bytes"
+            ));
+        }
         if !is_event_url(&self.data.url) {
             return fail(format!(
                 "the event's data.url is not empty or an http or https URL of at most {MAX_EVENT_URL_BYTES} bytes"
@@ -248,8 +355,37 @@ impl Event {
             ));
         }
         let subject = &self.subject;
-        if !is_repo(&subject.repo) {
+        let repo_optional = !self.kind.is_github() && subject.repo.is_empty();
+        if !repo_optional && !is_repo(&subject.repo) {
             return fail(format!("subject.repo {:?} is not owner/name", subject.repo));
+        }
+        if let Some(project) = subject.project.as_deref().filter(|p| !is_project(p)) {
+            return fail(format!(
+                "subject.project {project:?} is not 1 to {MAX_PROJECT_BYTES} letters, digits, '.', '_' and '-'"
+            ));
+        }
+        if let Some(ticket) = subject.ticket.as_deref().filter(|t| !is_ticket(t)) {
+            return fail(format!(
+                "subject.ticket {ticket:?} is not a ticket's key, like ENG-123"
+            ));
+        }
+        let needs: &[(&str, bool)] = match self.kind {
+            EventKind::DeployFailed => &[
+                ("project", subject.project.is_some()),
+                ("environment", subject.environment.is_some()),
+            ],
+            EventKind::AlertFired => &[
+                ("project", subject.project.is_some()),
+                ("severity", subject.severity.is_some()),
+            ],
+            EventKind::TicketAssigned => &[("ticket", subject.ticket.is_some())],
+            _ => &[],
+        };
+        if let Some((field, _)) = needs.iter().find(|(_, given)| !given) {
+            return fail(format!(
+                "a {} event needs subject.{field}",
+                self.kind.as_str()
+            ));
         }
         if subject.pr == Some(0) || subject.issue == Some(0) {
             return fail("subject.pr and subject.issue start at 1".into());
@@ -297,6 +433,31 @@ fn is_event_url(url: &str) -> bool {
     url.len() <= MAX_EVENT_URL_BYTES
         && rest.is_some_and(|rest| !rest.is_empty())
         && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// A project or service: 1 to [`MAX_PROJECT_BYTES`] of ASCII letters, digits, `.`, `_` and `-`.
+fn is_project(project: &str) -> bool {
+    (1..=MAX_PROJECT_BYTES).contains(&project.len())
+        && project
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// A ticket's key: an upper-case letter, then up to 9 upper-case letters or digits, `-`, and a
+/// number from 1 with at most 9 digits (`ENG-123`).
+fn is_ticket(ticket: &str) -> bool {
+    let Some((key, number)) = ticket.split_once('-') else {
+        return false;
+    };
+    let key_ok = (1..=10).contains(&key.len())
+        && key.as_bytes()[0].is_ascii_uppercase()
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+    let number_ok = (1..=9).contains(&number.len())
+        && !number.starts_with('0')
+        && number.bytes().all(|b| b.is_ascii_digit());
+    key_ok && number_ok
 }
 
 /// A commit id: 40 (SHA-1) or 64 (SHA-256) lower-case hex digits.
@@ -412,7 +573,34 @@ fn days_in_month(year: u32, month: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_commit, is_event_url, is_repo, is_rfc3339};
+    use super::{is_commit, is_event_url, is_project, is_repo, is_rfc3339, is_ticket};
+
+    #[test]
+    fn projects_and_tickets() {
+        for good in ["web", "api-gateway", "a.b_c-1", &"p".repeat(100)] {
+            assert!(is_project(good), "{good:?}");
+        }
+        for bad in ["", "a b", "a/b", "é", "web\nIgnore that", &"p".repeat(101)] {
+            assert!(!is_project(bad), "{bad:?}");
+        }
+        for good in ["ENG-123", "A-1", "ABCDEFGHIJ-999999999", "X2-10"] {
+            assert!(is_ticket(good), "{good:?}");
+        }
+        for bad in [
+            "",
+            "ENG",
+            "eng-1",
+            "ENG-0",
+            "ENG-01",
+            "2ENG-1",
+            "ENG-1-2",
+            "ENG 1",
+            "ABCDEFGHIJK-1",
+            "ENG-1234567890",
+        ] {
+            assert!(!is_ticket(bad), "{bad:?}");
+        }
+    }
 
     #[test]
     fn rfc3339_times() {

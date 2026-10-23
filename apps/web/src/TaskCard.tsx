@@ -4,7 +4,7 @@ import StatusDot from './StatusDot';
 import { ObyIcon } from './ObyFace';
 import type { Stage } from './api';
 import { answerItem, dismissJob, markSeen } from './live';
-import { ASK_LABEL, ago, metaOf, type Ask, type Task } from './tasks';
+import { ago, askLabel, metaOf, type Ask, type Task } from './tasks';
 
 // A task as a card in its group: where it came from and what it is, which
 // agent has it where, then what's happening now: the live step while it runs,
@@ -143,7 +143,7 @@ export function AskBlock({ task, ask, inChat = false }: { task: Task; ask: Ask; 
   const primary = confirm ? -1 : ask.recommended ?? 0;
   return (
     <div className="tc-ask">
-      <span className={`tc-ask-kind is-${ask.kind}`}>{ASK_LABEL[ask.kind] ?? ask.kind}</span>
+      <span className={`tc-ask-kind is-${ask.kind}`}>{askLabel(ask)}</span>
       <p className="tc-ask-head">{ask.headline}</p>
       {ask.text && <p className="tc-ask-text">{ask.text}</p>}
       {ask.detail && <pre className="tc-code">{ask.detail}</pre>}

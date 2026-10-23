@@ -136,7 +136,7 @@ pub(crate) fn is_login(login: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-fn cut(text: &str, most: usize) -> String {
+pub(crate) fn cut(text: &str, most: usize) -> String {
     text.chars().take(most).collect()
 }
 
@@ -779,21 +779,12 @@ pub async fn start_work(
             format!("GitHub's text for {repo} #{number} couldn't be read: {why}"),
         )
     })?;
-    let folder = config
-        .home
-        .join("attachments/github")
-        .join(uuid::Uuid::new_v4().simple().to_string());
-    let path = folder.join(&file);
-    crate::store::make_private_dir(&config.home.join("attachments"))
-        .and_then(|()| crate::store::make_private_dir(&config.home.join("attachments/github")))
-        .and_then(|()| crate::store::make_private_dir(&folder))
-        .and_then(|()| crate::store::write_private(&path, quoted.as_bytes()))
-        .map_err(|e| {
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("obid couldn't keep GitHub's text: {e}"),
-            )
-        })?;
+    let path = keep_attachment(config, "github", &file, &quoted).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("obid couldn't keep GitHub's text: {e}"),
+        )
+    })?;
     let new = NewJob {
         repo: repo.into(),
         kind: kind.into(),
@@ -810,6 +801,24 @@ pub async fn start_work(
         .create(new)
         .map_err(|refused| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, refused.0))?;
     Ok((job, true))
+}
+
+/// Keeps `text` as `file` in a folder of its own under `home/attachments/<what>/` (0600 in 0700
+/// folders): a job's attachment, which obid copies into its worktree's `.obi/inputs/`.
+pub(crate) fn keep_attachment(
+    config: &Config,
+    what: &str,
+    file: &str,
+    text: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    let kind = config.home.join("attachments").join(what);
+    let folder = kind.join(uuid::Uuid::new_v4().simple().to_string());
+    let path = folder.join(file);
+    crate::store::make_private_dir(&config.home.join("attachments"))?;
+    crate::store::make_private_dir(&kind)?;
+    crate::store::make_private_dir(&folder)?;
+    crate::store::write_private(&path, text.as_bytes())?;
+    Ok(path)
 }
 
 /// What people wrote on `repo` `number` on GitHub, fenced as data: its title, description,

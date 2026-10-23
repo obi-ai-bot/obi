@@ -965,7 +965,15 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
                 },
             )
         }
-        "permission" | "pluginEvent" => Owners::No,
+        // "…, and from now on for <project>" saves a standing rule (#1314): it widens what Oby
+        // does with no tap, so only the owner's Confirm carries it out.
+        "pluginEvent" if words.starts_with(crate::rules::FROM_NOW_ON) => Owners::Refuse(
+            "a standing rule is the owner's to ask for: answer Look into it, and propose the rule with oby_rule.".into(),
+        ),
+        "permission" => Owners::No,
+        // Dismissing an event is one-off; starting its work (Look into it, Fix it) is the owner's
+        // to confirm, as a GitHub offer's is (#1124).
+        "pluginEvent" if words == crate::sphere::inbox::DISMISS => Owners::No,
         // Saying no once to another Obi is one-off; accepting its request at all, remembering
         // either way, or answering its question in words (they leave for the other Obi) aren't.
         "obiRequest" if words == DECLINE => Owners::No,
@@ -1426,6 +1434,32 @@ mod tests {
         }
         let event = item("pluginEvent", "ev-x-1", "Build failed", &["Dismiss"]);
         assert_eq!(owners_call(&event, "Dismiss", None), Owners::No);
+        // A standing rule is never the brain's to ask for (#1314): it proposes one with oby_rule.
+        let rule = item(
+            "pluginEvent",
+            "ev-x-3",
+            "Alert: api (critical)",
+            &[
+                "Look into it",
+                "Look into it, and from now on for api",
+                "Dismiss",
+            ],
+        );
+        assert!(matches!(
+            owners_call(&rule, "Look into it, and from now on for api", None),
+            Owners::Refuse(_)
+        ));
+        // Starting an event's work is never one-off: the owner confirms it.
+        let offer = item(
+            "pluginEvent",
+            "ev-x-2",
+            "Ticket assigned: ENG-1",
+            &["Fix it", "Dismiss"],
+        );
+        assert_eq!(
+            title(&owners_call(&offer, "Fix it", None)),
+            "Fix it: Ticket assigned: ENG-1"
+        );
         let request = item("obiRequest", "obi-1", "Review request from ernesto", &[]);
         assert_eq!(owners_call(&request, "Decline", None), Owners::No);
         let start = item("start", "start-1", "Fix", &["Start", "Cancel"]);

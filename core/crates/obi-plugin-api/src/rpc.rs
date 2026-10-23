@@ -238,7 +238,7 @@ pub struct Empty {}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitializeParams {
-    /// Always [`crate::PROTOCOL`].
+    /// The protocol the plug-in's manifest names (one of [`crate::PROTOCOLS`]).
     pub protocol: String,
     pub obid: ObidInfo,
     pub plugin: PluginInfo,
@@ -263,7 +263,7 @@ pub struct PluginInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitializeResult {
-    /// Always [`crate::PROTOCOL`].
+    /// The protocol `obid` sent in `initialize`: its manifest's.
     pub protocol: String,
     /// The kinds it serves now: a subset of its manifest's.
     pub kinds: Vec<Kind>,

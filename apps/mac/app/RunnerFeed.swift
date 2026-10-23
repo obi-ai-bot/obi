@@ -66,6 +66,8 @@ final class RunnerFeed {
     var tetrix: TetrixStatus?
     /// obid's Slack and its watcher (Settings › Connectors), read there and kept by their events.
     var slack: SlackStatus?
+    /// obid's Sentry as its last `sentry` event said (Settings › Connectors keeps the repositories).
+    var sentry: SentryStatus?
     var watch: WatchStatus?
     /// The watcher's and the channel listener's items waiting in the inbox (Engine's inbox doesn't
     /// know their kinds), oldest first.
@@ -140,7 +142,11 @@ final class RunnerFeed {
     /// window hides the jobs that finished by then, the runner's and this Mac's alike.
     private(set) var clearedAt: Date?
     /// How the line to the runner is: Settings › Runner says it.
-    private(set) var connection = RunnerConnection.connecting
+    private(set) var connection = RunnerConnection.connecting {
+        didSet { if connection == .live && oldValue != .live { onLive() } }
+    }
+    /// The runner answers again (or for the first time): kept hook deliveries go to it (#1315).
+    @ObservationIgnored var onLive: () -> Void = {}
     /// The runner didn't answer the last try; the feed keeps trying.
     var down: Bool { if case .offline = connection { true } else { false } }
     /// The model and effort the runner's jobs use, as it last said (Settings › Models).
@@ -455,6 +461,7 @@ final class RunnerFeed {
                     case .tetrix(let status): tetrix = status
                     case .watchNotice(let notice): take(notice)
                     case .slack(let status): slack = status
+                    case .sentry(let status): sentry = status
                     case .watch(let status): watch = status
                     case .cleanup(let measured): cleanup = measured
                     // obid names each turn's, step's and word's conversation: the window shows one (#493).

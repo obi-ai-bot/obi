@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chipOf, getGroupBy, groupsOf, markOf, readGroupBy, setGroupBy, shownOf, tasksFrom, typeById, typesOn } from '../tasks';
+import { askLabel, chipOf, getGroupBy, groupsOf, markOf, readGroupBy, setGroupBy, shownOf, tasksFrom, typeById, typesOn } from '../tasks';
 import { item, job, state, storage } from './fixtures';
 
 // Work grouped by kind (#496), as Sangam's design has it: Review PR, Issues, one group per teammate
@@ -63,6 +63,22 @@ describe('by type', () => {
   it('a decision from neither a job nor a teammate goes to Inbox, last', () => {
     const s = state({ jobs: { t: job({ id: 't' }) }, inbox: [item({ id: 'p', job: '', kind: 'pluginEvent', title: 'A plug-in event' })] });
     expect(typesOn(s).map((t) => t.id)).toEqual(['tasks', 'inbox']);
+    // An alert to look into is Issues' work, labelled by its tool (#1127, #1311, #1312); a plug-in's by its id.
+    const alerts = state({ inbox: [
+      item({ id: 'a', job: '', kind: 'pluginEvent', title: 'Sentry: API-7', options: ['Look into it', 'Dismiss'], plugin: { id: 'sentry' } }),
+      item({ id: 'b', job: '', kind: 'pluginEvent', title: 'Alert: api (critical)', options: ['Look into it', 'Dismiss'], plugin: { id: 'alertmanager' } }),
+      item({ id: 'c', job: '', kind: 'pluginEvent', title: 'Alert: x (critical)', options: ['Dismiss'], plugin: { id: 'alerts' } }),
+    ] });
+    expect(typesOn(alerts).map((t) => t.id)).toEqual(['issues', 'inbox']);
+    expect(askLabel({ kind: 'pluginEvent', source: 'sentry' })).toBe('Sentry');
+    expect(askLabel({ kind: 'pluginEvent', source: 'alertmanager' })).toBe('Prometheus');
+    expect(askLabel({ kind: 'pluginEvent', source: 'alerts' })).toBe('From the alerts plug-in');
+    expect(askLabel({ kind: 'pluginEvent' })).toBe('From a plug-in');
+    // Put off, an offer is the inbox's, as on the Mac.
+    const later = state({ inbox: [
+      item({ id: 'd', job: '', kind: 'pluginEvent', title: 'Sentry: API-8', options: ['Look into it', 'Dismiss'], plugin: { id: 'sentry' }, state: 'later' }),
+    ] });
+    expect(typesOn(later).map((t) => t.id)).toEqual(['inbox']);
   });
 
   it('a group’s count is its open tasks; its orange dot counts what needs you', () => {

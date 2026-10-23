@@ -1,5 +1,5 @@
 //! Obi's plug-in boundary as types: the kinds, the manifest (`obi-plugin.json`), the wire
-//! protocol `obi-plugin/0.1` and the traits a plug-in is seen through (docs/ARCHITECTURE.md,
+//! protocols `obi-plugin/0.1` and `obi-plugin/0.2` and the traits a plug-in is seen through (docs/ARCHITECTURE.md,
 //! section 5). The host (`obi-plugin-host`) adapts out-of-process plug-ins to these traits;
 //! built-in plug-ins may implement them in process later.
 //!
@@ -23,14 +23,20 @@ pub use manifest::{
     McpServerSpec, RunSpec,
 };
 pub use types::{
-    ContextItem, ContextJob, ContextRequest, DEFAULT_MAX_BYTES, Event, EventData, EventKind,
-    EventSubject, MAX_ACTOR_BYTES, MAX_CONTEXT_ITEMS, MAX_EVENT_ID_BYTES, MAX_EVENT_TITLE_BYTES,
-    MAX_EVENT_URL_BYTES, MAX_SOURCE_BYTES, MAX_TITLE_BYTES, MAX_URI_BYTES, PluginEvent,
-    PluginState, PluginStatus, Purpose, limit_items,
+    ContextItem, ContextJob, ContextRequest, DEFAULT_MAX_BYTES, Environment, Event, EventData,
+    EventKind, EventSubject, MAX_ACTOR_BYTES, MAX_CONTEXT_ITEMS, MAX_EVENT_ID_BYTES,
+    MAX_EVENT_TEXT_BYTES, MAX_EVENT_TITLE_BYTES, MAX_EVENT_URL_BYTES, MAX_PROJECT_BYTES,
+    MAX_SOURCE_BYTES, MAX_TITLE_BYTES, MAX_URI_BYTES, PluginEvent, PluginState, PluginStatus,
+    Purpose, Severity, limit_items,
 };
 
-/// The protocol both the manifest and the wire speak.
+/// The first protocol: the manifest and the wire speak it, with the five GitHub event kinds.
 pub const PROTOCOL: &str = "obi-plugin/0.1";
+/// The second: the same wire, plus the event kinds and fields for work from anywhere
+/// ([`EventKind::DeployFailed`], [`EventKind::AlertFired`], [`EventKind::TicketAssigned`]).
+pub const PROTOCOL_0_2: &str = "obi-plugin/0.2";
+/// The protocols a manifest may name; a plug-in speaks its manifest's on the wire.
+pub const PROTOCOLS: [&str; 2] = [PROTOCOL, PROTOCOL_0_2];
 
 /// What a plug-in gives (docs/ARCHITECTURE.md 5.1). On the wire and in the manifest: `context`,
 /// `events`, `agent-mcp`.

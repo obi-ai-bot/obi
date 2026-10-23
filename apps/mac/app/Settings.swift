@@ -44,7 +44,7 @@ struct SettingsPane: View {
             if let remote = model.remote { RemoteAccessSettingsView(remote: remote) }
         case .accounts: AccountsSettingsView(store: store, feed: feed)
         case .models: ModelsSettingsView(store: store, feed: feed)
-        case .connectors: ConnectorsSettingsView(store: store, feed: feed)
+        case .connectors: ConnectorsSettingsView(store: store, feed: feed, remote: model.remote)
         case .memory: MemorySettingsView(runner: feed.runner)
         case .sphere: SphereSettingsView(feed: feed)
         case .vault: VaultSettingsView(vault: model.vault ?? .shared)
@@ -776,6 +776,190 @@ struct AccountUsageRow<Buttons: View>: View {
     }
 }
 
+/// A monitoring tool in a sheet's `item`.
+private struct IdentifiedTool: Identifiable {
+    let tool: AlertingTool
+    var id: String { tool.id }
+}
+
+/// Connect… on Prometheus or Grafana (#1311): the repository its alerts are about and the label
+/// that names the project, then the address and secret to paste into the tool, shown once.
+struct AlertHookSheet: View {
+    let tool: AlertingTool
+    let repos: [String]
+    /// Remote access is on, with this Mac's hostname: the alerts come through its tunnel.
+    let remoteOn: Bool
+    let openRemote: () -> Void
+    let make: (_ repo: String, _ label: String) async throws -> (Runner.HookRow, String)
+    /// PagerDuty's two steps: an address first, then the secret PagerDuty shows; cancelled between
+    /// them, the address goes again.
+    var reserve: () async throws -> ControlPlane.Hook = { throw ControlPlane.Failure(message: "Not here.", status: 0) }
+    var finish: (_ address: ControlPlane.Hook, _ repo: String, _ secret: String) async throws -> Void = { _, _, _ in }
+    var abandon: (_ address: ControlPlane.Hook) async -> Void = { _ in }
+    let done: () -> Void
+    @State private var repo = ""
+    @State private var label = "service"
+    @State private var made: (url: String, secret: String, label: String)?
+    @State private var reserved: ControlPlane.Hook?
+    @State private var pasted = ""
+    @State private var busy = false
+    @State private var problem: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Connect \(tool.name)").font(Tokens.font(Tokens.textLg, .semibold))
+            if let made {
+                Text("Paste these into \(tool.name) now: Oby shows the secret only this once, and keeps it only in obid's vault.")
+                    .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fixedSize(horizontal: false, vertical: true)
+                ScrollView {
+                    Text(tool.steps(url: made.url, secret: made.secret, label: made.label))
+                        .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 260)
+                HStack {
+                    Button("Copy Address") { copy(made.url) }
+                    Button("Copy Secret") { copy(made.secret) }
+                    Spacer()
+                    Button("Done", action: done).keyboardShortcut(.defaultAction)
+                }
+            } else if let reserved {
+                ScrollView {
+                    Text(tool.steps(url: reserved.url.absoluteString, secret: ""))
+                        .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 220)
+                HStack {
+                    Button("Copy Address") { copy(reserved.url.absoluteString) }
+                    Spacer()
+                }
+                SecureField("PagerDuty's signing secret", text: $pasted)
+                if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger) }
+                HStack {
+                    Spacer()
+                    // The address goes as the sheet closes (`onDisappear`), unless Finish kept it.
+                    Button("Cancel", role: .cancel, action: done).disabled(busy)
+                    Button("Finish") {
+                        busy = true
+                        Task {
+                            defer { busy = false }
+                            do {
+                                try await finish(reserved, repo, pasted.trimmingCharacters(in: .whitespacesAndNewlines))
+                                pasted = ""
+                                self.reserved = nil
+                                done()
+                            } catch {
+                                problem = error.localizedDescription
+                            }
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(busy || pasted.trimmingCharacters(in: .whitespacesAndNewlines).count < 32)
+                }
+            } else if !remoteOn {
+                Text("\(tool.name)'s alerts reach this Mac through Remote access, so it needs to be on first.")
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Spacer()
+                    Button("Cancel", role: .cancel, action: done)
+                    Button("Open Remote Access", action: openRemote).keyboardShortcut(.defaultAction)
+                }
+            } else {
+                Text("Critical and error alerts become cards in your inbox; Look into it starts an investigate job in this repository, with the alert quoted for its agent.")
+                    .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fixedSize(horizontal: false, vertical: true)
+                Picker("Repository", selection: $repo) {
+                    Text("Choose…").tag("")
+                    ForEach(repos, id: \.self) { Text($0).tag($0) }
+                }
+                if tool.asksLabel { TextField("Label that names the project", text: $label) }
+                if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger) }
+                HStack {
+                    Spacer()
+                    // Not while it runs: the hook it makes would be left with a secret nobody saw.
+                    Button("Cancel", role: .cancel, action: done).disabled(busy)
+                    Button(tool.secretFromTool ? "Continue" : "Connect") {
+                        busy = true
+                        Task {
+                            defer { busy = false }
+                            do {
+                                if tool.secretFromTool {
+                                    reserved = try await reserve()
+                                } else {
+                                    let named = label.trimmingCharacters(in: .whitespaces)
+                                    let (row, secret) = try await make(repo, named)
+                                    made = (row.url, secret, named)
+                                }
+                                problem = nil
+                            } catch {
+                                problem = error.localizedDescription
+                            }
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(busy || repo.isEmpty || label.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 560)
+        .interactiveDismissDisabled(busy)
+        // However it closes (Cancel, Escape, the window), an address obid never got goes again.
+        .onDisappear { if let reserved { Task { await abandon(reserved) } } }
+    }
+
+    private func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
+/// Sentry's projects (#1127): a switch each to follow it, and the repository its errors are looked
+/// into in. A project with no repository still offers its errors, with only Dismiss.
+struct SentryProjectsSheet: View {
+    let status: SentryStatus
+    var problem: String?
+    let change: (_ slug: String, _ change: Runner.SentryProjectChange) -> Void
+    let done: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Sentry projects").font(Tokens.font(Tokens.textLg, .semibold))
+            Text("Oby reads the projects you follow every 5 minutes. A new error, or one that escalates or comes back, arrives in your inbox; Look into it starts an investigate job in the project's repository, with the stack trace and never your users' data.")
+                .font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.muted).fixedSize(horizontal: false, vertical: true)
+            if status.projects.isEmpty {
+                Text("Sentry lists no project in \(status.org ?? "this organization").").foregroundStyle(Tokens.muted)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(status.projects) { project in
+                        HStack(spacing: 12) {
+                            Toggle(project.name, isOn: Binding(get: { project.follow }, set: { change(project.slug, .follow($0)) }))
+                                .toggleStyle(.switch)
+                            Spacer()
+                            Picker("Repository", selection: Binding(get: { project.repo ?? "" },
+                                                                   set: { change(project.slug, .repo($0.isEmpty ? nil : $0)) })) {
+                                Text("No repository").tag("")
+                                ForEach(status.repos, id: \.self) { Text($0).tag($0) }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: 240)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 320)
+            if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger) }
+            HStack {
+                Spacer()
+                Button("Done", action: done).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+    }
+}
+
 /// Settings › Connectors (#498), as Sangam's SettingsView.tsx `Connectors`: a search, then Connected and
 /// Available, one row per service with its brand's mark, its name and a line on it, and at the right
 /// "Connected" or its button (apps/mac/app/Connectors.swift). How it's signed in is the row's tooltip;
@@ -783,6 +967,9 @@ struct AccountUsageRow<Buttons: View>: View {
 struct ConnectorsSettingsView: View {
     let store: AccountStore
     let feed: RunnerFeed
+    /// Remote access: a monitoring tool's hook is made with this Mac's key, and its alerts come
+    /// through the tunnel (#1311).
+    var remote: RemoteAccess? = nil
     @Environment(\.openSettingsPage) private var openSettings
     @State private var query = ""
     /// What the runner lists besides its status, once it answers, and each list it couldn't read.
@@ -806,6 +993,15 @@ struct ConnectorsSettingsView: View {
     @State private var botToken = ""
     /// The app-level token, for live channels (Socket Mode): optional.
     @State private var appToken = ""
+    /// Connect… on Sentry asks for its address, the organization and a token, cleared once sent.
+    @State private var askingSentry = false
+    @State private var sentryURL = SentryStatus.defaultURL
+    @State private var sentryOrg = ""
+    @State private var sentryToken = ""
+    /// Projects… on Sentry: which are followed, and where each is looked into.
+    @State private var showingSentryProjects = false
+    /// Connect… on a monitoring tool: its obid source, while its sheet is up.
+    @State private var alerting: AlertingTool?
 
     var body: some View {
         let groups = Connectors.groups(list, query: query)
@@ -877,6 +1073,36 @@ struct ConnectorsSettingsView: View {
         } message: {
             Text("Your workspace's Oby app's tokens, from api.slack.com/apps › OAuth & Permissions › OAuth Tokens, and its app-level token (Basic Information) for live channels. obid checks them with Slack and keeps them in its vault; this Mac doesn't keep them.")
         }
+        .alert("Connect Sentry", isPresented: $askingSentry) {
+            TextField("Sentry's address", text: $sentryURL, prompt: Text(SentryStatus.defaultURL))
+            TextField("Organization", text: $sentryOrg, prompt: Text("your-org"))
+            SecureField("Token", text: $sentryToken, prompt: Text("sntryu_…"))
+            Button("Connect") { connectSentry(row: "sentry") }
+                .disabled(!SentryStatus.isURL(sentryURL) || !SentryStatus.isOrg(sentryOrg) || !SentryStatus.isToken(sentryToken))
+            Button("Cancel", role: .cancel) { sentryToken = "" }
+        } message: {
+            Text("Sentry's address (https://sentry.io, or https://de.sentry.io in the EU), your organization's slug, and a token with only org:read, project:read and event:read (Sentry › Settings › Account › API › Personal Tokens). obid checks it only reads and keeps it in its vault; this Mac doesn't keep it.")
+        }
+        .sheet(item: Binding(get: { alerting.map(IdentifiedTool.init) }, set: { alerting = $0?.tool })) { shown in
+            AlertHookSheet(tool: shown.tool, repos: lists.repos, remoteOn: remote?.on == true && remote?.hostname != nil,
+                           openRemote: { alerting = nil; openSettings(.remote) },
+                           make: { repo, label in try await makeHook(shown.tool, repo: repo, label: label) },
+                           reserve: { try await reserveHook() },
+                           finish: { address, repo, secret in try await finishHook(shown.tool, address, repo: repo, secret: secret) },
+                           abandon: { address in await abandonHook(address) },
+                           done: { alerting = nil })
+        }
+        .sheet(isPresented: $showingSentryProjects) {
+            SentryProjectsSheet(status: lists.sentry ?? SentryStatus(), problem: problems["sentry-projects"],
+                                change: { slug, change in setSentryProject(slug, change) },
+                                done: { showingSentryProjects = false })
+        }
+        // obid signed Sentry out, or a read went wrong: the row says so; the event leaves out `repos`.
+        .onChange(of: feed.sentry) { _, told in
+            guard var told, lists.sentry != nil else { return }
+            told.repos = lists.sentry?.repos ?? []
+            lists.sentry = told
+        }
         .alert("Connect Tetrix", isPresented: Binding(get: { asking != nil }, set: { if !$0 { asking = nil } })) {
             TextField("MCP URL", text: $url, prompt: Text("https://"))
             Button("Connect") {
@@ -899,7 +1125,7 @@ struct ConnectorsSettingsView: View {
         let runner = (feed.runner == nil && !staged) || feed.connection != .live ? nil : Connectors.RunnerState(
             name: feed.name, local: feed.local, accounts: feed.accounts, github: feed.github, checks: feed.checkRuns,
             gitHubLogin: lists.gitHub, plugins: lists.plugins, connections: lists.connections, tetrix: feed.tetrix,
-            slack: feed.slack, watch: feed.watch)
+            slack: feed.slack, watch: feed.watch, sentry: lists.sentry, hooks: lists.hooks)
         let accounts = Connectors.accounts(mac: store.accounts, runner: runner?.accounts, local: feed.local,
                                            hasRunner: feed.runner != nil || staged)
         return Connectors.list(accounts: accounts, runner: runner)
@@ -991,7 +1217,16 @@ struct ConnectorsSettingsView: View {
     /// A button: what takes something away asks first; signing in or out opens Terminal.
     private func perform(_ action: Connector.Action, _ connector: Connector) {
         switch action {
-        case .disablePlugin, .disconnect, .disconnectTetrix, .disconnectSlack: confirming = connector
+        case .disablePlugin, .disconnect, .disconnectTetrix, .disconnectSlack, .disconnectSentry: confirming = connector
+        case .connectSentry:
+            (sentryURL, sentryOrg, sentryToken) = (lists.sentry?.url ?? SentryStatus.defaultURL, lists.sentry?.org ?? "", "")
+            askingSentry = true
+        case .sentryProjects:
+            problems["sentry-projects"] = nil
+            showingSentryProjects = true
+        case .connectAlerts(let source):
+            alerting = AlertingTool.all.first { $0.source == source }
+        case .disconnectAlerts: confirming = connector
         case .connectSlack:
             (userToken, botToken, appToken) = ("", "", "")
             askingSlack = true
@@ -1045,6 +1280,33 @@ struct ConnectorsSettingsView: View {
                 if let status = try? await runner.tetrix() { feed.tetrix = status }
             }
         case .disconnectSlack: disconnectSlack(row: connector.id)
+        case .disconnectAlerts(let id):
+            guard feed.local, let runner = feed.runner, let remote else { return }
+            Task {
+                busy = true
+                defer { busy = false }
+                do {
+                    try await HookSetup.remove(id: id, plane: remote.plane, signer: try remote.signer(), obid: runner)
+                    problems[connector.id] = nil
+                } catch {
+                    problems[connector.id] = error.localizedDescription
+                }
+                lists.hooks = try? await runner.hooksIfAny()
+            }
+        case .disconnectSentry:
+            guard feed.local, let runner = feed.runner else { return }
+            Task {
+                busy = true
+                defer { busy = false }
+                do {
+                    try await runner.disconnectSentry()
+                    lists.sentry?.connected = false
+                    problems[connector.id] = nil
+                } catch {
+                    problems[connector.id] = error.localizedDescription
+                }
+                if let status = try? await runner.sentry() { lists.sentry = status }
+            }
         case .disconnect(let name):
             guard let runner = feed.runner else { return }
             Task {
@@ -1074,6 +1336,10 @@ struct ConnectorsSettingsView: View {
             return "\(feed.local ? "obid" : feed.name) forgets its Tetrix login, and agents on every account stop getting Tetrix's tools."
         case .disconnectSlack:
             return "obid forgets its Slack login, and the watcher reads only GitHub until you connect Slack again."
+        case .disconnectSentry:
+            return "obid forgets its Sentry token, and Sentry's errors stop reaching your inbox until you connect it again."
+        case .disconnectAlerts:
+            return "Its address stops working and obid forgets its secret: \(connector.name)'s alerts stop reaching Oby until you connect it again, and set it up there again."
         default:
             return ""
         }
@@ -1193,6 +1459,75 @@ struct ConnectorsSettingsView: View {
                 problems[row] = error.localizedDescription
             }
             if let watch = try? await runner.watch() { feed.watch = watch }
+        }
+    }
+
+    /// Gives obid Sentry's address, the organization and the token typed, then forgets the token
+    /// here: obid checks it only reads and says why when it doesn't take it. Connected, Projects… opens.
+    private func connectSentry(row: String) {
+        let (url, org, token) = (sentryURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                                 sentryOrg.trimmingCharacters(in: .whitespacesAndNewlines),
+                                 sentryToken.trimmingCharacters(in: .whitespacesAndNewlines))
+        sentryToken = ""
+        guard feed.local, let runner = feed.runner else { return }
+        Task {
+            busy = true
+            defer { busy = false }
+            do {
+                lists.sentry = try await runner.connectSentry(url: url, org: org, token: token)
+                problems[row] = nil
+                showingSentryProjects = true
+            } catch {
+                problems[row] = error.localizedDescription
+            }
+        }
+    }
+
+    /// Makes a monitoring tool's hook: its address at the control plane (this Mac's key), then obid's
+    /// registry with a new secret, which the sheet shows once. The row then says Connected.
+    private func makeHook(_ tool: AlertingTool, repo: String, label: String) async throws -> (Runner.HookRow, String) {
+        guard let runner = feed.runner, let remote else { throw ControlPlane.Failure(message: "Turn on Remote access first.", status: 0) }
+        let secret = HookSetup.newSecret()
+        let taken = Set((lists.hooks ?? []).map(\.name))
+        let name = ([tool.id] + (2...9).map { "\(tool.id)-\($0)" }).first { !taken.contains($0) } ?? "\(tool.id)-\(Int.random(in: 10...99))"
+        let row = try await HookSetup.make(name: name, source: tool.source, repo: repo, secret: secret,
+                                           projectLabel: label == "service" ? nil : label,
+                                           plane: remote.plane, signer: try remote.signer(), obid: runner)
+        lists.hooks = (try? await runner.hooksIfAny()) ?? lists.hooks
+        return (row, secret)
+    }
+
+    /// PagerDuty's first step: an address at the control plane, to paste into PagerDuty.
+    private func reserveHook() async throws -> ControlPlane.Hook {
+        guard let remote else { throw ControlPlane.Failure(message: "Turn on Remote access first.", status: 0) }
+        return try await remote.plane.createHook(try remote.signer())
+    }
+
+    /// Its second: obid keeps the hook with the secret PagerDuty showed.
+    private func finishHook(_ tool: AlertingTool, _ address: ControlPlane.Hook, repo: String, secret: String) async throws {
+        guard let runner = feed.runner else { throw ControlPlane.Failure(message: "obid isn't answering.", status: 0) }
+        let taken = Set((lists.hooks ?? []).map(\.name))
+        let name = ([tool.id] + (2...9).map { "\(tool.id)-\($0)" }).first { !taken.contains($0) } ?? "\(tool.id)-\(Int.random(in: 10...99))"
+        _ = try await HookSetup.finish(address, name: name, source: tool.source, repo: repo, secret: secret, obid: runner)
+        lists.hooks = (try? await runner.hooksIfAny()) ?? lists.hooks
+    }
+
+    /// Cancelled before obid kept it: the address goes, so nothing is left half made.
+    private func abandonHook(_ address: ControlPlane.Hook) async {
+        guard let remote, let signer = try? remote.signer() else { return }
+        try? await remote.plane.removeHook(address.id, signer)
+    }
+
+    /// Follows a Sentry project or not, and where it's looked into: shown as obid answers.
+    private func setSentryProject(_ slug: String, _ change: Runner.SentryProjectChange) {
+        guard let runner = feed.runner else { return }
+        Task {
+            do {
+                lists.sentry = try await runner.setSentryProject(slug, change)
+                problems["sentry-projects"] = nil
+            } catch {
+                problems["sentry-projects"] = error.localizedDescription
+            }
         }
     }
 
