@@ -14,6 +14,7 @@
 #               lacks read:project
 #   slow        when it exists, `gh issue view` and `gh pr view` take a second
 #   view.json   what `gh issue view` and `gh pr view` answer
+#   repo.json   what `gh repo view` answers
 #   calls       one line per call: its first two arguments
 work="$HOME/github"
 if [ -d "$work" ]; then
@@ -31,6 +32,7 @@ if [ -d "$work" ]; then
     "issue view"|"pr view")
       if [ -f "$work/slow" ]; then sleep 1; fi
       cat "$work/view.json"; exit 0 ;;
+    "repo view") cat "$work/repo.json"; exit 0 ;;
   esac
 fi
 board="$HOME/board"

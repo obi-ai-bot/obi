@@ -74,7 +74,7 @@ struct ConversationPage: View {
                 .sorted { $0.item.created < $1.item.created }
             let waiting = entries.filter { $0.item.isOpen }
             // The watcher's and the listener's items: no job, no conversation, so on top of the thread.
-            let notices = feed.notices.filter { $0.waiting(at: context.date) }
+            let notices = feed.notices.filter { $0.carded && $0.waiting(at: context.date) }
             let permissions = feed.chatPermissions.filter { ($0.done != nil || $0.waits(at: context.date)) && own($0.job, turns) }
             let permissionWaits = permissions.filter { $0.waits(at: context.date) }
             let oldest = (waiting.map { ($0.id, $0.item.created) } + permissionWaits.map { ($0.id, $0.created) }

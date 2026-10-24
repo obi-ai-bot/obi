@@ -73,6 +73,9 @@ pub mod action {
     /// Save a standing rule the conversation proposed (crate::rules, #1314): `target` the
     /// conversation, `payload` `{"rule": <the rule, as GET /v1/obid/decisions keeps it>}`.
     pub const REMEMBER_RULE: &str = "remember_rule";
+    /// Add a review request's repository and start Oby's review of it (#1118): `target` its
+    /// `github` offer's id, `payload` `{"repo", "number"}`.
+    pub const ADD_REPOSITORY: &str = "add_repository";
     /// Tell a job that ended the owner's words (#542): `target` the job, `payload` `{"words": "…"}`,
     /// already taken out of the vault's secrets. Made before 2026-10-18 for one more round; it
     /// starts a follow-up now, and obid makes none.
@@ -703,44 +706,62 @@ pub fn plugin_event_item(event: &obi_plugin_api::PluginEvent, known: bool, now: 
 /// The answers that start a `github` item's work.
 pub const REVIEW_IT: &str = "Review it";
 pub const FIX_IT: &str = "Fix it";
+pub const FIX_CI: &str = "Fix CI";
 
-/// A `github` item's id: `github-` and the feed item's.
-pub fn github_item_id(work: &str) -> String {
-    format!("github-{work}")
+/// A `github` item's id: `github-` and the feed item's; for the owner's own pull request,
+/// `github-ci-`, its id and its head's first 12 characters, so each red head gets an offer.
+pub fn github_item_id(work: &crate::github_work::Item) -> String {
+    match (work.list.as_str(), work.head.as_deref()) {
+        ("mine", Some(head)) => format!("github-ci-{}-{}", work.id, head.get(..12).unwrap_or(head)),
+        _ => format!("github-{}", work.id),
+    }
 }
 
-/// The `github` item offering to do `work`: obid's own words from its typed fields (its author's
-/// login only for sorting it, crate::triage), GitHub's title quoted under `github.quoted`.
-pub fn github_item(work: &crate::github_work::Item, now: i64) -> Item {
+/// The `github` item offering to do `work` (`known`: whether obid works in its repository):
+/// obid's own words from its typed fields (its author's login only for sorting it,
+/// crate::triage), GitHub's title quoted under `github.quoted`.
+pub fn github_item(work: &crate::github_work::Item, known: bool, now: i64) -> Item {
     let name = work.repo.rsplit('/').next().unwrap_or(&work.repo);
-    let n = work.number;
-    let (title, text, start, detail) = if work.list == "reviews" {
-        (
+    let (n, repo) = (work.number, &work.repo);
+    let (title, text, start, detail) = match work.list.as_str() {
+        "reviews" if known => (
+            format!("Review requested: {name} #{n}"),
+            format!("Your review is requested on pull request #{n} in {repo}."),
+            REVIEW_IT,
+            "Starts Oby's review of it. Nothing is posted on GitHub.".to_owned(),
+        ),
+        "reviews" => (
             format!("Review requested: {name} #{n}"),
             format!(
-                "Your review is requested on pull request #{n} in {}.",
-                work.repo
+                "Your review is requested on pull request #{n} in {repo}. Oby doesn't work in {repo} yet."
             ),
             REVIEW_IT,
-            "Starts Oby's review of it. Nothing is posted on GitHub.",
-        )
-    } else {
-        (
+            format!(
+                "Adds {repo} to the repositories Oby works in, with no check, then starts Oby's review of it. Nothing is posted on GitHub."
+            ),
+        ),
+        "mine" => (
+            format!("CI failed: {name} #{n}"),
+            format!("Checks failed on your pull request #{n} in {repo}."),
+            FIX_CI,
+            "Starts a fix job on your pull request's branch. It never pushes onto your branch: when its check passes, it opens a pull request into it.".to_owned(),
+        ),
+        _ => (
             format!("Assigned to you: {name} #{n}"),
-            format!("Issue #{n} in {} is assigned to you.", work.repo),
+            format!("Issue #{n} in {repo} is assigned to you."),
             FIX_IT,
-            "Starts a fix job on it, which opens a pull request when its check passes.",
-        )
+            "Starts a fix job on it, which opens a pull request when its check passes.".to_owned(),
+        ),
     };
     Item {
-        id: github_item_id(&work.id),
+        id: github_item_id(work),
         kind: "github".into(),
         job: String::new(),
         title,
         text,
         options: vec![start.into(), DISMISS.into()],
         details: Some(vec![
-            detail.into(),
+            detail,
             "Leaves it for now. It stays in your GitHub work.".into(),
         ]),
         recommended: None,
@@ -755,7 +776,8 @@ pub fn github_item(work: &crate::github_work::Item, now: i64) -> Item {
         start: None,
         github: Some(Box::new(json!({
             "id": work.id, "list": work.list, "repo": work.repo, "number": work.number,
-            "author": work.author, "url": work.url, "quoted": {"title": work.title},
+            "author": work.author, "url": work.url, "known": known, "head": work.head,
+            "quoted": {"title": work.title},
         }))),
         watch: None,
     }

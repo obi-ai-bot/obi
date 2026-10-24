@@ -71,12 +71,15 @@ nonisolated struct WatchStatus: Decodable, Equatable, Sendable {
 }
 
 /// A `watch`, `listen` or `pluginEvent` inbox item (obid only: the watcher, the channel listener, a
-/// plug-in's or Sentry's offer), as the Mac's inbox card and notification show it. Engine's inbox
+/// plug-in's or Sentry's offer), as the Mac's inbox card and notification show it, and a `github`
+/// offer, which only notifies (its card is the GitHub item's in Review PR or Issues). Engine's inbox
 /// doesn't know these kinds. Only obid's own words are shown (`title`, `text`), and the link when it's
 /// https on slack.com or github.com (sentry.io for Sentry's): never what was written (`watch.quoted`,
-/// `plugin.quoted`).
+/// `plugin.quoted`, `github.quoted`).
 nonisolated struct WatchNotice: Decodable, Equatable, Identifiable, Sendable {
-    static let kinds: Set<String> = ["watch", "listen", "pluginEvent"]
+    static let kinds: Set<String> = ["watch", "listen", "pluginEvent", "github"]
+    /// Whether it has a card of its own in the conversation: a `github` offer's is its GitHub item's.
+    var carded: Bool { kind != "github" }
 
     var kind: String
     var id: String

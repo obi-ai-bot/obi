@@ -444,6 +444,11 @@ pub struct NewJob {
     /// by side, each on a branch of its own. Never from the API, never kept.
     #[serde(skip)]
     pub split: bool,
+    /// The repository this job adds to the ones obid works in, on the owner's signed Confirm
+    /// (crate::github_work::start_adding, #1118): taken only when obid doesn't know `repo`, kept
+    /// once the job is made, seen by no other job before. Never from the API, never kept.
+    #[serde(skip)]
+    pub adding: Option<Repo>,
 }
 
 /// Who tells a job something, which decides what words for one that ended do (the owner's
@@ -2137,6 +2142,7 @@ impl Jobs {
     ) -> Result<(Repo, Tool, crate::config::Account, Option<Vec<String>>), Refused> {
         let repo = self
             .repo(&new.repo)
+            .or_else(|| new.adding.clone().filter(|a| a.repo == new.repo))
             .ok_or_else(|| Refused(format!("{} isn't a repository obid knows.", new.repo)))?;
         if !crate::job::KINDS.contains(&new.kind.as_str()) {
             return Err(Refused(format!(

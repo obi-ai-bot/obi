@@ -47,8 +47,8 @@ mine: search(query: $mine, type: ISSUE, first: 100) { issueCount nodes { ...work
 rateLimit { cost remaining resetAt } viewer { login } } \
 fragment work on SearchResultItem { \
 ... on Issue { number title updatedAt state author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } milestone { title } BOARD } \
-... on PullRequest { number title updatedAt state isDraft reviewDecision author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } milestone { title } BOARD \
-commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } }";
+... on PullRequest { number title updatedAt state isDraft isCrossRepository reviewDecision author { login } repository { nameWithOwner } labels(first: 20) { nodes { name } } milestone { title } BOARD \
+commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } } } }";
 
 /// Each item's boards, but those it's archived from, and their Status column: needs gh's
 /// `read:project` scope.
@@ -79,6 +79,12 @@ pub struct Item {
     pub draft: Option<bool>,
     pub review_decision: Option<String>,
     pub checks: Option<String>,
+    /// On pull requests, the head commit (a full commit id), the one `checks` is about.
+    #[serde(default)]
+    pub head: Option<String>,
+    /// On pull requests, whether its branch is a fork's.
+    #[serde(default)]
+    pub fork: Option<bool>,
     /// Its board column, or null: on no board, or on none with a Status.
     pub board: Option<Board>,
     /// The milestone's title, or none.
@@ -279,6 +285,15 @@ fn item(list: &str, node: &Value) -> Option<Item> {
         } else {
             None
         },
+        head: node["commits"]["nodes"][0]["commit"]["oid"]
+            .as_str()
+            .filter(|oid| pr && crate::git::is_sha(oid))
+            .map(str::to_owned),
+        fork: if pr {
+            node["isCrossRepository"].as_bool()
+        } else {
+            None
+        },
         board: board(node),
         milestone: text(&node["milestone"]["title"]),
     })
@@ -343,19 +358,84 @@ pub fn backoff(waits: u32) -> i64 {
     (EVERY << doublings).min(LONGEST_WAIT)
 }
 
-/// The items of `now` to offer in the inbox: new since `before` (by id), in `reviews` or
-/// `assigned`, on a repository obid knows; at most [`OFFERS_PER_READ`], the newest first.
-pub fn offers<'a>(before: &Lists, now: &'a Lists, known: &[String]) -> Vec<&'a Item> {
-    let seen: HashSet<&str> = before.all().map(|i| i.id.as_str()).collect();
+/// Whether a pull request's head checks failed.
+fn red(item: &Item) -> bool {
+    matches!(item.checks.as_deref(), Some("FAILURE" | "ERROR"))
+}
+
+/// Whether an item has an offer in the inbox at all: a review request, an assigned issue, or one
+/// of the owner's own pull requests whose head's checks failed (an offer per head).
+pub fn offered_for(item: &Item) -> bool {
+    item.list != "mine" || (red(item) && item.head.is_some())
+}
+
+/// Whether an item's offer, once made, still stands: one of the owner's own pull requests' until
+/// its head moves or its checks pass (a re-run's pending checks keep it), any other until it
+/// leaves the feed.
+pub fn stands(item: &Item) -> bool {
+    item.list != "mine" || (item.head.is_some() && item.checks.as_deref() != Some("SUCCESS"))
+}
+
+/// What one read offers in the inbox, the newest first and at most [`OFFERS_PER_READ`], and the
+/// offers left waiting for the next reads (their inbox ids, at most [`MOST`]): of `now`'s items,
+/// those whose offer is new since `before` and those `waiting` from earlier reads, while they're
+/// still in the feed. Every review request is offered; an assigned issue only on a repository obid
+/// `knows`; one of the owner's own pull requests once per head whose checks failed, unless it's a
+/// draft, a fork's, on a repository obid doesn't know, or one an obid job opened (that job follows
+/// it). None while a job it would start is queued or running already.
+pub fn offers(
+    before: &Lists,
+    now: &Lists,
+    waiting: &[String],
+    knows: impl Fn(&str) -> bool,
+    jobs: &[Job],
+) -> (Vec<Item>, Vec<String>) {
+    use crate::sphere::inbox::github_item_id;
+    let had: HashSet<String> = before
+        .all()
+        .filter(|i| offered_for(i))
+        .map(github_item_id)
+        .collect();
+    // ponytail: a red pull request kept from before obid read heads (no `head`) isn't new on any
+    // head; drop this once every kept feed has heads.
+    let red_unread = |i: &Item| {
+        before
+            .mine
+            .iter()
+            .any(|b| b.id == i.id && b.head.is_none() && red(b))
+    };
     let mut new: Vec<&Item> = now
-        .reviews
-        .iter()
-        .chain(&now.assigned)
-        .filter(|i| !seen.contains(i.id.as_str()) && known.contains(&i.repo))
+        .all()
+        .filter(|i| offered_for(i))
+        .filter(|i| {
+            let id = github_item_id(i);
+            waiting.contains(&id) || !(had.contains(&id) || red_unread(i))
+        })
+        .filter(|i| active_job(jobs, &i.list, &i.repo, i.number).is_none())
+        .filter(|i| match i.list.as_str() {
+            "reviews" => true,
+            "assigned" => knows(&i.repo),
+            _ => {
+                i.draft != Some(true)
+                    && i.fork == Some(false)
+                    && knows(&i.repo)
+                    && opened_by(jobs, &i.url).is_none()
+            }
+        })
         .collect();
     new.sort_by(|a, b| b.updated.cmp(&a.updated));
-    new.truncate(OFFERS_PER_READ);
-    new
+    let rest = new.split_off(new.len().min(OFFERS_PER_READ));
+    let waiting = rest.into_iter().take(MOST).map(github_item_id).collect();
+    (new.into_iter().cloned().collect(), waiting)
+}
+
+/// The obid job that opened the pull request at `url`, if one did.
+fn opened_by<'a>(jobs: &'a [Job], url: &str) -> Option<&'a Job> {
+    jobs.iter().find(|j| {
+        j.published
+            .as_deref()
+            .is_some_and(|p| p.eq_ignore_ascii_case(url))
+    })
 }
 
 /// Reads GitHub once with `gh`, as whoever it's signed in as now (`@me`), with each item's board
@@ -424,6 +504,9 @@ struct Kept {
     login: Option<String>,
     checked_at: Option<i64>,
     lists: Lists,
+    /// The inbox ids of offers past a read's cap, for the next reads.
+    #[serde(default)]
+    waiting: Vec<String>,
 }
 
 #[derive(Default)]
@@ -484,13 +567,9 @@ impl Feed {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn known(&self) -> Vec<String> {
-        self.config
-            .repos
-            .get()
-            .iter()
-            .map(|r| r.repo.clone())
-            .collect()
+    /// Whether a job may start in `repo`: one of obid's, or of GitHub's that gh can push to.
+    fn knows(&self, repo: &str) -> bool {
+        self.config.repos.find(repo).is_some()
     }
 
     /// Reads every [`EVERY`] seconds (or once a rate limit's wait is over) until obid stops.
@@ -523,9 +602,10 @@ impl Feed {
         let before = self.shown();
         let board = now >= self.lock().no_board_until;
         let got = fetch(board).await;
-        let known = self.known();
+        let jobs = self.jobs.list(1000);
         let mut offered = Vec::new();
-        let mut present = None;
+        let mut live = None;
+        let mut read = false;
         {
             let mut state = self.lock();
             let now = time::now();
@@ -559,17 +639,27 @@ impl Feed {
                 } => {
                     // The first read on record, or the first as another login (`gh auth
                     // switch`), only notes what's there: no flood of offers.
+                    let mut waiting = Vec::new();
                     if state.kept.checked_at.is_some()
                         && state.kept.login.as_deref() == Some(login.as_str())
                     {
-                        offered = offers(&state.kept.lists, &lists, &known)
-                            .into_iter()
-                            .cloned()
-                            .collect();
+                        (offered, waiting) = offers(
+                            &state.kept.lists,
+                            &lists,
+                            &state.kept.waiting,
+                            |repo| self.knows(repo),
+                            &jobs,
+                        );
                     }
                     // A list GitHub cut, or left some of out, isn't all there is.
                     if !lists.cut() && partial.is_none() {
-                        present = Some(lists.all().map(|i| i.id.clone()).collect::<HashSet<_>>());
+                        live = Some(
+                            lists
+                                .all()
+                                .filter(|i| stands(i))
+                                .map(crate::sphere::inbox::github_item_id)
+                                .collect::<HashSet<_>>(),
+                        );
                     }
                     state.waits = 0;
                     if no_board && board {
@@ -597,12 +687,17 @@ impl Feed {
                         login: Some(login),
                         checked_at: Some(now),
                         lists,
+                        waiting,
                     };
-                    self.keep(&state.kept);
+                    read = true;
                 }
             }
         }
-        self.link.github_work(&offered, present.as_ref());
+        self.link.github_work(&offered, live.as_ref());
+        // Kept only once the inbox has this read's offers: a stop in between loses none of them.
+        if read {
+            self.keep(&self.lock().kept);
+        }
         let shown = self.to_json();
         let first = !std::mem::replace(&mut self.lock().read, true);
         if !first && self.shown() != before {
@@ -653,14 +748,13 @@ impl Feed {
             .into_iter()
             .filter(|j| j.status.is_active())
             .collect();
-        let known = self.known();
         let state = self.lock();
         let shown = |items: &[Item]| -> Vec<Value> {
             items
                 .iter()
                 .map(|item| {
                     let mut value = serde_json::to_value(item).unwrap_or_default();
-                    value["known"] = json!(known.contains(&item.repo));
+                    value["known"] = json!(self.knows(&item.repo));
                     value["job"] = json!(
                         active_job(&active, &item.list, &item.repo, item.number).map(|j| &j.id)
                     );
@@ -682,7 +776,9 @@ impl Feed {
         })
     }
 
-    /// `POST /v1/github/work/{id}/start`.
+    /// `POST /v1/github/work/{id}/start`. A review requested in a repository obid doesn't work in
+    /// waits for the owner's signed Confirm instead, as its inbox offer's Review it does (#776,
+    /// #1118): an API token alone never adds a repository.
     pub async fn start(&self, id: &str) -> Result<(Job, bool), ApiError> {
         let (item, signed_in) = {
             let state = self.lock();
@@ -703,6 +799,10 @@ impl Feed {
                 "gh isn't signed in to GitHub.",
             ));
         }
+        let offer = crate::sphere::inbox::github_item_id(&item);
+        if item.list == "reviews" && !self.knows(&item.repo) {
+            return Err(self.link.confirm_adding(&offer, &item.repo, item.number));
+        }
         let started = start_work(
             &self.jobs,
             &self.config,
@@ -712,7 +812,7 @@ impl Feed {
         )
         .await?;
         // A tap on the feed answers its offer too, so it doesn't stay open in the inbox.
-        self.link.github_started(&item.id, &started.0.id);
+        self.link.github_started(&offer, &started.0.id);
         if started.1 {
             self.events.send("github", self.to_json());
         }
@@ -737,14 +837,16 @@ pub fn active_job<'a>(jobs: &'a [Job], list: &str, repo: &str, number: u64) -> O
             && match list {
                 "reviews" => j.kind == "review" && j.pr == Some(number),
                 "assigned" => j.kind == "fix" && j.issue == Some(number) && j.pr.is_none(),
+                "mine" => j.kind == "fix" && j.pr == Some(number),
                 _ => false,
             }
     })
 }
 
 /// Starts the work on `repo` `number` from `list`, as the owner's tap: a `review` job for a
-/// review request, a `fix` job for an assigned issue. Answers the job and whether it's new (a
-/// queued or running one on it is answered instead).
+/// review request, a `fix` job for an assigned issue, and one on the branch of the owner's own
+/// pull request (its base, so what it publishes is a pull request into that branch). Answers the
+/// job and whether it's new (a queued or running one on it is answered instead).
 pub async fn start_work(
     jobs: &Arc<Jobs>,
     config: &Config,
@@ -752,17 +854,45 @@ pub async fn start_work(
     repo: &str,
     number: u64,
 ) -> Result<(Job, bool), ApiError> {
-    let (kind, noun, verb) = match list {
-        "reviews" => ("review", "pull request", "Review"),
-        "assigned" => ("fix", "issue", "Fix"),
+    begin(jobs, config, list, repo, number, None).await
+}
+
+/// [`start_work`], the job adding `adding` (obid's own entry for `repo`) when obid doesn't work in
+/// `repo` yet.
+async fn begin(
+    jobs: &Arc<Jobs>,
+    config: &Config,
+    list: &str,
+    repo: &str,
+    number: u64,
+    adding: Option<crate::config::Repo>,
+) -> Result<(Job, bool), ApiError> {
+    let (kind, verb) = match list {
+        "reviews" => ("review", "Review"),
+        "assigned" => ("fix", "Fix"),
+        "mine" => ("fix", "Fix CI"),
         _ => {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
-                "Oby doesn't start work on your own pull requests from the feed yet.",
+                "That isn't work Oby starts from the feed.",
             ));
         }
     };
-    if config.repos.find(repo).is_none() {
+    if list == "mine"
+        && let Some(job) = opened_by(
+            &jobs.list(1000),
+            &format!("https://github.com/{repo}/pull/{number}"),
+        )
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "Oby's job {} opened this pull request and follows its checks: tell that job instead.",
+                job.short_title()
+            ),
+        ));
+    }
+    if config.repos.find(repo).is_none() && adding.is_none() {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             format!(
@@ -780,34 +910,124 @@ pub async fn start_work(
     }
     let name = repo.rsplit('/').next().unwrap_or(repo);
     let file = format!("github-{name}-{number}.md");
-    let quoted = quote(list, repo, number).await.map_err(|why| {
+    let (quoted, read) = quote(list, repo, number).await.map_err(|why| {
         ApiError::new(
             StatusCode::BAD_GATEWAY,
             format!("GitHub's text for {repo} #{number} couldn't be read: {why}"),
         )
     })?;
+    // The owner's own pull request: its branch, read now, is the job's base. A fork's branch is
+    // out of obid's reach.
+    let base = if list == "mine" {
+        if read["isCrossRepository"] != json!(false) {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "Oby works on a branch of the repository itself, not a fork's.",
+            ));
+        }
+        let branch = read["headRefName"]
+            .as_str()
+            .filter(|b| crate::git::is_branch_name(b))
+            .ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    format!("GitHub didn't name the branch of {repo} #{number}."),
+                )
+            })?;
+        Some(branch.to_owned())
+    } else {
+        None
+    };
     let path = keep_attachment(config, "github", &file, &quoted).map_err(|e| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("obid couldn't keep GitHub's text: {e}"),
         )
     })?;
+    let task = match list {
+        "reviews" => format!("Review pull request #{number} in {repo}."),
+        "assigned" => format!("Fix issue #{number} in {repo}."),
+        _ => format!(
+            "Make pull request #{number} in {repo} pass its checks. Add commits on top of it; never rewrite or drop the ones it has."
+        ),
+    };
     let new = NewJob {
         repo: repo.into(),
         kind: kind.into(),
-        task: format!(
-            "{verb} {noun} #{number} in {repo}. What people wrote on it on GitHub is quoted in .obi/inputs/{file}."
-        ),
+        task: format!("{task} What people wrote on it on GitHub is quoted in .obi/inputs/{file}."),
         title: Some(cut(&format!("{verb} {name} #{number}"), 60)),
-        pr: (kind == "review").then_some(number),
-        issue: (kind == "fix").then_some(number),
+        pr: (list != "assigned").then_some(number),
+        issue: (list == "assigned").then_some(number),
+        base,
         attachments: Some(vec![path.to_string_lossy().into_owned()]),
+        adding,
         ..NewJob::default()
     };
     let job = jobs
         .create(new)
         .map_err(|refused| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, refused.0))?;
     Ok((job, true))
+}
+
+/// Starts Oby's review of `repo` `number` as [`start_work`] does, adding `repo` to the
+/// repositories obid works in when it isn't one yet: only on the owner's signed Confirm (#776,
+/// #1118), never an API token alone. Its remote is obid's own, built from the checked name (never
+/// GitHub's), its default branch read with obid's own `gh`, no check. Only the review's job sees
+/// it ([`NewJob::adding`]), and it's kept, as any of GitHub's repositories is, once that job is
+/// made (crate::repos::Repos::keep): nothing that couldn't start adds it.
+pub async fn start_adding(
+    jobs: &Arc<Jobs>,
+    config: &Config,
+    repo: &str,
+    number: u64,
+) -> Result<(Job, bool), ApiError> {
+    if config.repos.find(repo).is_some() {
+        return start_work(jobs, config, "reviews", repo, number).await;
+    }
+    if !crate::github::is_repo(repo) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!("{repo} isn't a GitHub repository."),
+        ));
+    }
+    let unread = |why: &str| {
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            format!("Oby couldn't add {repo}: {why}"),
+        )
+    };
+    let gh = crate::github::gh().ok_or_else(|| unread("gh isn't installed"))?;
+    let said = crate::github::run(
+        &gh,
+        &[
+            "repo",
+            "view",
+            repo,
+            "--json",
+            "nameWithOwner,defaultBranchRef",
+        ],
+    )
+    .await
+    .map_err(|e| unread(&e))?;
+    let value: Value =
+        serde_json::from_str(&said).map_err(|_| unread("gh's answer wasn't JSON"))?;
+    let named = value["nameWithOwner"]
+        .as_str()
+        .is_some_and(|n| n.eq_ignore_ascii_case(repo));
+    let branch = value["defaultBranchRef"]["name"]
+        .as_str()
+        .filter(|b| named && crate::git::is_branch_name(b))
+        .ok_or_else(|| unread("GitHub didn't name it and its default branch"))?;
+    let adding = crate::config::Repo {
+        repo: repo.into(),
+        remote: format!("https://github.com/{repo}.git"),
+        default_branch: branch.into(),
+        check: None,
+        pull_requests: None,
+    };
+    let started = begin(jobs, config, "reviews", repo, number, Some(adding)).await?;
+    tracing::info!("{repo} added to the repositories obid works in, on the owner's Confirm");
+    Ok(started)
 }
 
 /// Keeps `text` as `file` in a folder of its own under `home/attachments/<what>/` (0600 in 0700
@@ -829,41 +1049,32 @@ pub(crate) fn keep_attachment(
 }
 
 /// What people wrote on `repo` `number` on GitHub, fenced as data: its title, description,
-/// labels and latest comments, at most [`QUOTED_MAX`].
-async fn quote(list: &str, repo: &str, number: u64) -> Result<String, String> {
+/// labels and latest comments, at most [`QUOTED_MAX`]; on the owner's own pull request, its checks
+/// too. And what gh read: for the owner's own, its branch too (`headRefName`,
+/// `isCrossRepository`).
+async fn quote(list: &str, repo: &str, number: u64) -> Result<(String, Value), String> {
     let gh = crate::github::gh().ok_or("gh isn't installed")?;
-    let what = if list == "reviews" { "pr" } else { "issue" };
+    let what = if list == "assigned" { "issue" } else { "pr" };
+    let fields = if list == "mine" {
+        "title,body,author,labels,comments,headRefName,isCrossRepository,statusCheckRollup"
+    } else {
+        "title,body,author,labels,comments"
+    };
     let n = number.to_string();
-    let text = crate::github::run(
-        &gh,
-        &[
-            what,
-            "view",
-            &n,
-            "-R",
-            repo,
-            "--json",
-            "title,body,author,labels,comments",
-        ],
-    )
-    .await?;
+    let text = crate::github::run(&gh, &[what, "view", &n, "-R", repo, "--json", fields]).await?;
     let value: Value = serde_json::from_str(&text).map_err(|_| "gh's answer wasn't JSON")?;
-    Ok(render(
-        list,
-        repo,
-        number,
-        &value,
-        &crate::brain::briefing::nonce(),
-    ))
+    let quoted = render(list, repo, number, &value, &crate::brain::briefing::nonce());
+    Ok((quoted, value))
 }
 
-/// The quoted file for `value`, what `gh … view --json title,body,author,labels,comments` printed.
+/// The quoted file for `value`, what `gh … view --json title,body,author,labels,comments` printed
+/// (and `statusCheckRollup`, each check's name and result, on the owner's own pull request).
 pub fn render(list: &str, repo: &str, number: u64, value: &Value, nonce: &str) -> String {
     use crate::brain::briefing::{fence, fence_rule};
-    let noun = if list == "reviews" {
-        "Pull request"
-    } else {
+    let noun = if list == "assigned" {
         "Issue"
+    } else {
+        "Pull request"
     };
     let login = |v: &Value| {
         v["login"]
@@ -895,6 +1106,31 @@ pub fn render(list: &str, repo: &str, number: u64, value: &Value, nonce: &str) -
             String::new(),
             "## Labels".into(),
             fence(nonce, &labels.join(", ")),
+        ]);
+    }
+    // A check run's name and conclusion, or a commit status's context and state.
+    let checks: Vec<String> = value["statusCheckRollup"]
+        .as_array()
+        .map(|checks| {
+            checks
+                .iter()
+                .filter_map(|c| {
+                    let name = c["name"].as_str().or(c["context"].as_str())?;
+                    let result = [&c["conclusion"], &c["state"], &c["status"]]
+                        .into_iter()
+                        .find_map(|v| v.as_str().filter(|s| !s.is_empty()))
+                        .unwrap_or("unknown");
+                    Some(format!("{name}: {result}"))
+                })
+                .take(50)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !checks.is_empty() {
+        out.extend([
+            String::new(),
+            "## Checks on its head commit".into(),
+            fence(nonce, &checks.join("\n")),
         ]);
     }
     let comments = value["comments"].as_array().cloned().unwrap_or_default();
@@ -1049,26 +1285,251 @@ mod tests {
         assert!(parse(&partial.to_string()).is_err(), "a login is a login");
     }
 
+    /// A read's lists, from these nodes.
+    fn lists(reviews: Vec<Value>, assigned: Vec<Value>, mine: Vec<Value>) -> Lists {
+        let mut text: Value = serde_json::from_str(&answer(reviews, assigned, 0)).unwrap();
+        text["data"]["mine"] = json!({"issueCount": mine.len(), "nodes": mine});
+        read(&text.to_string()).0
+    }
+
+    fn numbers(offered: &[Item]) -> Vec<u64> {
+        offered.iter().map(|i| i.number).collect()
+    }
+
+    const OBI: &str = "obi-ai-bot/obi";
+
+    fn knows(repo: &str) -> bool {
+        repo == OBI
+    }
+
+    /// One of the owner's own pull requests, its head `head` with these checks.
+    fn mine(number: u64, head: &str, checks: &str) -> Value {
+        let mut pr = node(OBI, number, "2026-10-18T08:00:00Z");
+        pr["isCrossRepository"] = json!(false);
+        pr["commits"]["nodes"][0]["commit"] =
+            json!({"oid": head, "statusCheckRollup": {"state": checks}});
+        pr
+    }
+
     #[test]
-    fn only_new_items_on_known_repositories_are_offered_newest_first_and_capped() {
-        let known = vec!["obi-ai-bot/obi".to_owned()];
-        let (before, _) = read(&answer(
-            vec![node("obi-ai-bot/obi", 1, "2026-10-18T08:00:00Z")],
+    fn offers_past_the_cap_wait_for_the_next_read() {
+        let before = lists(vec![node(OBI, 1, "2026-10-18T08:00:00Z")], vec![], vec![]);
+        let mut reviews: Vec<Value> = (2..9)
+            .map(|n| node(OBI, n, &format!("2026-10-18T08:0{n}:00Z")))
+            .collect();
+        reviews.push(node(OBI, 1, "2026-10-18T09:00:00Z"));
+        let now = lists(reviews, vec![], vec![]);
+        let (offered, waiting) = offers(&before, &now, &[], knows, &[]);
+        assert_eq!(numbers(&offered), [8, 7, 6, 5, 4], "the newest 5");
+        assert_eq!(waiting.len(), 2);
+        let (offered, waiting) = offers(&now, &now, &waiting, knows, &[]);
+        assert_eq!(numbers(&offered), [3, 2], "the rest at the next read");
+        assert!(waiting.is_empty());
+        assert!(
+            offers(&now, &now, &waiting, knows, &[]).0.is_empty(),
+            "nothing twice"
+        );
+    }
+
+    #[test]
+    fn a_waiting_offer_that_left_the_feed_is_dropped() {
+        let reviews = |numbers: &[u64]| {
+            numbers
+                .iter()
+                .map(|n| node(OBI, *n, &format!("2026-10-18T08:0{n}:00Z")))
+                .collect()
+        };
+        let before = lists(vec![], vec![], vec![]);
+        let now = lists(reviews(&[1, 2, 3, 4, 5, 6, 7]), vec![], vec![]);
+        let (_, waiting) = offers(&before, &now, &[], knows, &[]);
+        assert_eq!(waiting.len(), 2);
+        let later = lists(reviews(&[1, 3, 4, 5, 6, 7]), vec![], vec![]);
+        let (offered, waiting) = offers(&now, &later, &waiting, knows, &[]);
+        assert_eq!(numbers(&offered), [1], "#2 was reviewed meanwhile");
+        assert!(waiting.is_empty());
+    }
+
+    #[test]
+    fn a_review_request_on_an_unknown_repository_is_offered() {
+        let now = lists(
+            vec![node("acme/other", 12, "2026-10-18T08:00:00Z")],
             vec![],
-            0,
-        ));
-        let mut reviews: Vec<Value> = (2..10)
-            .map(|n| node("obi-ai-bot/obi", n, &format!("2026-10-18T08:0{n}:00Z")))
-            .collect();
-        reviews.push(node("obi-ai-bot/obi", 1, "2026-10-18T09:00:00Z"));
-        reviews.push(node("someone/else", 3, "2026-10-18T09:30:00Z"));
-        let (now, _) = read(&answer(reviews, vec![], 0));
-        let offered: Vec<u64> = offers(&before, &now, &known)
-            .iter()
-            .map(|i| i.number)
-            .collect();
-        assert_eq!(offered, [9, 8, 7, 6, 5]);
-        assert!(offers(&now, &now, &known).is_empty(), "nothing twice");
+            vec![],
+        );
+        let (offered, _) = offers(&Lists::default(), &now, &[], knows, &[]);
+        assert_eq!(numbers(&offered), [12]);
+        let item = crate::sphere::inbox::github_item(&offered[0], false, 0);
+        assert_eq!(item.title, "Review requested: other #12");
+        assert_eq!(
+            item.text,
+            "Your review is requested on pull request #12 in acme/other. Oby doesn't work in acme/other yet."
+        );
+        assert_eq!(item.options, ["Review it", "Dismiss"]);
+        assert!(item.details.unwrap()[0].starts_with("Adds acme/other to the repositories"));
+        assert_eq!(item.github.unwrap()["known"], false);
+    }
+
+    #[test]
+    fn an_assigned_issue_on_an_unknown_repository_stays_in_the_feed() {
+        let now = lists(
+            vec![],
+            vec![
+                node("acme/other", 7, "2026-10-18T08:00:00Z"),
+                node(OBI, 8, "2026-10-18T08:00:00Z"),
+            ],
+            vec![],
+        );
+        assert_eq!(
+            numbers(&offers(&Lists::default(), &now, &[], knows, &[]).0),
+            [8]
+        );
+    }
+
+    #[test]
+    fn a_pull_request_of_yours_that_turns_red_is_offered_once_per_head() {
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        let green = lists(vec![], vec![], vec![mine(812, &a, "SUCCESS")]);
+        let red = lists(vec![], vec![], vec![mine(812, &a, "FAILURE")]);
+        let (offered, _) = offers(&green, &red, &[], knows, &[]);
+        assert_eq!(numbers(&offered), [812]);
+        let item = crate::sphere::inbox::github_item(&offered[0], true, 0);
+        assert_eq!(item.id, format!("github-ci-{}-aaaaaaaaaaaa", id(OBI, 812)));
+        assert_eq!(
+            (item.title.as_str(), item.text.as_str()),
+            (
+                "CI failed: obi #812",
+                "Checks failed on your pull request #812 in obi-ai-bot/obi."
+            )
+        );
+        assert_eq!(item.options, ["Fix CI", "Dismiss"]);
+        assert!(
+            offers(&red, &red, &[], knows, &[]).0.is_empty(),
+            "one per head"
+        );
+        let again = lists(vec![], vec![], vec![mine(812, &b, "ERROR")]);
+        assert_eq!(numbers(&offers(&red, &again, &[], knows, &[]).0), [812]);
+        // A red pull request kept from before obid read heads isn't new.
+        let mut unread = red.clone();
+        unread.mine[0].head = None;
+        assert!(offers(&unread, &red, &[], knows, &[]).0.is_empty());
+    }
+
+    #[test]
+    fn a_draft_a_fork_or_an_obid_pull_request_isnt_offered_a_fix() {
+        let head = "c".repeat(40);
+        let offered = |pr: Value, jobs: &[Job]| {
+            let now = lists(vec![], vec![], vec![pr]);
+            numbers(&offers(&Lists::default(), &now, &[], knows, jobs).0)
+        };
+        assert_eq!(offered(mine(1, &head, "FAILURE"), &[]), [1]);
+        let mut draft = mine(1, &head, "FAILURE");
+        draft["isDraft"] = json!(true);
+        assert!(offered(draft, &[]).is_empty(), "a draft");
+        let mut fork = mine(1, &head, "FAILURE");
+        fork["isCrossRepository"] = json!(true);
+        assert!(offered(fork, &[]).is_empty(), "a fork's");
+        let mut elsewhere = mine(1, &head, "FAILURE");
+        elsewhere["repository"]["nameWithOwner"] = json!("acme/other");
+        assert!(
+            offered(elsewhere, &[]).is_empty(),
+            "a repository obid doesn't know"
+        );
+        let job = |kind: &str| {
+            Job::new(
+                "j".into(),
+                OBI.into(),
+                kind.into(),
+                "t".into(),
+                "claude".into(),
+                "a".into(),
+            )
+        };
+        let mut opened = job("build");
+        opened.status = crate::job::Status::Done;
+        opened.published = Some("https://github.com/obi-ai-bot/obi/pull/1".into());
+        assert!(
+            offered(mine(1, &head, "FAILURE"), &[opened]).is_empty(),
+            "an obid job's"
+        );
+        let mut fixing = job("fix");
+        fixing.pr = Some(1);
+        assert!(
+            offered(mine(1, &head, "FAILURE"), &[fixing]).is_empty(),
+            "a fix job on it"
+        );
+        assert!(
+            offered(mine(1, &head, "PENDING"), &[]).is_empty(),
+            "not red"
+        );
+    }
+
+    #[test]
+    fn a_head_that_moves_or_turns_green_settles_its_offer() {
+        // The feed's live offers: an offer that isn't one of them any more is settled by itself.
+        let live = |pr: Value| {
+            let now = lists(vec![], vec![], vec![pr]);
+            now.all()
+                .filter(|i| stands(i))
+                .map(crate::sphere::inbox::github_item_id)
+                .collect::<Vec<_>>()
+        };
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        let red = live(mine(812, &a, "FAILURE"));
+        assert_eq!(red.len(), 1);
+        assert!(live(mine(812, &a, "SUCCESS")).is_empty(), "green");
+        assert_ne!(live(mine(812, &b, "FAILURE")), red, "the head moved");
+        assert_eq!(live(mine(812, &a, "PENDING")), red, "a re-run keeps it");
+    }
+
+    #[test]
+    fn work_already_under_way_isnt_offered() {
+        let now = lists(
+            vec![node(OBI, 12, "2026-10-18T08:00:00Z")],
+            vec![node(OBI, 7, "2026-10-18T08:00:00Z")],
+            vec![],
+        );
+        let job = |kind: &str| {
+            Job::new(
+                "j".into(),
+                OBI.into(),
+                kind.into(),
+                "t".into(),
+                "claude".into(),
+                "a".into(),
+            )
+        };
+        let mut review = job("review");
+        review.pr = Some(12);
+        let mut fix = job("fix");
+        fix.issue = Some(7);
+        assert_eq!(
+            numbers(&offers(&Lists::default(), &now, &[], knows, &[]).0).len(),
+            2
+        );
+        assert!(
+            offers(&Lists::default(), &now, &[], knows, &[review, fix])
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_head_is_read_only_when_its_a_commit() {
+        let head = |oid: &str| {
+            lists(vec![], vec![], vec![mine(1, oid, "FAILURE")]).mine[0]
+                .head
+                .clone()
+        };
+        assert_eq!(head(&"d".repeat(40)), Some("d".repeat(40)));
+        assert_eq!(head("main"), None);
+        assert_eq!(head(&"D".repeat(40)), None);
+        let mut issue = mine(2, &"d".repeat(40), "FAILURE");
+        issue["isCrossRepository"] = json!(true);
+        let assigned = lists(vec![], vec![issue], vec![]);
+        assert_eq!(
+            (assigned.assigned[0].head.clone(), assigned.assigned[0].fork),
+            (None, None)
+        );
     }
 
     #[test]
@@ -1179,6 +1640,18 @@ mod tests {
         );
         assert!(text.contains("## Comments (30 of 40, the latest)"));
         assert!(!text.contains("\nc9\n") && text.contains("\nc39\n"));
+        // The owner's own pull request: its checks, quoted.
+        let checks = json!({"title": "t", "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "FAILURE"},
+            {"__typename": "StatusContext", "context": "ci/lint", "state": "ERROR"},
+            {"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": ""}]});
+        let text = render("mine", "obi-ai-bot/obi", 812, &checks, nonce);
+        assert!(text.starts_with("# Pull request #812"), "{text}");
+        assert!(
+            text.contains("## Checks on its head commit\n<<<quoted-abc123")
+                && text.contains("test: FAILURE\nci/lint: ERROR\nbuild: IN_PROGRESS"),
+            "{text}"
+        );
         let long = json!({"title": "t", "body": "x".repeat(200_000)});
         assert!(render("reviews", "obi-ai-bot/obi", 1, &long, nonce).len() < QUOTED_MAX + 100);
     }

@@ -85,7 +85,7 @@ final class IslandModel {
             waits.insert(entry.item.job.isEmpty ? entry.id : "\(entry.local ? "mac" : "runner")/\(entry.item.job)")
         }
         // The watcher's and the listener's items (a review ready to approve has its job: once).
-        for notice in feed.notices where notice.waiting() {
+        for notice in feed.notices where notice.carded && notice.waiting() {
             waits.insert(notice.job.isEmpty ? "notice/\(notice.id)" : "runner/\(notice.job)")
         }
         return waits.count

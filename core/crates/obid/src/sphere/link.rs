@@ -770,35 +770,33 @@ impl Link {
     }
 
     /// What a read of the owner's GitHub work found (crate::github_work): a `github` item for each
-    /// of `new` that never had one, open or done; and, with `present` (every item the feed holds
-    /// now, when no list was cut), each open `github` item whose work left the feed is done by
+    /// of `new` that never had one, open or done; and, with `live` (the inbox ids of every offer
+    /// the feed holds now, when no list was cut), each open `github` item that isn't one any more
+    /// (its work left the feed, or its pull request's head moved or isn't red now) is done by
     /// itself, with no answer.
     pub fn github_work(
         &self,
         new: &[crate::github_work::Item],
-        present: Option<&std::collections::HashSet<String>>,
+        live: Option<&std::collections::HashSet<String>>,
     ) {
         let now = time::now();
+        let known: Vec<bool> = new
+            .iter()
+            .map(|work| self.config.repos.find(&work.repo).is_some())
+            .collect();
         let mut changed = Vec::new();
         {
             let mut state = self.lock();
-            if let Some(present) = present {
+            if let Some(live) = live {
                 for item in state.inbox.values_mut() {
-                    let gone = item.kind == "github"
-                        && item.done.is_none()
-                        && item
-                            .github
-                            .as_deref()
-                            .and_then(|g| g["id"].as_str())
-                            .is_some_and(|id| !present.contains(id));
-                    if gone {
+                    if item.kind == "github" && item.done.is_none() && !live.contains(&item.id) {
                         item.done = Some(now);
                         changed.push(item.clone());
                     }
                 }
             }
-            for work in new {
-                let item = inbox::github_item(work, now);
+            for (work, known) in new.iter().zip(known) {
+                let item = inbox::github_item(work, known, now);
                 if !state.inbox.contains_key(&item.id) {
                     state.inbox.insert(item.id.clone(), item.clone());
                     changed.push(item);
@@ -938,13 +936,12 @@ impl Link {
         }
     }
 
-    /// Work on the feed item `work` started from the feed (`POST /v1/github/work/{id}/start`):
-    /// its open `github` item is done, answered with its start option, `job` the job on it.
-    pub fn github_started(&self, work: &str, job: &str) {
-        let id = inbox::github_item_id(work);
+    /// Work started from the feed (`POST /v1/github/work/{id}/start`): its open `github` item `id`
+    /// is done, answered with its start option, `job` the job on it.
+    pub fn github_started(&self, id: &str, job: &str) {
         let item = {
             let mut state = self.lock();
-            let Some(item) = state.inbox.get_mut(&id).filter(|i| i.done.is_none()) else {
+            let Some(item) = state.inbox.get_mut(id).filter(|i| i.done.is_none()) else {
                 return;
             };
             item.done = Some(time::now());
@@ -955,9 +952,11 @@ impl Link {
         self.save_item(&item);
     }
 
-    /// `POST /v1/inbox/{id}/answer` on a `github` item: `Review it` or `Fix it` starts the work as
-    /// `POST /v1/github/work/{id}/start` does (an error leaves the item open), `Dismiss` or done
-    /// settle it, later puts it off. Nothing is sent to GitHub.
+    /// `POST /v1/inbox/{id}/answer` on a `github` item: `Review it`, `Fix it` or `Fix CI` starts the
+    /// work as `POST /v1/github/work/{id}/start` does (an error leaves the item open), `Dismiss` or
+    /// done settle it, later puts it off. Nothing is sent to GitHub. A review in a repository obid
+    /// doesn't work in yet waits for the owner's signed Confirm instead, which adds it (#776,
+    /// #1118): an API token alone (an agent, oby-mcp) never widens what obid clones.
     async fn answer_github(
         &self,
         mut item: Item,
@@ -977,12 +976,20 @@ impl Link {
                 }
                 if *answer == start {
                     let work = item.github.as_deref().cloned().unwrap_or_default();
+                    let list = work["list"].as_str().unwrap_or_default();
+                    let repo = work["repo"].as_str().unwrap_or_default();
+                    let number = work["number"].as_u64().unwrap_or_default();
+                    if list == "reviews" && self.config.repos.find(repo).is_none() {
+                        // `answer` claimed it: it stays open for the Confirm.
+                        self.lock().inbox.insert(item.id.clone(), item.clone());
+                        return Err(self.confirm_adding(&item.id, repo, number));
+                    }
                     let started = crate::github_work::start_work(
                         &self.jobs,
                         &self.config,
-                        work["list"].as_str().unwrap_or_default(),
-                        work["repo"].as_str().unwrap_or_default(),
-                        work["number"].as_u64().unwrap_or_default(),
+                        list,
+                        repo,
+                        number,
                     )
                     .await;
                     match started {
@@ -1001,6 +1008,47 @@ impl Link {
         self.lock().inbox.insert(item.id.clone(), item.clone());
         self.save_item(&item);
         Ok(item.to_json())
+    }
+
+    /// The `confirm` item that adds `repo` and starts Oby's review of its pull request `number`
+    /// (#1118), for the GitHub offer `offer` (its inbox id, whether that item was made or not); the
+    /// one still open for it stands. Answers the error a start asked for this way answers: only the
+    /// owner's signed Confirm adds a repository (#776), from the feed and the inbox alike.
+    pub fn confirm_adding(&self, offer: &str, repo: &str, number: u64) -> ApiError {
+        let item = inbox::confirm_item(
+            "",
+            format!("Add {repo} and review #{number}"),
+            format!(
+                "Adds {repo} to the repositories Oby works in, with no check, then starts Oby's review of pull request #{number}. Nothing is posted on GitHub. It happens only if you confirm."
+            ),
+            inbox::Confirmed {
+                action: inbox::action::ADD_REPOSITORY.into(),
+                target: offer.into(),
+                payload: json!({"repo": repo, "number": number}),
+            },
+            time::now(),
+        );
+        let added = {
+            let mut state = self.lock();
+            let open = state.inbox.values().any(|i| {
+                i.kind == "confirm"
+                    && i.done.is_none()
+                    && i.confirm.as_ref().is_some_and(|c| {
+                        c.action == inbox::action::ADD_REPOSITORY && c.target == offer
+                    })
+            });
+            if !open {
+                state.inbox.insert(item.id.clone(), item.clone());
+            }
+            !open
+        };
+        if added {
+            self.save_item(&item);
+        }
+        api(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Adding {repo} waits for your Confirm in the inbox."),
+        )
     }
 
     /// `POST /v1/inbox/{id}/answer` on a plug-in's offer with its start answer (`Look into it`,
@@ -3493,6 +3541,26 @@ impl Link {
                 Some(Err(refused)) => Err(api(StatusCode::CONFLICT, refused.0)),
                 None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
             },
+            inbox::action::ADD_REPOSITORY => {
+                // obid's own words of the review request (crate::github_work's typed fields).
+                let (repo, number) = (
+                    confirmed.payload["repo"].as_str().unwrap_or_default(),
+                    confirmed.payload["number"].as_u64().unwrap_or_default(),
+                );
+                if self
+                    .lock()
+                    .inbox
+                    .get(target)
+                    .is_some_and(|i| i.done.is_some())
+                {
+                    return Err(api(StatusCode::CONFLICT, "That review request is settled."));
+                }
+                let (job, _) =
+                    crate::github_work::start_adding(&self.jobs, &self.config, repo, number)
+                        .await?;
+                self.github_started(target, &job.id);
+                Ok(())
+            }
             inbox::action::REMEMBER_RULE => {
                 let rule: Decision = serde_json::from_value(confirmed.payload["rule"].clone())
                     .map_err(|_| api(StatusCode::CONFLICT, "That rule's plan was lost."))?;
