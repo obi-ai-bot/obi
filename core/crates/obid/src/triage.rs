@@ -668,6 +668,11 @@ mod tests {
             Some(FYI)
         );
         assert_eq!(rule(&work("assigned", 7, "sangam", urgent)), None);
+        // Failed checks on the owner's own pull request (Fix CI).
+        assert_eq!(
+            rule(&work("mine", 5, "wellington", urgent)),
+            Some(NEEDS_YOU)
+        );
         let pr = json!({"pr": 12});
         for (kind, subject, actor, sort) in [
             (
@@ -784,6 +789,10 @@ mod tests {
         let check = event("check.failed", json!({"pr": 12}), "github-actions");
         let other = event("pull_request.review_requested", json!({"pr": 13}), "sangam");
         assert_eq!(sorted(&kept, &[&plugin, &check, &other], 0), [NEEDS_YOU; 3]);
+        // The feed's Fix CI on that pull request stands for the plug-in's red check.
+        let mut fix = work("mine", 12, "wellington", "Fix CI");
+        fix.arrived = Some(6);
+        assert_eq!(sorted(&kept, &[&check, &fix], 0), [IGNORE, NEEDS_YOU]);
         let alert = |id: &str, severity: &str, at: u64| {
             let mut alert = event(
                 "alert.fired",
