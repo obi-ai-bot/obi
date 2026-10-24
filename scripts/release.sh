@@ -360,7 +360,11 @@ main() {
     public_key="$(setting OBY_SPARKLE_PUBLIC_KEY)"
     [[ -n "$team" ]] || die "OBY_TEAM_ID isn't set in apps/config/Signing.xcconfig"
     [[ -n "$feed" ]] || die "$feed_setting isn't set in apps/config/Signing.xcconfig"
-    [[ "$(setting OBY_APPCAST_URL)" != "$(setting OBY_FULL_APPCAST_URL)" ]] || die "OBY_APPCAST_URL and OBY_FULL_APPCAST_URL are the same appcast: a full release would reach every Oby"
+    # R2 keeps an appcast by its file name (publish), so the two must differ there, not only in URL.
+    local launch_appcast full_appcast
+    launch_appcast="$(setting OBY_APPCAST_URL)"
+    full_appcast="$(setting OBY_FULL_APPCAST_URL)"
+    [[ "${launch_appcast##*/}" != "${full_appcast##*/}" ]] || die "OBY_APPCAST_URL and OBY_FULL_APPCAST_URL are both ${full_appcast##*/}: a full release would replace the launch build's appcast"
     if [[ -z "$public_key" || "$public_key" == "$placeholder_public_key" ]]; then
         $dry_run || die "OBY_SPARKLE_PUBLIC_KEY in apps/config/Signing.xcconfig is still the placeholder: no shipped Oby could verify this update (docs/release.md, Sparkle keys)"
         note "OBY_SPARKLE_PUBLIC_KEY is still the placeholder: fine for a dry run"

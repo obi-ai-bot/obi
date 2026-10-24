@@ -23,7 +23,7 @@ pub const TOKEN: &str = "oby.remote.tunnel";
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// What obid says without cloudflared beside it: the Mac app's launch build, Linux, install.sh.
 const NO_CLOUDFLARED: &str =
-    "This obid has no cloudflared: remote access needs a full build of Oby.";
+    "This obid has no cloudflared: remote access needs a full build of Oby's Mac app.";
 
 /// How the tunnel is: `off`, `starting`, `connected` or `failed`, with a line saying why.
 #[derive(Clone, Debug, PartialEq)]

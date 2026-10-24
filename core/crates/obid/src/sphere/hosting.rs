@@ -297,7 +297,7 @@ pub fn fetch_image_soon(link: &Arc<Link>) {
             .flatten();
         let Some(pin) = pin else {
             *progress.lock().unwrap() = super::vm_image::Progress::failed(
-                "This Oby has no obi-vm to run teammates' jobs with: sharing needs a full build of Oby.".into(),
+                "This Oby has no obi-vm to run teammates' jobs with: sharing needs a full build of Oby's Mac app.".into(),
             );
             return;
         };
