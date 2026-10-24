@@ -800,6 +800,57 @@ fn a_publish_github_turned_down_is_tried_again() {
     );
 }
 
+/// A try whose pull request failed pushed (#627): that push stays counted whatever comes after
+/// it, a stop while obid waits to try again, or a later try that fails before it pushes.
+#[test]
+fn a_push_that_went_out_stays_counted_across_tries() {
+    let folder = Folder::new("publish-kept-push");
+    let bin = fake_gh(&folder.0);
+    let (obid, remote) = obid_retrying_within(&folder, &bin, 5);
+    let waiting = |id: &str| {
+        within(60, "obid to wait before publishing again", || {
+            let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+            job["step"]
+                .as_str()?
+                .starts_with("Publishing again")
+                .then_some(job)
+        })
+    };
+
+    // Stopped while it waits.
+    std::fs::write(folder.0.join("gh/list-fails-once"), "").unwrap();
+    let stopped = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: a.txt"}),
+    );
+    assert_eq!(waiting(&stopped)["pushed"], 1);
+    let stop = call(&obid, "POST", &format!("/v1/jobs/{stopped}/stop"), None);
+    assert_eq!(stop.status, 200, "{}", stop.text);
+    let job = ended(&obid, &stopped);
+    assert_eq!(job["status"], "stopped", "{job}");
+    assert_eq!(job["pushed"], 1, "{job}");
+    assert_eq!(job["published"], Value::Null, "{job}");
+
+    // The next try can't fetch the base: the push it made before still counts.
+    std::fs::write(folder.0.join("gh/list-fails-once"), "").unwrap();
+    let cut = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: b.txt"}),
+    );
+    waiting(&cut);
+    let gone = folder.0.join("gone");
+    std::fs::rename(&remote, &gone).unwrap();
+    let job = ended(&obid, &cut);
+    std::fs::rename(&gone, &remote).unwrap();
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["pushed"], 1, "{job}");
+    let error = job["publishError"].as_str().unwrap();
+    assert!(
+        error.starts_with("Not published: couldn't fetch main: "),
+        "{error}"
+    );
+}
+
 /// A remote that isn't GitHub (here the fixture's `file://` one, with no `pullRequests` in the
 /// configuration) gets the push and nothing else (#627): no `gh` pull request call, the job's
 /// commits counted as pushed, and nothing left to publish by hand.

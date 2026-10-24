@@ -1703,6 +1703,9 @@ fn a_failing_check_is_heard_every_round_and_on_one_more_round() {
         "{resumed}"
     );
     assert!(resumed.contains("CHECK-SAID-7e1"), "{resumed}");
+    // Quoted in a fence of its own, which only obid can close.
+    let open = resumed.find("\n<<<quoted-").expect(resumed);
+    assert!(resumed[open..].contains("CHECK-SAID-7e1"), "{resumed}");
     assert!(
         resumed.trim_end().ends_with(
             "Try again, picking up where you left off. Finish with a short summary as asked."

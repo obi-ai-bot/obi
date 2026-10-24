@@ -661,8 +661,9 @@ fn message_job(
         {
             return already_on_it(shared, &job, &next, &words, source);
         }
-        // Past its safety limit, a follow-up would start its counters again: the owner confirms.
-        if source.owners() && crate::jobs::past_safety(&job) {
+        // Past its safety limit, a follow-up would start its counters again: the owner confirms,
+        // whoever's words they are.
+        if source != Source::Event && crate::jobs::past_safety(&job) {
             return Outcome::Done(shared.jobs.confirm_past_safety(&job, &words).0);
         }
         let new = crate::jobs::follow_up(&job, &words);

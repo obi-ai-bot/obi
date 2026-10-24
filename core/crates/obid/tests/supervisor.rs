@@ -385,7 +385,7 @@ fn the_note_cant_trigger_a_gated_action() {
 }
 
 /// A job that stalled at its token budget gets no turn: going on past a safety limit is the
-/// owner's, so obid asks them at once.
+/// owner's, so obid asks them at once, and an untrusted turn's follow-up waits for their Confirm.
 #[test]
 fn a_budget_stall_gets_no_turn() {
     let (_folder, obid) = obid_with("supervisor-budget", json!({"jobTokenBudget": 1000}));
@@ -417,6 +417,37 @@ fn a_budget_stall_gets_no_turn() {
             .any(|t| t == "Carried it on.")
     );
     assert!(!job(&obid, &id)["stalled"].is_null());
+
+    // A turn that read the web can't carry it past its budget with a follow-up either: that waits
+    // for the owner's Confirm, and nothing starts.
+    let jobs_before = jobs(&obid).len();
+    let tell = format!(r#"WEB OBY oby_tell_job {{"id": "{id}", "words": "Go on."}}"#);
+    let told = call(
+        &obid,
+        "POST",
+        "/v1/plans",
+        Some(&json!({"said": tell, "conversation": conversation})),
+    );
+    assert_eq!(told.status, 200, "{}", told.text);
+    assert!(
+        told.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("waits for your Confirm in the inbox"),
+        "{}",
+        told.text
+    );
+    assert!(
+        inbox(&obid).iter().any(|i| i["kind"] == "confirm"
+            && i["job"] == id.as_str()
+            && i["title"]
+                .as_str()
+                .unwrap()
+                .starts_with("Start a follow-up of")),
+        "{:?}",
+        inbox(&obid)
+    );
+    assert_eq!(jobs(&obid).len(), jobs_before, "nothing started");
 }
 
 /// A stalled job in Bypass mode is never carried on by itself: the supervisor turn's continue

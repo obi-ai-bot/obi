@@ -2336,6 +2336,65 @@ fn a_follow_up_after_research_publishes_only_by_hand() {
     );
 }
 
+/// A turn that looked something up can't carry a job past its safety limit either: its follow-up
+/// would start the counters again, so it waits for the owner's Confirm, and nothing starts.
+#[test]
+fn research_cant_carry_a_job_past_its_safety_limit() {
+    let folder = Folder::new("brain-research-safety");
+    let mut spent = ended(
+        "b0d6e7a1",
+        "Spent it all",
+        obid::job::Status::Interrupted,
+        0,
+        None,
+    );
+    spent.stalled = Some(obid::job::Stalled {
+        why: "budget".into(),
+        text: "the job used 1000 tokens".into(),
+        at: obi_protocol::time::now(),
+        round: 1,
+        branch: spent.branch.clone(),
+        commit: None,
+        commits: 0,
+        session: true,
+        note: String::new(),
+        note_by: "obid".into(),
+    });
+    spent.limit = Some("the job used 1000 tokens".into());
+    let obid = started_with(&folder, &[spent]);
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "list_files",
+                json!({"repo": "obi-e2e/fixture-app"}),
+            )]),
+            message_plan("b0d6e7a1"),
+            reply(""),
+        ],
+    );
+    let answer = said(&obid, "look at the files, then tell the spent job to go on");
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("waits for your Confirm in the inbox"),
+        "{answer}"
+    );
+    let confirms = items_of(&obid, "confirm");
+    assert_eq!(confirms.len(), 1, "{confirms:?}");
+    assert_eq!(confirms[0]["title"], "Start a follow-up of Spent it all");
+    assert_eq!(
+        call(&obid, "GET", "/v1/jobs", None)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "nothing started"
+    );
+}
+
 /// JobActionTests.aJobThatIsStillRunningCantBeTriedAgain, aJobThatNeedsNothingSaysWhyItStays and
 /// startNowStartsAJobWaitingForItsStartWhen's last half: what can't happen says why, and fails.
 #[test]

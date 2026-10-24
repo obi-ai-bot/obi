@@ -1485,6 +1485,13 @@ async fn tell(
     if session.supervising.is_some() {
         return Err(UNWATCHED_START.into());
     }
+    // Past its safety limit, a follow-up would start its counters again: the owner confirms.
+    if crate::jobs::past_safety(&job) {
+        return Ok(shared
+            .jobs
+            .confirm_past_safety(&job, &agent_ready(&words)?)
+            .0);
+    }
     // A follow-up is a job the turn starts: it counts against the turn's ten, and a job gets one
     // follow-up a turn.
     capped(&session.dispatched, "starts jobs")?;

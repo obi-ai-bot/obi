@@ -22,13 +22,13 @@ case "$1 $2" in
       echo '{"hosts":{}}'
     fi ;;
   "auth login")
+    echo $$ > "$HOME/gh-pid"
     if [ -f "$HOME/slow" ]; then sleep 3; fi
     printf '%s\n' "$*" > "$HOME/login-args"
     printf '%s\n' "$GIT_CONFIG_GLOBAL" > "$HOME/git-config-global"
     echo '! One-time code (AB12-CD34) copied to clipboard' >&2
     echo 'Open this URL to continue in your web browser: https://github.com/login/device' >&2
     echo 'gho_NEVER_PASSED_ON' >&2
-    echo $$ > "$HOME/gh-pid"
     while [ ! -f "$HOME/approve" ]; do
       kill -0 "$PPID" 2>/dev/null && [ -d "$HOME" ] || exit 1
       sleep 0.1
@@ -195,11 +195,13 @@ fn a_waiting_sign_in_ends_with_its_test() {
     let obid = start(&folder.0, &config, Some(&bin));
     let started = call(&obid, "POST", "/v1/github/sign-in", None);
     assert_eq!(started.status, 200, "{}", started.text);
-    let pid: i32 = std::fs::read_to_string(folder.0.join("env-home/gh-pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let pid: i32 = within(10, "the stand-in gh to say its pid", || {
+        std::fs::read_to_string(folder.0.join("env-home/gh-pid"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    });
     let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
     assert!(alive());
     drop(obid);
