@@ -436,7 +436,11 @@ struct JobTimeline: View {
                 if mark == .current, job.status == .running, !job.step.isEmpty, !(stage.detail ?? "").contains(job.step) {
                     Sheen(text: job.step, size: Tokens.textBase).padding(.top, 2)
                 }
-                if let detail = detail(stage, mark: mark) {
+                // Merged waits on the owner ("Merge it on GitHub"): its line opens the pull request.
+                if stage.key == "merged", mark == .current, let url = PublishedLink.url(job.published) {
+                    Link(stage.detail ?? "Merge it on GitHub", destination: url).font(Tokens.font(Tokens.textBase, .medium))
+                        .foregroundStyle(Tokens.text).padding(.top, 2)
+                } else if let detail = detail(stage, mark: mark) {
                     detail.font(Tokens.font(Tokens.textBase)).foregroundStyle(Tokens.muted).padding(.top, 2)
                         .fixedSize(horizontal: false, vertical: true)
                 }

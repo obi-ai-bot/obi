@@ -1,11 +1,12 @@
 import CryptoKit
 import Foundation
+import LocalAuthentication
 import Synchronization
 import Testing
 @testable import Oby
 
 /// Publishing a runner's job from the Mac (#152): this Mac's key registers with the runner, the
-/// runner's sentence is what Touch ID approves, and nothing goes out without a signature.
+/// runner's sentence is what Touch ID or the Mac's password approves, and nothing goes out without a signature.
 @MainActor
 struct MacPublishTests {
     /// The runner's sentence, as it says it: shown and signed exactly so.
@@ -27,7 +28,7 @@ struct MacPublishTests {
         let device = MacDevice(key: key, name: "Wellington's MacBook Air", defaults: stub.defaults)
         #expect(try await device.register(with: stub.runner) == "d7c1")
         #expect(try await device.register(with: stub.runner) == "d7c1")
-        #expect(device.state == .registered && device.status == "Registered, Touch ID" && device.problem == nil)
+        #expect(device.state == .registered && device.status == "Registered, Touch ID or password" && device.problem == nil)
         #expect(device.id(on: stub.runner) == "d7c1")
         let sent = stub.requests
         #expect(sent.map(\.method) == ["POST", "POST"] && sent.allSatisfy { $0.path == "/v1/devices" })
@@ -74,18 +75,49 @@ struct MacPublishTests {
         #expect(key.signing.publicKey.isValidSignature(signature, for: Approval.message(job: "ab12cd34", action: sentence, signedAt: signedAt)))
     }
 
-    /// A cancelled Touch ID sends nothing: no publish reaches the runner.
+    /// A cancelled Touch ID or password sends nothing: no publish reaches the runner.
     @Test func cancelledTouchIDSendsNothing() async throws {
         let stub = RunnerStub { request in
             request.path == "/v1/devices" ? (200, #"{"id": "d7c1"}"#) : (200, #"{"url": "https://github.com/deskree-inc/oby/pull/200"}"#)
         }
         let device = MacDevice(key: FakeKey(cancels: true), name: "Mac", defaults: stub.defaults)
         let error = await #expect(throws: RunnerError.self) { try await device.publish("ab12cd34", action: sentence, with: stub.runner) }
-        #expect(error?.message == "Not published: Touch ID didn't approve it.")
+        #expect(error?.message == "Not published: it wasn't approved on this Mac.")
         #expect(!stub.requests.contains { $0.path.hasSuffix("/publish") })
     }
 
-    /// The owner's Confirm (#776): Touch ID signs the item's own title, over its id, and that's
+    /// A Mac without Touch ID (a Mac mini, a closed laptop) approves with its password: the key
+    /// asks with the policy that takes Touch ID or the password, the runner's sentence its reason,
+    /// and a cancel there signs nothing.
+    @Test func asksForTouchIDOrThePassword() async throws {
+        let prompt = RefusingPrompt()
+        let key = TouchIDKey(context: { prompt })
+        let error = await #expect(throws: RunnerError.self) { try await key.approve(job: "ab12cd34", action: sentence, device: "d7c1") }
+        #expect(error?.message == "Not published: it wasn't approved on this Mac.")
+        await #expect(throws: ConfirmCancelled.self) { try await key.approveConfirm(item: "i9", title: "Delete it.", device: "d7c1") }
+        let asked = prompt.asked.withLock { $0 }
+        #expect(asked.map(\.policy) == [.deviceOwnerAuthentication, .deviceOwnerAuthentication])
+        #expect(asked.map(\.reason) == [TouchIDKey.reason(sentence), "delete it"])
+    }
+
+    /// A Mac that registered a Touch ID-only key (its id kept as `device.<host>`) registers its new
+    /// key on its next publish, and signs with the new id: the old one isn't sent.
+    @Test func touchIDOnlyKeyRegistersAgain() async throws {
+        let stub = RunnerStub { request in
+            switch (request.method, request.path) {
+            case ("POST", "/v1/devices"): (200, #"{"id": "n3w1"}"#)
+            case ("POST", "/v1/jobs/ab12cd34/publish"): (200, #"{"url": "https://github.com/deskree-inc/oby/pull/200"}"#)
+            default: (404, #"{"error": "No."}"#)
+            }
+        }
+        stub.defaults.set("0ld1", forKey: "device.\(stub.host)")
+        let device = MacDevice(key: FakeKey(), name: "Mac", defaults: stub.defaults)
+        _ = try await device.publish("ab12cd34", action: sentence, with: stub.runner)
+        #expect(stub.requests.map(\.path) == ["/v1/devices", "/v1/jobs/ab12cd34/publish"])
+        #expect(stub.requests.last?.json?["device"] as? String == "n3w1" && device.id(on: stub.runner) == "n3w1")
+    }
+
+    /// The owner's Confirm (#776): Touch ID or the password signs the item's own title, over its id, and that's
     /// what goes with the answer.
     @Test func confirmSignsTheItemsTitle() async throws {
         let title = "Delete Vault tests (its worktree and local branch go)"
@@ -108,24 +140,24 @@ struct MacPublishTests {
         #expect(String(decoding: Approval.confirmMessage(item: "i9", title: "T", signedAt: "S"), as: UTF8.self) == "oby-confirm\ni9\nT\nS")
     }
 
-    /// A cancelled Touch ID on a Confirm sends nothing, so the card stays open.
+    /// A cancelled Touch ID or password on a Confirm sends nothing, so the card stays open.
     @Test func cancelledTouchIDConfirmsNothing() async throws {
         let stub = RunnerStub { request in request.path == "/v1/devices" ? (200, #"{"id": "d7c1"}"#) : (500, #"{"error": "No."}"#) }
         let device = MacDevice(key: FakeKey(cancels: true), name: "Mac", defaults: stub.defaults)
         await #expect(throws: ConfirmCancelled.self) { try await device.confirm("i9", title: "Delete it", with: stub.runner) }
         #expect(!stub.requests.contains { $0.path.hasSuffix("/answer") })
-        // A Mac with no Touch ID says where to confirm, and sends nothing either.
+        // A Mac with no Secure Enclave says where to confirm, and sends nothing either.
         let none = MacDevice(key: FakeKey(isAvailable: false), name: "Mac", defaults: stub.defaults)
         let error = await #expect(throws: RunnerError.self) { try await none.confirm("i9", title: "Delete it", with: stub.runner) }
-        #expect(error?.message == MacDevice.noTouchID)
+        #expect(error?.message == MacDevice.noKey)
     }
 
-    /// A Mac without Touch ID neither registers nor publishes, and says why.
-    @Test func noTouchIDNoKey() async {
+    /// A Mac without a Secure Enclave neither registers nor publishes, and says why.
+    @Test func noSecureEnclaveNoKey() async {
         let stub = RunnerStub { _ in (200, #"{"id": "d7c1"}"#) }
         let device = MacDevice(key: FakeKey(isAvailable: false), name: "Mac", defaults: stub.defaults)
         await #expect(throws: RunnerError.self) { try await device.publish("ab12cd34", action: sentence, with: stub.runner) }
-        #expect(stub.requests.isEmpty && device.status == "Needs Touch ID")
+        #expect(stub.requests.isEmpty && device.status == "Needs a Secure Enclave")
     }
 
     /// A job older than the latest 50 (an inbox item's Open job, or an alert's Publish) is fetched
@@ -155,7 +187,7 @@ struct MacPublishTests {
     }
 }
 
-/// Signs as the Touch ID key does, with a software key, or cancels as the user would.
+/// Signs as the Mac's key does, with a software key, or cancels as the user would.
 nonisolated struct FakeKey: PublishingKey {
     var isAvailable = true
     var cancels = false
@@ -164,14 +196,14 @@ nonisolated struct FakeKey: PublishingKey {
     func publicKey() throws -> Data { signing.publicKey.x963Representation }
 
     func approve(job: String, action: String, device: String) async throws -> Approval {
-        if cancels { throw RunnerError(message: "Not published: Touch ID didn't approve it.") }
+        if cancels { throw RunnerError(message: "Not published: it wasn't approved on this Mac.") }
         let signedAt = ISO8601DateFormatter().string(from: .now)
         let signature = try signing.signature(for: Approval.message(job: job, action: action, signedAt: signedAt))
         return Approval(device: device, action: action, signedAt: signedAt, signature: signature.derRepresentation.base64EncodedString())
     }
 
     func approveConnection(action: String, device: String) async throws -> Approval {
-        if cancels { throw RunnerError(message: "Nothing changed: Touch ID didn't approve it.") }
+        if cancels { throw RunnerError(message: "Nothing changed: it wasn't approved on this Mac.") }
         let signedAt = ISO8601DateFormatter().string(from: .now)
         let signature = try signing.signature(for: Approval.connectionMessage(action: action, signedAt: signedAt))
         return Approval(device: device, action: action, signedAt: signedAt, signature: signature.derRepresentation.base64EncodedString())
@@ -182,6 +214,16 @@ nonisolated struct FakeKey: PublishingKey {
         let signedAt = ISO8601DateFormatter().string(from: .now)
         let signature = try signing.signature(for: Approval.confirmMessage(item: item, title: title, signedAt: signedAt))
         return Approval(device: device, action: title, signedAt: signedAt, signature: signature.derRepresentation.base64EncodedString())
+    }
+}
+
+/// macOS's prompt as a test answers it: it keeps what it was asked with, and the user cancels.
+nonisolated final class RefusingPrompt: LAContext, @unchecked Sendable {
+    let asked = Mutex<[(policy: LAPolicy, reason: String)]>([])
+
+    override func evaluatePolicy(_ policy: LAPolicy, localizedReason: String, reply: @escaping @Sendable (Bool, (any Error)?) -> Void) {
+        asked.withLock { $0.append((policy, localizedReason)) }
+        reply(false, LAError(.userCancel))
     }
 }
 

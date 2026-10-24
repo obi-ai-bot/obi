@@ -1124,7 +1124,7 @@ impl Job {
                             &mut stages,
                             "merged",
                             "current",
-                            Some("Ready for you to merge"),
+                            Some(crate::publish::MERGE_ON_GITHUB),
                             None,
                         );
                     }
@@ -1139,6 +1139,9 @@ impl Job {
                     }
                     _ => {
                         let detail = match (&self.review_error, &self.pull_request) {
+                            (Some(error), _) if error == crate::publish::NOT_REVIEWED => {
+                                crate::publish::YOUR_REVIEW.into()
+                            }
                             (Some(error), _) => format!("Waiting for review · {error}"),
                             (None, None) => "Waiting for GitHub status".into(),
                             (None, Some(_)) => "Waiting for review".into(),
@@ -1503,7 +1506,13 @@ mod tests {
                 "Secret scan clean · pushed · pull request opened".into()
             )
         );
-        assert_eq!(state(&job, "review").0, "current");
+        assert_eq!(
+            state(&job, "review"),
+            (
+                "current".into(),
+                "Pull request open · waiting for your review on GitHub".into()
+            )
+        );
         assert_eq!(state(&job, "merged").0, "upcoming");
         let pr = |state: &str, decision: Option<&str>| crate::github::PullRequest {
             state: state.into(),
@@ -1517,7 +1526,7 @@ mod tests {
         assert_eq!(state(&job, "review"), ("done".into(), "Approved".into()));
         assert_eq!(
             state(&job, "merged"),
-            ("current".into(), "Ready for you to merge".into())
+            ("current".into(), "Merge it on GitHub".into())
         );
         job.pull_request = Some(pr("OPEN", Some("CHANGES_REQUESTED")));
         assert_eq!(

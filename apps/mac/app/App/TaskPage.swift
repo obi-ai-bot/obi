@@ -660,7 +660,7 @@ struct TaskPage: View {
     }
 
     /// Publish by hand when Oby's own didn't go: what it would do is shown first, in the runner's
-    /// own words for its jobs, and exactly that goes out after Touch ID.
+    /// own words for its jobs, and exactly that goes out after Touch ID or the Mac's password.
     @ViewBuilder private var publish: some View {
         if let reason = job.publishError { Text(reason).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.needs).padding(.bottom, 8) }
         if actions.publishing == nil {
@@ -670,7 +670,7 @@ struct TaskPage: View {
                 Text(action).font(Tokens.font(Tokens.textBase, .medium)).foregroundStyle(Tokens.ink).fixedSize(horizontal: false, vertical: true)
                 if let problem { Text(problem).font(Tokens.font(Tokens.textSm)).foregroundStyle(Tokens.danger) }
                 HStack(spacing: 8) {
-                    PillButton(title: busy ? "Publishing…" : "Publish with Touch ID", primary: true) { publish(action) }.disabled(busy)
+                    PillButton(title: busy ? "Publishing…" : TouchIDKey.publish, primary: true) { publish(action) }.disabled(busy)
                     PillButton(title: "Not now", quiet: true) { self.action = nil; problem = nil }.disabled(busy)
                 }
             }

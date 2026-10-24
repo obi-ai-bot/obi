@@ -243,7 +243,7 @@ enum Alerts {
         switch notice {
         case .ready:
             alert.category = Alert.Category(id: "ready", buttons: [
-                Alert.Button(id: RunnerFeed.publishButton, title: "Publish with Touch ID", opens: true), openButton,
+                Alert.Button(id: RunnerFeed.publishButton, title: TouchIDKey.publish, opens: true), openButton,
             ])
         case .permission:
             guard let permission = job.permission else { break }
