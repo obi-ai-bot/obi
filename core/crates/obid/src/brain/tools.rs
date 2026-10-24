@@ -1449,6 +1449,10 @@ async fn tell(
         .jobs
         .get(&id)
         .ok_or("That job isn't here any more.")?;
+    // Its agent's question is the owner's to answer (#858): Oby's words never are.
+    if job.permission.as_ref().is_some_and(|p| p.is_question()) {
+        return Err(crate::jobs::QUESTION_IS_THE_OWNERS.into());
+    }
     if job.status.is_active() {
         return outcome_answer(
             session,

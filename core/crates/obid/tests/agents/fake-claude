@@ -20,6 +20,7 @@
 //   USAGES: <json>   a list: like USAGE with its first entry on the first turn, the next on the
 //                    next (counted in .obi/usage-turn)
 //   ASK: <json>      asks obid's permission for {"tool", "input"} and answers with what obid said
+//                    (an AskUserQuestion's with " answers: <its updatedInput's answers>")
 //   ASKS: <json>     asks for each of a list of {"tool", "input"} in turn, then ends the turn with
 //                    "answers: allow, deny: <why>, …"
 //   LOGIN: <home>    reads its login in its HOME, writes a hook into its ~/.claude/settings.json
@@ -134,7 +135,9 @@ rl.on("line", (line) => {
       if (queue.length) return askNext();
       return result(`answers: ${said.join(", ")}`);
     }
-    result(`answer: ${answer.behavior}`);
+    // An AskUserQuestion's answer (#858) comes in its updatedInput.
+    const answers = answer.updatedInput?.answers;
+    result(`answer: ${answer.behavior}${answers ? ` answers: ${JSON.stringify(answers)}` : ""}`);
     return;
   }
   if (message.type !== "user") return;

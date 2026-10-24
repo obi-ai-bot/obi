@@ -682,7 +682,8 @@ fn message_job(
             )),
         };
     }
-    match shared.jobs.message(&job.id, &words, source) {
+    // Its agent's question is the owner's to answer (#858): the brain's words never are.
+    match shared.jobs.relay(&job.id, &words, source) {
         Some(Ok(_)) => Outcome::Done(format!("Told {name} what you said.")),
         Some(Err(refused)) => Outcome::Failed(format!("Couldn't tell {name}: {}", refused.0)),
         None => Outcome::Failed("That job isn't here any more.".into()),
@@ -751,7 +752,7 @@ pub(super) fn already_on_it(
     source: Source,
 ) -> Outcome {
     let (name, follow) = (job.short_title(), next.short_title());
-    match shared.jobs.message(&next.id, words, source) {
+    match shared.jobs.relay(&next.id, words, source) {
         Some(Ok(heard)) => Outcome::Started(
             format!("Already on it in {follow}, the follow-up of {name}: I told it what you said."),
             heard.to_json(),
