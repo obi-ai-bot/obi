@@ -275,6 +275,8 @@ pub struct Link {
     /// The chain as this Obi knows it for itself: no rollback, no fork (crate::sphere::link::ChainKept).
     chain: Mutex<ChainKept>,
     following: AtomicBool,
+    /// Whether the sender and the clock run: only while obid is in a Sphere.
+    sender_running: AtomicBool,
     stopping: watch::Receiver<bool>,
     /// Teammates' jobs on this Mac (crate::sphere::hosting).
     pub(super) hosting: super::hosting::Hosting,
@@ -508,6 +510,7 @@ impl Link {
             shares_sync: tokio::sync::Mutex::new(()),
             chain: Mutex::new(chain),
             following: AtomicBool::new(false),
+            sender_running: AtomicBool::new(false),
             stopping,
             hosting: super::hosting::Hosting::default(),
             setup: super::hosting::Setup::from(&setup_config),
@@ -546,27 +549,24 @@ impl Link {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Starts following the Sphere when obid has joined one, and the sender and the clock.
+    /// Starts following the Sphere, and the sender and the clock, when obid has joined one.
     pub fn start(self: &Arc<Self>) {
         self.reconcile();
-        let joined = self
-            .lock()
-            .membership
-            .as_ref()
-            .is_some_and(|m| m.state == "joined");
-        if joined {
+        if self.is_joined() {
             self.follow();
+            self.start_sender();
         }
         if self.mac().on {
             super::hosting::fetch_image_soon(self);
         }
-        let link = self.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                () = link.clone().run_sender() => {}
-                () = stopped(link.stopping.clone()) => {}
-            }
-        });
+    }
+
+    /// Whether obid is in a Sphere now.
+    fn is_joined(&self) -> bool {
+        self.lock()
+            .membership
+            .as_ref()
+            .is_some_and(|m| m.state == "joined")
     }
 
     /// After a restart: an accepted request whose job has ended without a reply gets its failed
@@ -1674,6 +1674,7 @@ impl Link {
         }
         let read = self.read_directory().await;
         self.follow();
+        self.start_sender();
         if let Err(e) = read {
             self.note_error(&e);
             return Err(from_client(&e));
@@ -1898,6 +1899,8 @@ impl Link {
         };
         if let Some(membership) = revoked {
             let _ = self.files.save_membership(&membership);
+            // The sender stops now, not at its next wakeup.
+            self.outbox.notify_one();
             // The relay's socket stops serving phones now, not at its next check.
             if let Some(relay) = self.relay.get() {
                 relay.wake();
@@ -2602,9 +2605,30 @@ impl Link {
     // -----------------------------------------------------------------------------------------
     // Sending replies, and the clock
 
+    /// Starts the sender and the clock, once: they stop by themselves when obid leaves its Sphere.
+    fn start_sender(self: &Arc<Self>) {
+        if self.sender_running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let link = self.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = link.clone().run_sender() => {}
+                () = stopped(link.stopping.clone()) => {}
+            }
+        });
+    }
+
     async fn run_sender(self: Arc<Self>) {
         let mut backoff = Duration::from_secs(1);
         loop {
+            if !self.is_joined() {
+                self.sender_running.store(false, Ordering::SeqCst);
+                // A join that came in between found it still running: it goes on for that one.
+                if !self.is_joined() || self.sender_running.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+            }
             self.expire();
             let all_sent = self.send_waiting().await;
             let wait = if all_sent {
@@ -5885,6 +5909,73 @@ mod tests {
         assert_eq!(kept[0].state, "declined");
         let _ = std::fs::remove_dir_all(&home);
     }
+
+    /// A link with no Sphere, its home under `name`.
+    fn sender_link(name: &str) -> (Arc<Link>, std::path::PathBuf, watch::Sender<bool>) {
+        let home = std::env::temp_dir().join(format!("obid-link-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let config = Config::parse(
+            &json!({"listen": "127.0.0.1:0", "home": home, "owner": "wellington"}).to_string(),
+        )
+        .unwrap();
+        let events = Events::new();
+        let jobs = Jobs::open(config.clone(), events.clone(), Err("no sandbox".into())).unwrap();
+        let (stop, stopping) = watch::channel(false);
+        let link = Link::open(config, jobs, events, stopping).unwrap();
+        (link, home, stop)
+    }
+
+    fn set_membership(link: &Link, state: &str) {
+        link.lock().membership = Some(Membership {
+            state: state.into(),
+            url: "http://127.0.0.1:1".into(),
+            sphere: "s".into(),
+            obi_id: "obi-wellington".into(),
+            card: json!({}),
+            joined_at: time::now(),
+        });
+    }
+
+    /// Out of a Sphere the sender doesn't run; it starts once obid joins, and only once however
+    /// many times it joins.
+    #[tokio::test]
+    async fn the_sender_starts_on_join() {
+        let (link, home, _stop) = sender_link("sender-join");
+        link.start();
+        assert!(!link.sender_running.load(Ordering::SeqCst));
+
+        set_membership(&link, "joined");
+        link.start_sender();
+        assert!(link.sender_running.load(Ordering::SeqCst));
+        // Two joins, one sender: the test's Arc and the two the one waiting sender holds.
+        link.start_sender();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(Arc::strong_count(&link), 3);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The sender stops when obid leaves its Sphere, and nothing holds the link any more.
+    #[tokio::test]
+    async fn the_sender_stops_on_leave() {
+        let (link, home, _stop) = sender_link("sender-leave");
+        set_membership(&link, "joined");
+        link.start_sender();
+        assert!(link.sender_running.load(Ordering::SeqCst));
+
+        set_membership(&link, "revoked");
+        link.outbox.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while link.sender_running.load(Ordering::SeqCst) || Arc::strong_count(&link) > 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the sender stops");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// The inbox lists what needs the owner first (with what waits for the model), then FYI, then
     /// ignore, each by arrival; a second item about the same thing is `ignore` while the one that
     /// stands for it is open, an offer standing before what only says something; and the model's
