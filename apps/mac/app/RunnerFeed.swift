@@ -1297,6 +1297,8 @@ final class RunnerFeed {
 
     /// The window in front shows the conversation the talk key's words joined, where their reply shows.
     var talkShown: Bool { talkConversation.map { windowShows(.conversation($0)) } ?? false }
+    /// The talk key's words were listed, so `talkShown` can answer now: the pill decides again (the app sets it).
+    @ObservationIgnored var onTalkListed: () -> Void = {}
 
     /// An alert for each inbox ask that waits for the owner and isn't told yet (`Alerts.alerts`). One
     /// the window shows stays untold, and alerts once the window goes (`windowLeft`).
@@ -1335,6 +1337,7 @@ final class RunnerFeed {
         if turn.who == .user, let words = talkWords, turn.text.trimmingCharacters(in: .whitespacesAndNewlines) == words {
             talkWords = nil
             talkConversation = conversation
+            onTalkListed()
         }
         if let settled = Alerts.settled(by: turn) {
             asked[conversation] = nil

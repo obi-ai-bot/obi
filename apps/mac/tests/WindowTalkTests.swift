@@ -70,12 +70,35 @@ struct WindowTalkTests {
             #expect(r6 == .show(announce: true), "\(ending)")
         }
 
-        // Escape while the words wait: nothing listens again.
-        turn = TalkTurn()
+    }
+
+    /// Hands-free lasts until the next press (AGENTS.md): a press while Oby thinks (a short fn tap,
+    /// Control-Option, Stop all), or while the words are still being written down, ends it, so the
+    /// reply only shows.
+    @Test func aPressAfterHandsFreeWordsEndsHandsFree() {
+        var turn = TalkTurn()
+        _ = turn.pressed()
+        _ = turn.closed()
         _ = turn.heard("fix the vault tests", handsFree: true, again: false, problem: false)
-        turn.cancelled()
-        let r7 = turn.replied("On it.", keyDown: false, talking: false)
-        #expect(r7 == .show(announce: true))
+        _ = turn.pressed()
+        let thinking = turn.replied("On it.", keyDown: false, talking: false)
+        #expect(thinking == .show(announce: true), "a press while Oby thinks")
+
+        turn = TalkTurn()
+        _ = turn.pressed()
+        _ = turn.closed()
+        _ = turn.pressed()
+        _ = turn.heard("fix the vault tests", handsFree: true, again: false, problem: false)
+        let writing = turn.replied("On it.", keyDown: false, talking: false)
+        #expect(writing == .show(announce: true), "a tap while the words are written down")
+
+        // The press that sends hands-free words comes before their send: it doesn't count against them.
+        turn = TalkTurn()
+        _ = turn.pressed()
+        _ = turn.closed()
+        _ = turn.heard("fix the vault tests", handsFree: true, again: false, problem: false)
+        let asked = turn.replied("On it.", keyDown: false, talking: false)
+        #expect(asked == .listenAgain)
     }
 
     /// The reply lands while a key is going down, or while you're talking already: that press and

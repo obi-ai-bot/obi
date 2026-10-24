@@ -53,6 +53,11 @@ final class IslandController {
         remote.onConnected = { [weak self] in self?.collectKept() }
         // Oby's answer the pill shows doesn't alert as well (#862).
         feed.pillShowsTalk = { [weak self] in self?.showsTalkReply ?? false }
+        // A reply that came before its words were listed: the pill decides again where it shows.
+        feed.onTalkListed = { [weak self] in
+            guard let self, model.reply != nil, let turn = model.turn else { return }
+            setTurn(turn)
+        }
     }
 
     /// The talk key's turn shows Oby's reply: it's on its way (Thinking: the pill shows it, unless the

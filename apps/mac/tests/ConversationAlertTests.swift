@@ -313,9 +313,12 @@ struct ConversationAlertTests {
         feed.pillShowsTalk = { pill }
         var front: AlertPlace? = .conversation("c2")
         feed.windowShows = { $0 == front }
+        var listed = 0
+        feed.onTalkListed = { listed += 1 }
         feed.talking("how are the vault tests")
         #expect(!feed.talkShown, "not listed yet")
         feed.heard(Turn(date: .now, who: .user, text: "how are the vault tests", conversation: "c1"), TurnExtras())
+        #expect(listed == 1, "the pill decides again")
         #expect(!feed.talkShown, "another conversation in front")
         front = .conversation("c1")
         #expect(feed.talkShown)

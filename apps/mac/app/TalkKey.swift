@@ -117,11 +117,12 @@ final class TalkKey {
     }
 
     private func press(_ key: Key) {
+        // Control-Option is VoiceOver's while it runs, for every command: never a press of Oby's.
+        if key == .controlOption, NSWorkspace.shared.isVoiceOverEnabled { return }
         on(.press(key))
         // Hands-free ends at the next press, of either key.
         if handsFree { stop(.send); return }
         guard held == nil, !talking else { return }
-        if key == .controlOption, NSWorkspace.shared.isVoiceOverEnabled { return }
         held = key
         wait?.cancel()
         wait = Task {
