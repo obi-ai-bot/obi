@@ -153,9 +153,15 @@ struct RunnerTests {
                 == "oby-publish\nabc\nPush oby/fix-1 to deskree-inc/oby and open a pull request into dev.\n2026-10-09T22:01:07Z")
     }
 
+    /// Publish by hand, when the runner's own publish failed: a done job with commits not out yet,
+    /// never Oby's own review or research jobs (#725, as Engine's `Job.canPublish`).
     @Test func publishOnlyWithCommits() throws {
         var job = try Runner.decoder.decode(Job.self, from: Data(job.utf8))
         job.status = .done
+        job.commits = 2
+        #expect(!job.canPublish, "a review never publishes")
+        job.kind = "fix"
+        job.commits = nil
         #expect(!job.canPublish)
         job.commits = 2
         #expect(job.canPublish)
