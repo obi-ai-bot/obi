@@ -57,7 +57,7 @@ Everything below runs on your Mac, in `cloud/control-plane/`. Deploying is never
    - Account › **Cloudflare Tunnel › Edit**, on your account;
    - Zone › **DNS › Edit**, on the device domain's zone only.
 
-   Nothing else: the token makes tunnels and CNAME records and reads tunnel tokens. (A CI machine that deploys instead of `wrangler login` needs Workers Scripts › Edit and D1 › Edit as well, in a token of its own.)
+   Nothing else: the token makes tunnels and CNAME records and reads tunnel tokens. (Pushes need an APNs key of your own team's: [Pushes, Setting it up](#setting-it-up-the-owners-step).) (A CI machine that deploys instead of `wrangler login` needs Workers Scripts › Edit and D1 › Edit as well, in a token of its own.)
 8. **Find the ids:** the account id and the device domain's zone id are on that zone's Overview page in the dashboard, right column. `CF_ZONE_ID` is the device domain's zone.
 9. **Create the database:** `pnpm exec wrangler d1 create oby-control`, then paste the `database_id` it prints into your block's `d1_databases`.
 10. **Run the migrations:** `pnpm migrate:remote --env <name>`.
@@ -89,7 +89,7 @@ Without the three `CF_*` secrets, registering still works; asking for an endpoin
 
 ### The API
 
-Every answer is JSON; an error is `{"error": "one line to show"}` with its status. There are no bearer tokens: every call but `/v1/health` and `/v1/auth` is signed by the Mac's key, with these headers:
+Every answer is JSON; an error is `{"error": "one line to show"}` with its status. There are no bearer tokens: every call but `/v1/health`, `/v1/auth`, the providers' callbacks, a hook's `/h/{id}` and the push relay's routes ([Pushes](#pushes)) is signed by the Mac's key, with these headers:
 
 - `Oby-Key`: the public key, an uncompressed P-256 point (X9.63, 65 bytes), base64url with no padding. One spelling per key.
 - `Oby-Timestamp`: Unix seconds; refused when more than 5 minutes from the Worker's clock (401, "This Mac's clock is off…").
@@ -123,6 +123,76 @@ A bad or missing signature is 401; a good signature from a key with no installat
 
 The cron (`sweep` in `src/app.ts`, every minute) deletes spent nonces, day-old rate-limit windows and deliveries kept 72 hours, removes installations that made no tunnel in 24 hours (and what they kept, and their hooks) in one statement, removes up to 8 installations idle for 30 days, tunnels and records first, and asks about 8 endpoints (never-checked first): one whose tunnel never connected within an hour, or has been down for 72 hours, is reclaimed (the installation stays, and isn't swept as never used: it made an endpoint once); one that Cloudflare refuses is tried again next time.
 
+## Pushes
+
+How Oby reaches the iPhone when the phone isn't talking to the Mac (#398, the owner's decision of 2026-10-23, which replaced that issue's first plan): through a relay in this Worker that only ever sees sealed blobs. Apple's push key is Deskree's and can't ship inside Oby, so obid can't call APNs itself; the relay holds the key, and the alerts stay between obid and the phone. This is contract v2 (the coordinator's review of 2026-10-23): obid never holds the phone's `pushSecret`, and every push carries its time.
+
+1. The iPhone registers its APNs device token with the relay, with no sign-in. The relay checks the token with Apple, then answers a `pushId` and a `pushSecret`.
+2. The phone gives its obid the `pushId`, the `pushKey` made from the secret, and the public key alerts are sealed to (obid's side: docs/runner-api.md). It keeps the `pushSecret` to itself: only the secret re-registers or forgets the phone.
+3. For each alert, obid seals it to the phone's key and posts the sealed blob to the relay with its time, signed with an HMAC under the `pushKey`.
+4. The relay checks the HMAC and the time, and sends Apple a fixed alert carrying the blob. The phone's Notification Service Extension opens the blob and shows the real alert; one it can't open shows the fixed words, "Oby: Open Oby to see it."
+
+These routes are the one part of the control plane open to any phone, outsiders included, on every instance: `MEMBER_WORKSPACES` doesn't apply, and the phone never signs in.
+
+**The keys.** Every HMAC is HMAC-SHA-256, and **every HMAC key is raw bytes, never base64url text**: a `pushSecret`'s or a `pushKey`'s raw bytes are its base64url decoded, 32 bytes. Every result is base64url with no padding (43 characters).
+
+- `pushSecret` = HMAC(key: the UTF-8 bytes of the relay's own `PUSH_SECRET_KEY`, message: UTF-8 `oby-push-secret/1`, a newline, then the `pushId`). The relay makes it again whenever it needs it, so D1 keeps no secret. Only the relay makes it.
+- `pushKey` = HMAC(key: the 32 raw bytes of `pushSecret`, message: UTF-8 `oby push key v1`). The phone makes it, and the relay makes it again from the `pushSecret`.
+- `Oby-Push-Mac` = HMAC(key: the 32 raw bytes of `pushKey`, message: the raw request body bytes, exactly as sent).
+- A `pushSecret` or `Oby-Push-Mac` that isn't exactly the relay's own 43 base64url characters (32 bytes, no padding) is refused (401), compared in constant time.
+
+A fixed vector to check against (`test/push.test.ts`, "the keys", worked out apart from the relay with Python's `hmac`):
+
+| | |
+| --- | --- |
+| `pushSecret` | `7x-XJBtltDkgComjTzh2aougWSW5C4fOPr7MutSocH4` |
+| `pushKey` | `vx_9SyYw9p7qPCxR8xHlDF8WlTOsR_LRA67SHhzpTHM` |
+| body | `{"pushId":"b2J5LXRlc3QtdmVjdG9yLTAx","sealed":"c2VhbGVkLWZvci10aGUtcGhvbmU","collapse":"9f08fd10","urgent":true,"at":1791806400}` |
+| `Oby-Push-Mac` | `EK3ocbR_NCA7i3gJQAGEnXJe2mGFd74zqt190mk1a7s` |
+
+### The calls
+
+| Call | What |
+| --- | --- |
+| `POST /v1/push/devices` `{"apns", "topic", "sandbox"}` | From the iPhone, `Content-Type: application/json` only (415 otherwise). A web page can't send that without a CORS preflight, which this Worker refuses, so a page can't register tokens from its visitors' addresses. `apns` is the device token in hex (64 to 200 characters, kept lower-case); `topic` the app's bundle id, one of `APNS_TOPICS` (`com.deskree.oby.ios` on Deskree's instance); `sandbox` true for a development build (APNs' sandbox), false for TestFlight and the App Store. **A token new to the relay is checked with Apple before it's kept:** one background push (`apns-push-type: background`, priority 5, `{"aps": {"content-available": 1}}`, nothing shown). If Apple answers 410, `BadDeviceToken` or `DeviceTokenNotForTopic` (a wrong `sandbox` too), the answer is 422 and nothing is kept; if Apple doesn't answer, 502. Then 200 `{"pushId", "pushSecret"}`, `Cache-Control: no-store`: `pushId` is 24 base64url characters (18 random bytes), `pushSecret` 43. A token another `pushId` already has moves to this one, and the other is forgotten. Any other field is 422, a body over 1 KiB 413. Limits: 30 new phones an hour per client and 200 per network (429), 2,000 an hour over everyone, 10 checks an hour per token, and `MAX_PUSH_DEVICES` registered at once (503, with a warning in Workers Logs past 80%; the count is one row kept by triggers, so a registration reads one row, not the table). |
+| `POST /v1/push/devices` `{"apns", "topic", "sandbox", "pushId", "pushSecret"}` | The phone registers a changed token for the same id: 200 with the same `pushId` and `pushSecret`. A changed token is checked with Apple first; the same token again isn't. It brings back an id the relay forgot (after Apple said the token was bad), since the secret proves it's that phone's, so the phone may call it at every launch. A wrong secret (the `pushKey` too), an id never made, or one of the two missing: 401, the same answer each time; the phone then registers anew and gives obid the new `pushId` and `pushKey`. 20 an hour per `pushId`. |
+| `DELETE /v1/push/devices/{pushId}` | With `Authorization: Bearer <pushSecret>`. Forgets the phone: 204, also when it was gone already; 401 for a wrong or missing secret, the `pushKey` included, so obid can't. |
+| `POST /v1/push` `{"pushId", "sealed", "collapse"?, "urgent"?, "at"}` | From obid, with `Oby-Push-Mac` (above). `at` is the push's time in Unix seconds, required; the MAC covers it, and more than 5 minutes from the relay's clock either way is 401. (The phone drops repeats and stale alerts by the sealed alert's id and time.) `sealed` is base64url, at most 3,072 characters (413), so Apple's payload stays under its 4 KB; `collapse` 1 to 64 printable ASCII characters with no space (it reaches Apple as `apns-collapse-id`, so make it opaque); `urgent` true or false, false when it's missing. Any other field is 422, a body over 4 KiB 413. A missing or wrong MAC is 401, the same for an id never made, and it's checked before D1 is read or anything is counted. Then 30 a minute and 1,000 a day per `pushId`, and the same per token, so one phone registered under new pushIds shares one allowance (429). The relay sends `POST https://api.push.apple.com/3/device/<token>` (`api.sandbox.push.apple.com` for a sandbox phone) with `apns-topic`, `apns-push-type: alert`, `apns-priority` 10 when urgent and 5 otherwise, `apns-collapse-id` when given, and `{"aps": {"alert": {"title": "Oby", "body": "Open Oby to see it."}, "mutable-content": 1, "sound": "default"}, "sealed": "<blob>"}`. Answers 200 `{"ok": true}` when Apple took it. 410 when the phone isn't registered: Apple answered 410, `BadDeviceToken` or `DeviceTokenNotForTopic` (then the relay forgets it), or it was forgotten before; obid stops pushing to it until the phone hands it over again. 429 when Apple says too many to this phone, with its `Retry-After`. 503 when the relay's own sign-in with Apple is renewed too often (`TooManyProviderTokenUpdates`), or until the APNs key and `PUSH_SECRET_KEY` are set. 502 when Apple refused the push (its reason in the error) or didn't answer. |
+
+The provider token is an ES256 JWT (`kid` the key's id, `iss` the team, `iat` now) signed with the `.p8` key. One token is shared by every isolate for 40 minutes, since Apple wants a new one at most every 20 minutes and at least every 60. It's kept in D1's `apns_provider_token` only sealed: AES-256-GCM under a key that is the HMAC of `oby-apns-token/1` under `PUSH_SECRET_KEY`, with the key's id and team as associated data. It's made again after Apple refuses it.
+
+### What the relay can and can't see
+
+- **What it keeps** (D1): each phone's `pushId`, APNs token, topic and `sandbox` (`push_devices`), and how many there are (`push_device_count`). No time, no address, no Mac, no account, and no secret. The sealed provider token above is the only other thing kept.
+- **The rate limits' counters** (`rate_limits`, keys `push:<window>:…`) count per window. Each window is a whole minute, hour or UTC day, so a row says which minute or day it counts, never when a push or registration came. The sweep removes each one within a minute of its window's end. Registrations are counted by client and network address, by token hash for checks, and by `pushId` for re-registrations. Pushes are counted by `pushId` and by token hash. No row links an address to a `pushId`.
+- **What passes through:** the sealed blob, which the relay can't open (obid seals it to the phone's own key); `collapse`, `urgent`, `at` and the `pushId`; and the address the call came from, which Cloudflare sees. Pushes carry no Mac key and no installation, only a MAC under the `pushId`'s `pushKey`, so the relay can't tell which Mac sent a push.
+- **What's logged:** a push Apple didn't take, or a token check that failed for a reason other than a bad token, logs Apple's status and reason (`push: APNs 410 Unregistered, phone forgotten`). Nothing else of a push or a registration is logged: never the token, the secret, the `pushKey`, the `pushId`, `collapse` or the blob (`test/push.test.ts` checks every log line). **Invocation logs are off** for the whole control plane (`observability.logs.invocation_logs: false` in `wrangler.jsonc`, at the top and in `env.deskree`). They would record every request's URL, headers and address, and so tie a Mac's signed calls (its `Oby-Key`) to the pushes it sends from the same address.
+- **Apple** sees what it always does: the token, the topic, the fixed alert, the sealed blob and the collapse id, plus one background push per new token.
+- **What it can't do:** read an alert; learn which Mac or account a phone belongs to; push without the phone's `pushKey`; list phones (ids are 144 random bits, and a wrong id and a wrong MAC or secret get the same 401). obid can push but can't re-register or forget a phone.
+- **What's left:**
+  - Whoever holds `PUSH_SECRET_KEY` (the instance's operator) can make any phone's `pushKey` and push to it. They can't seal an alert the phone opens, so the phone shows only the fixed words.
+  - Anyone who learns a phone's APNs token can register it for themselves. That moves the token off the phone's own `pushId` until the phone registers again. The token goes only to Apple and the relay.
+  - A push replayed within its 5 minutes reaches the phone again, which drops it by the sealed alert's id.
+  - Junk registrations need real tokens of this app, and stay until `MAX_PUSH_DEVICES`. The rates bound how fast they come.
+
+### Setting it up (the owner's step)
+
+Deploying is the owner's; nothing here is in git.
+
+1. **Make the APNs key.** In Certificates, Identifiers & Profiles on Deskree's team: Keys › **+**, name it "Oby push relay", tick **Apple Push Notifications service (APNs)** › Configure: environment **Sandbox & Production**, and limit it to the topic `com.deskree.oby.ios` when Apple offers that. Register, then **Download** `AuthKey_<KEY ID>.p8` (Apple lets you download it once). Note its **Key ID**, and the **Team ID** from Membership details.
+2. **Set the four secrets**, in `cloud/control-plane`, each read from stdin so none lands in your shell history:
+   ```sh
+   pnpm exec wrangler secret put APNS_KEY --env deskree < ~/Downloads/AuthKey_XXXXXXXXXX.p8
+   pnpm exec wrangler secret put APNS_KEY_ID --env deskree
+   pnpm exec wrangler secret put APNS_TEAM_ID --env deskree
+   openssl rand -base64 32 | pnpm exec wrangler secret put PUSH_SECRET_KEY --env deskree
+   ```
+   Then move the `.p8` into your password manager and delete it from Downloads. `PUSH_SECRET_KEY` is in Cloudflare alone, and nobody needs to know it.
+3. **Migrate and deploy:** `pnpm migrate:remote --env deskree` (it adds `push_devices`, `push_device_count` and `apns_provider_token`), then `pnpm run deploy --env deskree`. The deploy also turns invocation logs off.
+4. **Check it:** `curl -s -X POST https://oby-control.deskree.com/v1/push -H 'Content-Type: application/json' -d '{}'` answers `{"error":"pushId is the phone's pushId."}` (422). `Pushes aren't set up on this control plane.` (503) means one of the four secrets is missing.
+
+Rotating the APNs key changes nothing on the phones: make a new key, put the three `APNS_*` secrets again, then revoke the old key. `PUSH_SECRET_KEY` isn't rotated: a new one makes every phone's secret and `pushKey` wrong (401), and each must register anew and hand obid its new `pushId` and `pushKey`. Another instance sets its own app's bundle id in its environment's `APNS_TOPICS` and its own team's key.
+
 ## On the Mac
 
 - **`cloudflared` ships inside Oby.app** (`Contents/MacOS/cloudflared`): the "Bundle cloudflared" build phase runs `apps/mac/app/Tools/bundle-cloudflared.sh`, which downloads the pinned release once into `~/Library/Caches/com.deskree.oby/cloudflared/`, checks its SHA-256, makes a universal binary and signs it with the app's identity and the hardened runtime, so it's notarized with the app. `apps/mac/tests/RemoteAccessTests.swift` checks the bundled binary is there, signed, universal, and the pinned version. To move to a newer cloudflared, change `VERSION` and the two checksums in the script.
@@ -143,6 +213,6 @@ The switch between the two keeps the conversation: only the connection is made a
 ## Limits and what's next
 
 - The gateway on `127.0.0.1:8810` is #284: until it exists, the tunnel is up and routes to nothing (Cloudflare answers 502). Device tokens and the route allowlist are its job; the control plane only makes the tunnel.
-- The Mac staying awake is #286. Pushes still use the runner's direct APNs path; a control-plane relay remains deferred until its Worker API, D1 token storage, and APNs secret configuration are designed and deployed. End-to-end encryption between the devices and the Mac is #287; the runner on the Mac is #283 and #288.
+- The Mac staying awake is #286. Pushes go through the sealed relay ([Pushes](#pushes)) once the owner sets its secrets; obid's side and the iPhone's are their own pieces of work. End-to-end encryption between the devices and the Mac is #287; the runner on the Mac is #283 and #288.
 - Company Obyspheres gated by a Workspace domain ("only @deskree.com") read `users.workspace_domain` (Google's `hd`) and nothing else: `email_domain` never grants membership.
 - App Attest, or another check that a key belongs to a real Oby, would sit on top of the key (see "Abuse control" above).
