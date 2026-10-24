@@ -711,3 +711,502 @@ fn a_phone_cannot_reach_the_tunnel_routes() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Through the owner's Obysphere (docs/runner-api.md, "obid only: the phone relay"): the fake
+// Sphere relays what the test's phone sends, and keeps every byte it relayed.
+
+use futures_util::{SinkExt as _, StreamExt as _};
+use obid::relay::envelope::{Opener, Phone, Sealer};
+use obid::sphere::channel::{Frame, Kind};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A phone the test plays, as the iPhone does: its relay socket and its session's keys.
+struct TestPhone {
+    ws: Socket,
+    sealer: Sealer,
+    opener: Opener,
+    next: u32,
+    /// Every envelope it sent, as sent.
+    sent: Vec<Vec<u8>>,
+}
+
+/// The relay socket with `token` as its bearer: the upgrade's status when it's refused.
+async fn relay_socket(relay: &Value, token: &str) -> Result<Socket, u16> {
+    let sphere = relay["sphere"]
+        .as_str()
+        .unwrap()
+        .replace("http://", "ws://");
+    let mut request = format!("{sphere}/v0.1/relay/{}", relay["id"].as_str().unwrap())
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((ws, _)) => Ok(ws),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            Err(response.status().as_u16())
+        }
+        Err(e) => panic!("the relay socket: {e}"),
+    }
+}
+
+/// The next binary frame, or the close code, within `seconds`; `None` when nothing came.
+async fn next_binary(ws: &mut Socket, seconds: u64) -> Option<Result<Vec<u8>, u16>> {
+    let until = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    loop {
+        match tokio::time::timeout_at(until, ws.next()).await {
+            Err(_) => return None,
+            Ok(Some(Ok(Message::Binary(bytes)))) => return Some(Ok(bytes.to_vec())),
+            Ok(Some(Ok(Message::Close(frame)))) => {
+                return Some(Err(frame.map_or(1005, |f| u16::from(f.code))));
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(_) => return Some(Err(1006)),
+        }
+    }
+}
+
+impl TestPhone {
+    /// Opens its socket with the QR's relay token and starts a session with the QR's Mac key.
+    async fn connect(relay: &Value) -> TestPhone {
+        let mut ws = relay_socket(relay, relay["token"].as_str().unwrap())
+            .await
+            .expect("the relay lets the phone in");
+        let key = base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            relay["key"].as_str().unwrap(),
+        )
+        .unwrap();
+        let phone = Phone::hello(&key).unwrap();
+        ws.send(Message::Binary(phone.hello.clone().into()))
+            .await
+            .unwrap();
+        let welcome = next_binary(&mut ws, 10)
+            .await
+            .expect("a welcome")
+            .expect("the socket stays open");
+        let (sealer, opener) = phone.welcomed(&welcome).expect("the pinned Mac answers");
+        TestPhone {
+            ws,
+            sealer,
+            opener,
+            next: 1,
+            sent: Vec::new(),
+        }
+    }
+
+    async fn send(&mut self, frame: Frame) {
+        let sealed = self.sealer.seal(&frame.encode());
+        self.sent.push(sealed.clone());
+        self.ws.send(Message::Binary(sealed.into())).await.unwrap();
+    }
+
+    /// Sends a request on a new stream, as a phone calls the gateway: its id.
+    async fn ask(
+        &mut self,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: Option<&Value>,
+    ) -> u32 {
+        let stream = self.next;
+        self.next += 1;
+        let mut headers = json!({});
+        if let Some(token) = token {
+            headers["authorization"] = json!(format!("Bearer {token}"));
+        }
+        if body.is_some() {
+            headers["content-type"] = json!("application/json");
+        }
+        let head = json!({"method": method, "path": path, "headers": headers});
+        self.send(Frame::json(stream, Kind::Open, &head)).await;
+        if let Some(body) = body {
+            self.send(Frame::new(
+                stream,
+                Kind::Data,
+                body.to_string().into_bytes(),
+            ))
+            .await;
+        }
+        self.send(Frame::new(stream, Kind::End, Vec::new())).await;
+        stream
+    }
+
+    /// The next frame the Mac sealed, within `seconds`.
+    async fn frame(&mut self, seconds: u64) -> Option<Frame> {
+        let sealed = next_binary(&mut self.ws, seconds).await?.ok()?;
+        let plain = self.opener.open(&sealed).expect("the Mac's frames open");
+        Frame::decode(&plain)
+    }
+
+    /// The whole answer on `stream`: its status, its head and its body.
+    async fn answer(&mut self, stream: u32) -> (u16, Value, Value) {
+        let mut head = Value::Null;
+        let mut body = Vec::new();
+        loop {
+            let frame = self.frame(30).await.expect("an answer");
+            if frame.stream != stream {
+                continue;
+            }
+            match frame.kind {
+                Kind::Open => head = frame.value().unwrap(),
+                Kind::Data => body.extend_from_slice(&frame.payload),
+                Kind::End => break,
+                Kind::Reset => panic!("the answer broke off"),
+            }
+        }
+        let status = head["status"].as_u64().unwrap() as u16;
+        (
+            status,
+            head,
+            serde_json::from_slice(&body).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn call(
+        &mut self,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: Option<&Value>,
+    ) -> (u16, Value) {
+        let stream = self.ask(method, path, token, body).await;
+        let (status, _, body) = self.answer(stream).await;
+        (status, body)
+    }
+}
+
+/// obid with a gateway, joined to a new fake Sphere.
+async fn joined(folder: &Folder) -> (FakeSphere, Obid) {
+    let sphere = FakeSphere::start().await;
+    let obid = started(folder);
+    let membership =
+        tokio::task::block_in_place(|| join_a(&obid, &sphere, &Owner::new("wellington")));
+    assert_eq!(membership["state"], "joined");
+    (sphere, obid)
+}
+
+/// An invitation through the Sphere, as the Mac app asks for it: no route, just a name.
+fn relay_invitation(obid: &Obid) -> Value {
+    let invitation = tokio::task::block_in_place(|| {
+        call(
+            obid,
+            "POST",
+            "/v1/pairing/invite",
+            Some(&json!({"name": "My Mac"})),
+        )
+    });
+    assert_eq!(invitation.status, 200, "{}", invitation.text);
+    invitation.body
+}
+
+/// A phone paired through the relay: it, its device token, and the QR's relay.
+async fn relay_paired(obid: &Obid, sphere: &FakeSphere, name: &str) -> (TestPhone, String, Value) {
+    let invitation = relay_invitation(obid);
+    let relay = invitation["relay"].clone();
+    let id = relay["id"].as_str().unwrap().to_owned();
+    tokio::task::block_in_place(|| {
+        within(20, "obid's relay socket", || {
+            sphere.lock().relay_macs.contains_key(&id).then_some(())
+        })
+    });
+    let mut phone = TestPhone::connect(&relay).await;
+    let (status, redeemed) = phone
+        .call(
+            "POST",
+            "/v1/pairing",
+            None,
+            Some(&json!({"credential": invitation["secret"], "name": name})),
+        )
+        .await;
+    assert_eq!(status, 200, "{redeemed}");
+    let token = redeemed["token"].as_str().unwrap().to_owned();
+    (phone, token, relay)
+}
+
+/// #1277: a phone paired through the owner's Obysphere pairs, calls and follows its events
+/// sealed end to end; the Sphere relays only ciphertext, the device's token works nowhere else,
+/// and forgetting the phone revokes its relay token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn obid_seal_everything_between_a_paired_phone_and_the_gateway_end_to_end() {
+    let folder = Folder::new("gateway-relay");
+    let (sphere, obid) = joined(&folder).await;
+    // No phone yet: no relay.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(sphere.lock().relays.is_empty());
+
+    let invitation = relay_invitation(&obid);
+    let relay = invitation["relay"].clone();
+    assert_eq!(relay["sphere"], sphere.url.as_str(), "{invitation}");
+    assert_eq!(invitation["url"], sphere.url.as_str());
+    let link: Value = serde_json::from_str(invitation["link"].as_str().unwrap()).unwrap();
+    assert_eq!(link["relay"], relay, "the QR carries the relay: {link}");
+    assert_eq!(relay["token"].as_str().unwrap().len(), 43);
+    assert_eq!(relay["key"].as_str().unwrap().len(), 43);
+    let id = relay["id"].as_str().unwrap().to_owned();
+    let hash = hex::encode(obi_protocol::keys::sha256(
+        relay["token"].as_str().unwrap().as_bytes(),
+    ));
+    // The Sphere knows the phone's token by its digest only, before the phone comes.
+    assert!(sphere.lock().relays[&id].1.contains(&hash));
+    tokio::task::block_in_place(|| {
+        within(20, "obid's relay socket", || {
+            sphere.lock().relay_macs.contains_key(&id).then_some(())
+        })
+    });
+
+    let mut phone = TestPhone::connect(&relay).await;
+    let (status, redeemed) = phone
+        .call(
+            "POST",
+            "/v1/pairing",
+            None,
+            Some(&json!({"credential": invitation["secret"], "name": "Alice's iPhone"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{redeemed}");
+    let token = redeemed["token"].as_str().unwrap().to_owned();
+    let (status, status_body) = phone.call("GET", "/v1/status", Some(&token), None).await;
+    assert_eq!(status, 200, "{status_body}");
+    assert!(status_body.is_object(), "{status_body}");
+    // A route off the gateway's list is off through the relay too, and so is the hooks' own.
+    let (status, _) = phone
+        .call("GET", "/v1/pairing/devices", Some(&token), None)
+        .await;
+    assert_eq!(status, 404);
+    let (status, _) = phone
+        .call("POST", "/v1/hooks/abc/deliver", None, Some(&json!({})))
+        .await;
+    assert_eq!(status, 404);
+
+    // The event stream: sealed frames as events happen.
+    let events = phone.ask("GET", "/v1/events", Some(&token), None).await;
+    let head = phone.frame(10).await.unwrap();
+    assert_eq!((head.stream, head.kind), (events, Kind::Open));
+    assert_eq!(
+        head.value().unwrap()["headers"]["content-type"],
+        "text/event-stream"
+    );
+    assert_eq!(
+        tokio::task::block_in_place(|| call(&obid, "POST", "/v1/clear", None)).status,
+        200
+    );
+    let event = loop {
+        let frame = phone.frame(10).await.expect("an event");
+        if frame.stream == events && frame.kind == Kind::Data {
+            break String::from_utf8(frame.payload).unwrap();
+        }
+    };
+    assert!(event.contains("event: clear"), "{event}");
+
+    // The Sphere carried only ciphertext: no token, secret, name, route or answer in the clear.
+    let seen = sphere.lock().relayed.clone();
+    for clear in [
+        token.as_str(),
+        invitation["secret"].as_str().unwrap(),
+        "Alice's iPhone",
+        "/v1/status",
+        "/v1/pairing",
+        "event: clear",
+        "deviceID",
+        "Bearer",
+    ] {
+        assert!(
+            !seen.windows(clear.len()).any(|w| w == clear.as_bytes()),
+            "the Sphere saw {clear:?} in the clear"
+        );
+    }
+
+    // The device's token works only sealed, never on the gateway's listener.
+    let unsealed =
+        tokio::task::block_in_place(|| through(&obid, Some(&token), "GET", "/v1/status", None));
+    assert_eq!(unsealed.status, 401, "{}", unsealed.text);
+    assert!(unsealed.text.contains("sealed"), "{}", unsealed.text);
+
+    // Forgetting the phone ends its stream and revokes its relay token at the Sphere.
+    let devices = tokio::task::block_in_place(|| call(&obid, "GET", "/v1/pairing/devices", None));
+    assert_eq!(devices.body[0]["name"], "Alice's iPhone");
+    let device = devices.body[0]["id"].as_str().unwrap().to_owned();
+    let forgotten = tokio::task::block_in_place(|| {
+        call(
+            &obid,
+            "DELETE",
+            &format!("/v1/pairing/devices/{device}"),
+            None,
+        )
+    });
+    assert_eq!(forgotten.status, 204);
+    tokio::task::block_in_place(|| {
+        within(20, "the Sphere forgets the phone's token", || {
+            (!sphere.lock().relays[&id].1.contains(&hash)).then_some(())
+        })
+    });
+    let closed = loop {
+        match next_binary(&mut phone.ws, 10).await {
+            Some(Ok(_)) => continue,
+            other => break other,
+        }
+    };
+    assert_eq!(
+        closed,
+        Some(Err(4001)),
+        "the phone's socket closes as revoked"
+    );
+    assert_eq!(
+        relay_socket(&relay, relay["token"].as_str().unwrap())
+            .await
+            .err(),
+        Some(401),
+        "its relay token opens nothing"
+    );
+}
+
+/// #1277's refusals: a replayed, changed or foreign envelope, a hello to another key, another
+/// phone's device token, and pairing with no Obysphere get nothing, never a plaintext fallback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_relay_refuses_replayed_changed_and_foreign_envelopes() {
+    let folder = Folder::new("gateway-relay-refusals");
+    let (sphere, obid) = joined(&folder).await;
+    let (mut phone, token, relay) = relay_paired(&obid, &sphere, "Alice's iPhone").await;
+
+    // A request, then the same envelopes again: the replay gets no answer.
+    let first = phone.sent.len();
+    let (status, _) = phone.call("GET", "/v1/status", Some(&token), None).await;
+    assert_eq!(status, 200);
+    let replayed: Vec<Vec<u8>> = phone.sent[first..].to_vec();
+    for envelope in &replayed {
+        phone
+            .ws
+            .send(Message::Binary(envelope.clone().into()))
+            .await
+            .unwrap();
+    }
+    assert!(phone.frame(2).await.is_none(), "a replay was answered");
+
+    // A changed envelope gets nothing, and spends nothing: the next one is answered.
+    let head = json!({"method": "GET", "path": "/v1/status",
+                      "headers": {"authorization": format!("Bearer {token}")}});
+    let mut sealed = phone
+        .sealer
+        .seal(&Frame::json(phone.next, Kind::Open, &head).encode());
+    sealed[20] ^= 0x01;
+    phone.ws.send(Message::Binary(sealed.into())).await.unwrap();
+    assert!(
+        phone.frame(2).await.is_none(),
+        "a changed envelope was answered"
+    );
+    phone.next += 1;
+    let (status, _) = phone.call("GET", "/v1/status", Some(&token), None).await;
+    assert_eq!(status, 200, "the session goes on");
+
+    // A request without a token, or with a wrong one, is the gateway's 401, sealed.
+    let (status, _) = phone.call("GET", "/v1/status", None, None).await;
+    assert_eq!(status, 401);
+    let (status, _) = phone
+        .call("GET", "/v1/status", Some("not-a-token"), None)
+        .await;
+    assert_eq!(status, 401);
+
+    // A second phone, paired through its own relay token, can't use the first one's token: the
+    // envelope, not the Sphere's routing, says which phone it is.
+    let (mut other, other_token, _) = relay_paired(&obid, &sphere, "Bob's iPhone").await;
+    let (status, said) = other.call("GET", "/v1/status", Some(&token), None).await;
+    assert_eq!(status, 401, "{said}");
+    assert_eq!(said["error"], "That device token isn't this phone's.");
+    let (status, _) = other
+        .call("GET", "/v1/status", Some(&other_token), None)
+        .await;
+    assert_eq!(status, 200);
+
+    // A hello sealed to another key gets no welcome (on a new socket, which replaces the old).
+    let mut ws = relay_socket(&relay, relay["token"].as_str().unwrap())
+        .await
+        .unwrap();
+    let wrong = Phone::hello(&[9u8; 32]).unwrap();
+    ws.send(Message::Binary(wrong.hello.into())).await.unwrap();
+    assert!(
+        next_binary(&mut ws, 2).await.is_none(),
+        "a hello to another key was welcomed"
+    );
+    drop(ws);
+
+    // An invitation that isn't this relay token's isn't redeemed through it.
+    let invitation = relay_invitation(&obid);
+    let (status, _) = other
+        .call(
+            "POST",
+            "/v1/pairing",
+            None,
+            Some(&json!({"credential": invitation["secret"], "name": "Eve"})),
+        )
+        .await;
+    assert_eq!(status, 401);
+
+    // With no Obysphere, pairing says so; with a route of its own, it's the gateway's as before.
+    let alone = Folder::new("gateway-relay-alone");
+    let obid = started(&alone);
+    let refused = tokio::task::block_in_place(|| {
+        call(
+            &obid,
+            "POST",
+            "/v1/pairing/invite",
+            Some(&json!({"name": "My Mac"})),
+        )
+    });
+    assert_eq!(refused.status, 409, "{}", refused.text);
+    assert_eq!(
+        refused.body["error"],
+        "Join or host an Obysphere first (Settings › Obysphere)."
+    );
+    let routed = tokio::task::block_in_place(|| {
+        call(
+            &obid,
+            "POST",
+            "/v1/pairing/invite",
+            Some(&json!({"url": "https://mac.tail0000.ts.net:8443"})),
+        )
+    });
+    assert_eq!(routed.status, 200, "{}", routed.text);
+    assert!(routed.body.get("relay").is_none(), "{}", routed.text);
+}
+
+/// Before its token ends, obid opens the relay's socket again with a new one, which replaces the
+/// old (`4003`): the phone's socket stays, and its event stream goes on through the new one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_token_replaces_the_relays_socket_and_the_phone_sees_nothing() {
+    let folder = Folder::new("gateway-relay-renew");
+    let sphere = FakeSphere::start().await;
+    // Tokens of 50 seconds: obid renews 45 seconds before the end, every 5 seconds.
+    sphere.lock().token_lifetime = Some(50);
+    let obid = started(&folder);
+    tokio::task::block_in_place(|| join_a(&obid, &sphere, &Owner::new("wellington")));
+    let (mut phone, token, relay) = relay_paired(&obid, &sphere, "Alice's iPhone").await;
+    let id = relay["id"].as_str().unwrap().to_owned();
+    let events = phone.ask("GET", "/v1/events", Some(&token), None).await;
+    assert_eq!(phone.frame(10).await.unwrap().kind, Kind::Open);
+    let opened = sphere.lock().relay_opens[&id];
+    tokio::task::block_in_place(|| {
+        within(30, "two new sockets with new tokens", || {
+            (sphere.lock().relay_opens[&id] >= opened + 2).then_some(())
+        })
+    });
+    assert_eq!(
+        tokio::task::block_in_place(|| call(&obid, "POST", "/v1/clear", None)).status,
+        200
+    );
+    let event = loop {
+        let frame = phone.frame(10).await.expect("the stream goes on");
+        if frame.stream == events && frame.kind == Kind::Data {
+            break String::from_utf8(frame.payload).unwrap();
+        }
+    };
+    assert!(event.contains("event: clear"), "{event}");
+    let (status, _) = phone.call("GET", "/v1/status", Some(&token), None).await;
+    assert_eq!(status, 200);
+}

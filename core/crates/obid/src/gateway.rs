@@ -10,6 +10,10 @@
 //! token (`/v1/pairing/invite`, `/v1/pairing/devices`): a phone that reaches the gateway can
 //! redeem an invitation, never mint one.
 //!
+//! A phone paired through obid's Obysphere (crate::relay) reaches the same router in process, its
+//! requests sealed end to end: such a device's token works only inside its sealed envelopes,
+//! never on the listener, and only through its own relay token's socket.
+//!
 //! ponytail: the gateway binds 127.0.0.1 and `tailscale serve` puts it on the owner's tailnet.
 //! The Swift gateway's LAN listener and Bonjour come back when pairing on the home network needs them.
 
@@ -146,6 +150,8 @@ struct Pending {
     attempts: u32,
     name: String,
     hostname: String,
+    /// The SHA-256 of its relay token, when it pairs through the Obysphere.
+    relay: Option<String>,
 }
 
 /// A paired device, kept in `home/gateway-devices.json` under its token's digest.
@@ -156,6 +162,10 @@ struct Device {
     name: String,
     created: i64,
     expires_at: i64,
+    /// The SHA-256 of its relay token, when it paired through the Obysphere: then its token works
+    /// only in its sealed envelopes, on that relay token's socket (crate::relay).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relay: Option<String>,
 }
 
 /// What `POST /v1/pairing/invite` answers: the QR code's parts and the six digits.
@@ -165,11 +175,24 @@ pub struct Invitation {
     pub url: String,
     pub name: String,
     pub hostname: String,
-    /// `{"hostname":…,"name":…}`, as the QR code carries it.
+    /// `{"hostname":…,"name":…}`, and `relay` when there is one, as the QR code carries it.
     pub link: String,
     pub secret: String,
     pub code: String,
     pub expires_at: String,
+    /// How the phone reaches obid through its Obysphere: what the link carries too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<Value>,
+}
+
+/// What a phone needs to reach obid through its Obysphere (docs/runner-api.md, "obid only: the
+/// phone relay"): the Sphere's base URL, the relay's id, the phone's own relay token and the Mac's
+/// X25519 public key, all in the QR code.
+pub struct RelayInvite {
+    pub sphere: String,
+    pub relay: String,
+    pub token: String,
+    pub key: String,
 }
 
 /// What redeeming buys: the device token, shown once, and the Mac's link.
@@ -187,6 +210,12 @@ pub struct Redeemed {
 /// in-process call sets it, so nothing that reaches the API over a socket can claim a device.
 #[derive(Debug, Clone)]
 pub struct PairedDevice(pub String);
+
+/// A request that came sealed through the phone relay (crate::relay), with the device id the
+/// Sphere routed it by (the SHA-256 of a relay token, hex): set only in process, as
+/// [`PairedDevice`] is.
+#[derive(Debug, Clone)]
+pub struct Relayed(pub String);
 
 pub struct Gateway {
     file: PathBuf,
@@ -226,7 +255,14 @@ impl Gateway {
     }
 
     /// A new invitation, replacing the one before.
-    pub fn invite(&self, url: &str, name: &str, hostname: &str, now: SystemTime) -> Invitation {
+    pub fn invite(
+        &self,
+        url: &str,
+        name: &str,
+        hostname: &str,
+        now: SystemTime,
+        relay: Option<RelayInvite>,
+    ) -> Invitation {
         let secret = random(32);
         let code = {
             let mut bytes = [0u8; 4];
@@ -241,25 +277,36 @@ impl Gateway {
             attempts: 0,
             name: name.to_owned(),
             hostname: hostname.to_owned(),
+            relay: relay.as_ref().map(|r| digest(&r.token)),
         });
+        let relay = relay
+            .map(|r| json!({"sphere": r.sphere, "id": r.relay, "token": r.token, "key": r.key}));
+        let mut link = json!({"hostname": hostname, "name": name});
+        if let Some(relay) = &relay {
+            link["relay"] = relay.clone();
+        }
         Invitation {
             url: url.to_owned(),
             name: name.to_owned(),
             hostname: hostname.to_owned(),
-            link: json!({"hostname": hostname, "name": name}).to_string(),
+            link: link.to_string(),
             secret,
             code,
             expires_at: obi_protocol::time::format(seconds(expires)),
+            relay,
         }
     }
 
     /// Redeems the open invitation with its secret or its code, once: `410` when there's none or
-    /// it expired, `401` for a wrong credential (the fifth uses it up).
+    /// it expired, `401` for a wrong credential (the fifth uses it up). `via` is the relay device
+    /// id a sealed request came by: it must be the invitation's own relay token's, and the device
+    /// it pairs is then bound to it; on the listener (`None`) the device is bound to no relay.
     pub fn redeem(
         &self,
         credential: &str,
         name: &str,
         now: SystemTime,
+        via: Option<&str>,
     ) -> Result<Redeemed, (StatusCode, &'static str)> {
         const GONE: &str = "That pairing invitation has expired or was already used.";
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
@@ -271,7 +318,10 @@ impl Gateway {
             return Err((StatusCode::GONE, GONE));
         }
         let given = digest(credential);
-        if !crate::token::same(&given, &open.secret) && !crate::token::same(&given, &open.code) {
+        let right_relay = via.is_none_or(|via| open.relay.as_deref() == Some(via));
+        if !right_relay
+            || !crate::token::same(&given, &open.secret) && !crate::token::same(&given, &open.code)
+        {
             open.attempts += 1;
             if open.attempts >= ATTEMPTS {
                 *pending = None;
@@ -287,6 +337,7 @@ impl Gateway {
             name: name.chars().filter(|c| !c.is_control()).take(100).collect(),
             created: seconds(now),
             expires_at: seconds(now + LIFETIME),
+            relay: via.map(str::to_owned),
         };
         let mut devices = self.devices.lock().unwrap_or_else(|e| e.into_inner());
         devices.insert(digest(&token), device.clone());
@@ -318,6 +369,53 @@ impl Gateway {
             .get(&digest(token))
             .filter(|d| d.expires_at > seconds(now))
             .map(|d| d.id.clone())
+    }
+
+    /// [`Gateway::device`], only where that device may be reached: a device paired through the
+    /// relay only `via` its own relay token's socket, sealed; any other only on the listener
+    /// (`via` none). `Err` is a working token in the wrong place.
+    pub fn device_via(
+        &self,
+        token: &str,
+        now: SystemTime,
+        via: Option<&str>,
+    ) -> Option<Result<String, ()>> {
+        let devices = self.devices.lock().unwrap_or_else(|e| e.into_inner());
+        let device = devices
+            .get(&digest(token))
+            .filter(|d| d.expires_at > seconds(now))?;
+        Some(if device.relay.as_deref() == via {
+            Ok(device.id.clone())
+        } else {
+            Err(())
+        })
+    }
+
+    /// The relay tokens' digests the Obysphere must know (crate::relay): every device paired
+    /// through it that still works, and the open invitation's.
+    pub fn relay_devices(&self, now: SystemTime) -> HashSet<String> {
+        let mut wanted: HashSet<String> = {
+            let devices = self.devices.lock().unwrap_or_else(|e| e.into_inner());
+            devices
+                .values()
+                .filter(|d| d.expires_at > seconds(now))
+                .filter_map(|d| d.relay.clone())
+                .collect()
+        };
+        let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(open) = pending.as_ref().filter(|p| p.expires > now) {
+            wanted.extend(open.relay.clone());
+        }
+        wanted
+    }
+
+    /// The relay token digest of the device `id`, when it paired through the Obysphere.
+    pub fn relay_of(&self, id: &str) -> Option<String> {
+        let devices = self.devices.lock().unwrap_or_else(|e| e.into_inner());
+        devices
+            .values()
+            .find(|d| d.id == id)
+            .and_then(|d| d.relay.clone())
     }
 
     /// The ids of the devices still paired at `now`.
@@ -372,28 +470,54 @@ fn error(status: StatusCode, message: &str) -> Response {
 
 #[derive(Deserialize)]
 pub struct InviteRequest {
-    url: String,
+    url: Option<String>,
     name: Option<String>,
     hostname: Option<String>,
 }
 
-/// `POST /v1/pairing/invite`.
+/// `POST /v1/pairing/invite`. With an Obysphere the phone pairs through it, sealed (crate::relay):
+/// the invitation carries its relay token, registered with the Sphere first. Without one, only a
+/// `url` the phone reaches the gateway by (Remote access, the tailnet) makes an invitation.
 pub async fn invite(
     State(shared): State<Arc<Shared>>,
     axum::Json(request): axum::Json<InviteRequest>,
 ) -> Response {
-    let Some((scheme, rest)) = request.url.split_once("://") else {
-        return error(StatusCode::BAD_REQUEST, "url must be an HTTP or HTTPS URL.");
+    let authority = match request.url.as_deref().map(|url| url.split_once("://")) {
+        None => None,
+        Some(Some((scheme, rest)))
+            if matches!(scheme, "http" | "https")
+                && !rest.split('/').next().unwrap_or("").is_empty() =>
+        {
+            Some(rest.split('/').next().unwrap_or("").to_owned())
+        }
+        Some(_) => return error(StatusCode::BAD_REQUEST, "url must be an HTTP or HTTPS URL."),
     };
-    let authority = rest.split('/').next().unwrap_or("");
-    if !matches!(scheme, "http" | "https") || authority.is_empty() {
-        return error(StatusCode::BAD_REQUEST, "url must be an HTTP or HTTPS URL.");
-    }
+    let relay = match shared.relay.invite(&shared.link).await {
+        Ok(relay) => relay,
+        Err((status, message)) => return error(status, &message),
+    };
     let name = request.name.unwrap_or_else(|| shared.host.clone());
-    let hostname = request.hostname.unwrap_or_else(|| authority.to_owned());
+    let (url, hostname) = match (request.url, authority, &relay) {
+        (Some(url), Some(authority), _) => (url, request.hostname.unwrap_or(authority)),
+        (None, _, Some(relay)) => (
+            relay.sphere.clone(),
+            request.hostname.unwrap_or_else(|| shared.host.clone()),
+        ),
+        _ => {
+            return error(
+                StatusCode::CONFLICT,
+                "Join or host an Obysphere first (Settings › Obysphere).",
+            );
+        }
+    };
+    let through_relay = relay.is_some();
     let invitation = shared
         .gateway
-        .invite(&request.url, &name, &hostname, SystemTime::now());
+        .invite(&url, &name, &hostname, SystemTime::now(), relay);
+    shared.relay.wake();
+    if through_relay {
+        shared.relay.ready(Duration::from_secs(5)).await;
+    }
     axum::Json(invitation).into_response()
 }
 
@@ -407,10 +531,16 @@ pub async fn revoke(
     State(shared): State<Arc<Shared>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
+    let relay = shared.gateway.relay_of(&id);
     match shared.gateway.revoke(&id) {
         Ok(true) => {
             // A lost phone gets no more alerts: its push tokens go with it.
             shared.push.forget(&id);
+            // Its sealed session ends now, and its relay token opens nothing once the Sphere
+            // forgets it (crate::relay).
+            if let Some(relay) = relay {
+                shared.relay.forget(&relay);
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => error(StatusCode::NOT_FOUND, "That paired device was not found."),
@@ -449,6 +579,7 @@ struct RedeemRequest {
 /// and a page can't send JSON across origins without asking first, so neither a page the owner
 /// opens nor a rebound name can use an invitation up.
 async fn redeem(State(through): State<Through>, request: Request) -> Response {
+    let via = request.extensions().get::<Relayed>().map(|r| r.0.clone());
     if request.headers().contains_key(header::ORIGIN) {
         return error(StatusCode::FORBIDDEN, "Only a phone pairs with obid.");
     }
@@ -473,11 +604,14 @@ async fn redeem(State(through): State<Through>, request: Request) -> Response {
         );
     };
     let name = asked.name.unwrap_or_else(|| "iPhone".into());
-    match through
-        .shared
-        .gateway
-        .redeem(&asked.credential, &name, SystemTime::now())
-    {
+    let redeemed =
+        through
+            .shared
+            .gateway
+            .redeem(&asked.credential, &name, SystemTime::now(), via.as_deref());
+    // The invitation's relay token is a device's now, or no longer wanted.
+    through.shared.relay.wake();
+    match redeemed {
         Ok(redeemed) => axum::Json(redeemed).into_response(),
         Err((status, message)) => error(status, message),
     }
@@ -490,6 +624,13 @@ async fn deliver(
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request,
 ) -> Response {
+    // Webhooks come from the control plane, never from a phone's relay.
+    if request.extensions().get::<Relayed>().is_some() {
+        return error(
+            StatusCode::NOT_FOUND,
+            "That route isn't available through the gateway.",
+        );
+    }
     let (parts, body) = request.into_parts();
     crate::hooks::deliver(&through.shared, &id, parts.headers, body).await
 }
@@ -514,13 +655,31 @@ async fn forward(State(through): State<Through>, request: Request) -> Response {
             .map(str::trim),
         _ => None,
     };
-    let Some(device) = token.and_then(|t| through.shared.gateway.device(t, SystemTime::now()))
-    else {
-        return error(
-            StatusCode::UNAUTHORIZED,
-            "Every gateway request needs a device token.",
-        );
-    };
+    // A phone paired through the Obysphere is reached only sealed, by its own relay token's
+    // socket; any other only here, on the listener.
+    let via = parts.extensions.get::<Relayed>().map(|r| r.0.as_str());
+    let device =
+        match token.and_then(|t| through.shared.gateway.device_via(t, SystemTime::now(), via)) {
+            Some(Ok(device)) => device,
+            Some(Err(())) if via.is_none() => {
+                return error(
+                    StatusCode::UNAUTHORIZED,
+                    "This phone reaches obid sealed, through its Obysphere.",
+                );
+            }
+            Some(Err(())) => {
+                return error(
+                    StatusCode::UNAUTHORIZED,
+                    "That device token isn't this phone's.",
+                );
+            }
+            None => {
+                return error(
+                    StatusCode::UNAUTHORIZED,
+                    "Every gateway request needs a device token.",
+                );
+            }
+        };
     let Ok(body) = axum::body::to_bytes(body, BODY).await else {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "That request is too large.");
     };
@@ -855,23 +1014,25 @@ mod tests {
         let home = folder("once");
         let gateway = Gateway::open(&home);
         let now = SystemTime::now();
-        let invitation = gateway.invite("https://mac.example", "Mac", "mac.example", now);
+        let invitation = gateway.invite("https://mac.example", "Mac", "mac.example", now, None);
         assert_eq!(invitation.code.len(), 6);
         assert!(invitation.secret.len() >= 32);
-        let redeemed = gateway.redeem(&invitation.secret, "Phone", now).unwrap();
+        let redeemed = gateway
+            .redeem(&invitation.secret, "Phone", now, None)
+            .unwrap();
         assert!(gateway.accepts(&redeemed.token, now));
         assert_eq!(
             gateway
-                .redeem(&invitation.code, "Phone", now)
+                .redeem(&invitation.code, "Phone", now, None)
                 .unwrap_err()
                 .0,
             StatusCode::GONE
         );
-        let invitation = gateway.invite("https://mac.example", "Mac", "mac.example", now);
+        let invitation = gateway.invite("https://mac.example", "Mac", "mac.example", now, None);
         let later = now + INVITATION + Duration::from_secs(1);
         assert_eq!(
             gateway
-                .redeem(&invitation.code, "Phone", later)
+                .redeem(&invitation.code, "Phone", later, None)
                 .unwrap_err()
                 .0,
             StatusCode::GONE
@@ -890,16 +1051,16 @@ mod tests {
         let home = folder("wrong");
         let gateway = Gateway::open(&home);
         let now = SystemTime::now();
-        let invitation = gateway.invite("https://mac.example", "Mac", "mac.example", now);
+        let invitation = gateway.invite("https://mac.example", "Mac", "mac.example", now, None);
         for _ in 0..ATTEMPTS {
             assert_eq!(
-                gateway.redeem("not it", "Phone", now).unwrap_err().0,
+                gateway.redeem("not it", "Phone", now, None).unwrap_err().0,
                 StatusCode::UNAUTHORIZED
             );
         }
         assert_eq!(
             gateway
-                .redeem(&invitation.code, "Phone", now)
+                .redeem(&invitation.code, "Phone", now, None)
                 .unwrap_err()
                 .0,
             StatusCode::GONE
@@ -914,9 +1075,9 @@ mod tests {
         let now = SystemTime::now();
         let token = {
             let gateway = Gateway::open(&home);
-            let invitation = gateway.invite("https://mac.example", "Mac", "mac.example", now);
+            let invitation = gateway.invite("https://mac.example", "Mac", "mac.example", now, None);
             gateway
-                .redeem(&invitation.code, "Alice's iPhone", now)
+                .redeem(&invitation.code, "Alice's iPhone", now, None)
                 .unwrap()
                 .token
         };

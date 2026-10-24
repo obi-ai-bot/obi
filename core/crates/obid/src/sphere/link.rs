@@ -1725,6 +1725,30 @@ impl Link {
         Ok(token.access_token)
     }
 
+    /// The Sphere's client while obid is a member (`joined`): the phone relay's (crate::relay).
+    pub fn relay_client(&self) -> Option<Client> {
+        let state = self.lock();
+        state.membership.as_ref().filter(|m| m.state == "joined")?;
+        state.client.clone()
+    }
+
+    /// An access token for the phone relay's calls and socket, and when it ends (Unix seconds).
+    pub async fn relay_token(&self) -> Result<(String, i64), ClientError> {
+        let token = self.token().await?;
+        let ends = self
+            .lock()
+            .token
+            .as_ref()
+            .filter(|(held, _)| *held == token)
+            .map_or(time::now() + TOKEN_MARGIN, |(_, ends)| *ends);
+        Ok((token, ends))
+    }
+
+    /// The Sphere refused a relay call: a refused token is forgotten, as for any other call.
+    pub fn relay_refused(&self, error: &ClientError) {
+        self.refused_token(error);
+    }
+
     /// What to do with a refusal of the token: forget it, so the next call exchanges a new one.
     fn refused_token(&self, error: &ClientError) {
         if matches!(error, ClientError::Refused { status: 401, .. }) {

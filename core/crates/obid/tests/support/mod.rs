@@ -877,7 +877,19 @@ pub struct SphereState {
     pub signins: Vec<Value>,
     /// A head the audit chain names in place of its last entry's.
     pub head: Option<Value>,
+    /// The phone relay (sphere-api.md section 9): each relay's Obi and its devices' hashes.
+    pub relays: HashMap<String, (String, std::collections::BTreeSet<String>)>,
+    /// Each relay's Mac socket, and each device's, by relay and hash: a socket's number and sender.
+    pub relay_macs: HashMap<String, (u64, RelaySender)>,
+    pub relay_phones: HashMap<(String, String), (u64, RelaySender)>,
+    /// How many times a Mac's socket opened, by relay.
+    pub relay_opens: HashMap<String, u32>,
+    pub relay_sockets: u64,
+    /// How long the access tokens it gives last, when not an hour.
+    pub token_lifetime: Option<i64>,
 }
+
+pub type RelaySender = tokio::sync::mpsc::UnboundedSender<axum::extract::ws::Message>;
 
 #[derive(Clone)]
 pub struct FakeSphere {
@@ -917,6 +929,14 @@ impl FakeSphere {
             .route(
                 "/v0.1/spheres/{sphere}/members/{obi}/runner",
                 axum::routing::put(put_runner).delete(delete_runner),
+            )
+            .route(
+                "/v0.1/relay/{relay}",
+                axum::routing::put(put_relay).get(relay_socket),
+            )
+            .route(
+                "/v0.1/relay/{relay}/devices/{device}",
+                axum::routing::put(put_relay_device).delete(delete_relay_device),
             )
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1122,8 +1142,9 @@ async fn token(
     }
     let token = new_token();
     state.tokens.insert(token.clone(), obi);
+    let lifetime = state.token_lifetime.unwrap_or(3600);
     axum::Json(json!({"access_token": token, "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
-                      "token_type": "Bearer", "expires_in": 3600, "scope": OBI_SCOPES}))
+                      "token_type": "Bearer", "expires_in": lifetime, "scope": OBI_SCOPES}))
         .into_response()
 }
 
@@ -1300,6 +1321,263 @@ async fn channel_side(
         sides.remove(&obi);
         for tx in sides.values() {
             let _ = tx.send(Message::Text(r#"{"peer":"left"}"#.into()));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The fake Sphere's phone relay (sphere-api.md section 9)
+
+fn relay_close(code: u16) -> axum::extract::ws::Message {
+    axum::extract::ws::Message::Close(Some(axum::extract::ws::CloseFrame {
+        code,
+        reason: "".into(),
+    }))
+}
+
+/// `PUT /v0.1/relay/{relay}`: the caller's relay, with its devices.
+async fn put_relay(
+    State(state): State<Arc<Mutex<SphereState>>>,
+    UrlPath(relay): UrlPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    let mut s = state.lock().unwrap();
+    let Some(obi) = bearer(&s, &headers) else {
+        return sphere_error(StatusCode::UNAUTHORIZED, "unauthorized", "no token");
+    };
+    let created = !s.relays.contains_key(&relay);
+    let (owner, devices) = s
+        .relays
+        .entry(relay.clone())
+        .or_insert((obi.clone(), Default::default()));
+    if *owner != obi {
+        return sphere_error(StatusCode::CONFLICT, "conflict", "another Mac's relay");
+    }
+    let status = if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    (
+        status,
+        axum::Json(json!({"relay": relay, "devices": devices})),
+    )
+        .into_response()
+}
+
+/// The relay `relay` when it's the caller's; else the refusal's status, code and message.
+type Refusal = (StatusCode, &'static str, &'static str);
+
+fn own_relay<'a>(
+    s: &'a mut SphereState,
+    headers: &HeaderMap,
+    relay: &str,
+) -> Result<&'a mut std::collections::BTreeSet<String>, Refusal> {
+    let Some(obi) = bearer(s, headers) else {
+        return Err((StatusCode::UNAUTHORIZED, "unauthorized", "no token"));
+    };
+    match s.relays.get_mut(relay) {
+        None => Err((StatusCode::NOT_FOUND, "not_found", "no such relay")),
+        Some((owner, _)) if *owner != obi => {
+            Err((StatusCode::FORBIDDEN, "forbidden", "another Mac's"))
+        }
+        Some((_, devices)) => Ok(devices),
+    }
+}
+
+async fn put_relay_device(
+    State(state): State<Arc<Mutex<SphereState>>>,
+    UrlPath((relay, device)): UrlPath<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let mut s = state.lock().unwrap();
+    let devices = match own_relay(&mut s, &headers, &relay) {
+        Ok(devices) => devices,
+        Err((status, code, message)) => return sphere_error(status, code, message),
+    };
+    if device.len() != 64
+        || !device
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return sphere_error(StatusCode::BAD_REQUEST, "bad_request", "not a hash");
+    }
+    if devices.len() >= 16 && !devices.contains(&device) {
+        return sphere_error(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "16 devices");
+    }
+    let status = if devices.insert(device) {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    (
+        status,
+        axum::Json(json!({"relay": relay, "devices": devices})),
+    )
+        .into_response()
+}
+
+/// Forgets a device: its socket closes with 4001 at once.
+async fn delete_relay_device(
+    State(state): State<Arc<Mutex<SphereState>>>,
+    UrlPath((relay, device)): UrlPath<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let mut s = state.lock().unwrap();
+    let devices = match own_relay(&mut s, &headers, &relay) {
+        Ok(devices) => devices,
+        Err((status, code, message)) => return sphere_error(status, code, message),
+    };
+    if !devices.remove(&device) {
+        return sphere_error(StatusCode::NOT_FOUND, "not_found", "no such device");
+    }
+    if let Some((_, tx)) = s.relay_phones.remove(&(relay, device)) {
+        let _ = tx.send(relay_close(4001));
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `GET /v0.1/relay/{relay}` (WebSocket): a phone by its relay token's hash, or the relay's Mac.
+async fn relay_socket(
+    State(state): State<Arc<Mutex<SphereState>>>,
+    UrlPath(relay): UrlPath<String>,
+    headers: HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    let s = state.lock().unwrap();
+    let value = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_owned();
+    let Some((owner, devices)) = s.relays.get(&relay) else {
+        return sphere_error(StatusCode::UNAUTHORIZED, "unauthorized", "no");
+    };
+    let hash = hex::encode(obi_protocol::keys::sha256(value.as_bytes()));
+    let side = if devices.contains(&hash) {
+        Some(hash)
+    } else if s.tokens.get(&value) == Some(owner) {
+        None
+    } else {
+        return sphere_error(StatusCode::UNAUTHORIZED, "unauthorized", "no");
+    };
+    drop(s);
+    ws.on_upgrade(move |socket| relay_side(state, relay, side, socket))
+}
+
+async fn relay_side(
+    state: Arc<Mutex<SphereState>>,
+    relay: String,
+    phone: Option<String>,
+    socket: axum::extract::ws::WebSocket,
+) {
+    use axum::extract::ws::Message;
+    use futures_util::{SinkExt, StreamExt};
+    let (mut sink, mut stream) = socket.split();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+    tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            let last = matches!(m, Message::Close(_));
+            if sink.send(m).await.is_err() || last {
+                break;
+            }
+        }
+    });
+    let id = {
+        let mut s = state.lock().unwrap();
+        s.relay_sockets += 1;
+        let id = s.relay_sockets;
+        match &phone {
+            None => {
+                *s.relay_opens.entry(relay.clone()).or_default() += 1;
+                if let Some((_, old)) = s.relay_macs.insert(relay.clone(), (id, tx.clone())) {
+                    let _ = old.send(relay_close(4003));
+                }
+                for (r, d) in s.relay_phones.keys() {
+                    if *r == relay {
+                        let _ = tx.send(Message::Text(
+                            json!({"device": d, "peer": "joined"}).to_string().into(),
+                        ));
+                    }
+                }
+            }
+            Some(device) => {
+                let Some((_, mac)) = s.relay_macs.get(&relay) else {
+                    let _ = tx.send(relay_close(4008));
+                    return;
+                };
+                let _ = mac.send(Message::Text(
+                    json!({"device": device, "peer": "joined"})
+                        .to_string()
+                        .into(),
+                ));
+                if let Some((_, old)) = s
+                    .relay_phones
+                    .insert((relay.clone(), device.clone()), (id, tx.clone()))
+                {
+                    let _ = old.send(relay_close(4003));
+                }
+            }
+        }
+        id
+    };
+    while let Some(Ok(m)) = stream.next().await {
+        let mut s = state.lock().unwrap();
+        match m {
+            Message::Text(text) if text.as_str() == "ping" => {
+                let _ = tx.send(Message::Text("pong".into()));
+            }
+            Message::Binary(bytes) => {
+                s.relayed.extend_from_slice(&bytes);
+                match &phone {
+                    Some(device) => {
+                        if let Some((_, mac)) = s.relay_macs.get(&relay) {
+                            let mut framed = hex::decode(device).unwrap();
+                            framed.extend_from_slice(&bytes);
+                            let _ = mac.send(Message::Binary(framed.into()));
+                        }
+                    }
+                    None if bytes.len() >= 32 => {
+                        let device = hex::encode(&bytes[..32]);
+                        if let Some((_, to)) = s.relay_phones.get(&(relay.clone(), device)) {
+                            let _ = to.send(Message::Binary(bytes.slice(32..)));
+                        }
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut s = state.lock().unwrap();
+    match &phone {
+        None => {
+            if s.relay_macs.get(&relay).is_some_and(|(n, _)| *n == id) {
+                s.relay_macs.remove(&relay);
+                let gone: Vec<(String, String)> = s
+                    .relay_phones
+                    .keys()
+                    .filter(|(r, _)| *r == relay)
+                    .cloned()
+                    .collect();
+                for key in gone {
+                    if let Some((_, tx)) = s.relay_phones.remove(&key) {
+                        let _ = tx.send(relay_close(4008));
+                    }
+                }
+            }
+        }
+        Some(device) => {
+            let key = (relay.clone(), device.clone());
+            if s.relay_phones.get(&key).is_some_and(|(n, _)| *n == id) {
+                s.relay_phones.remove(&key);
+                if let Some((_, mac)) = s.relay_macs.get(&relay) {
+                    let _ = mac.send(Message::Text(
+                        json!({"device": device, "peer": "left"}).to_string().into(),
+                    ));
+                }
+            }
         }
     }
 }

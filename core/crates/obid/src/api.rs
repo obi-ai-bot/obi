@@ -37,6 +37,8 @@ pub struct Shared {
     pub devices: crate::devices::Devices,
     /// The phones paired with the gateway, and the open invitation (crate::gateway).
     pub gateway: crate::gateway::Gateway,
+    /// The phones' relay through the Obysphere, sealed end to end (crate::relay).
+    pub relay: Arc<crate::relay::Relay>,
     /// Connected apps and their job-scoped MCP broker.
     pub connections: Arc<crate::connections::Connections>,
     pub jobs: Arc<Jobs>,
