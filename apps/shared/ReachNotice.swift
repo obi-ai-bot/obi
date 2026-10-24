@@ -17,9 +17,6 @@ nonisolated enum ReachNotice: Equatable, Sendable {
     case removed
     /// The gateway refused it after its 30 days were up (docs/runner-api.md, "Redeeming").
     case expired
-    /// What answered through the Obysphere wasn't the Mac whose key the QR code pinned (#1278):
-    /// Oby talks to it no more until it pairs again.
-    case keyChanged
 
     /// What waits on the iPhone while the Mac can't be reached.
     static let waiting = "Sends when your Mac is back"
@@ -28,10 +25,9 @@ nonisolated enum ReachNotice: Equatable, Sendable {
     /// iPhone reaches a Mac's gateway with a device token (a 401 then means it was removed, or that
     /// its pairing ended: `expires`, when it does).
     static func of(_ connection: RunnerConnection, online: Bool, status: Int?, paired: Bool, lastSeen: Date?,
-                   expires: Date? = nil, keyChanged: Bool = false, now: Date = .now) -> ReachNotice? {
+                   expires: Date? = nil, now: Date = .now) -> ReachNotice? {
         guard case .offline = connection else { return nil }
         if !online { return .noInternet(lastSeen: lastSeen) }
-        if paired, keyChanged { return .keyChanged }
         if paired, status == 401 { return (expires.map { $0 <= now } ?? false) ? .expired : .removed }
         return .unreachable(lastSeen: lastSeen)
     }
@@ -43,7 +39,6 @@ nonisolated enum ReachNotice: Equatable, Sendable {
         case .noInternet: "No internet on this iPhone"
         case .removed: "This iPhone was removed from your Mac"
         case .expired: "Pairing with your Mac ended"
-        case .keyChanged: "Your Mac's key changed"
         }
     }
 
@@ -59,8 +54,6 @@ nonisolated enum ReachNotice: Equatable, Sendable {
             "Scan the code in Oby on your Mac to connect again."
         case .expired:
             "It lasts 30 days. Scan the code in Oby on your Mac to connect again."
-        case .keyChanged:
-            "Oby won't talk to it until you pair again. Scan the code in Oby on your Mac."
         }
     }
 
@@ -77,7 +70,7 @@ struct ReachLine: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Circle().fill(notice == .removed || notice == .expired || notice == .keyChanged ? Tokens.danger : Tokens.needs).frame(width: 6, height: 6).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 1 }
+            Circle().fill(notice == .removed || notice == .expired ? Tokens.danger : Tokens.needs).frame(width: 6, height: 6).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 1 }
             Text("\(Text(notice.title).foregroundStyle(Tokens.ink))  \(Text(notice.detail).foregroundStyle(Tokens.muted))")
                 .font(Tokens.font(Tokens.textSm))
                 .lineLimit(2)

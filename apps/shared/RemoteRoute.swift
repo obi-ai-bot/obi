@@ -7,8 +7,12 @@ import Foundation
 nonisolated struct MacLink: Codable, Equatable, Sendable {
     /// What the Mac calls itself, as its Bonjour service is named.
     var name: String
-    /// The tunnel's hostname: oby-<opaque>.<the control plane's device domain>.
+    /// The tunnel's hostname: oby-<opaque>.<the control plane's device domain>. Through an
+    /// Obysphere, only the Mac's name.
     var hostname: String
+    /// Paired through the Mac's Obysphere (#1278): it's reached through its relay alone, never by
+    /// this hostname, and isn't restored without the relay's keychain item. Only this iPhone sets it.
+    var relayed: Bool? = nil
 
     /// Where the tunnel answers.
     var tunnelURL: URL { URL(string: "https://\(hostname)")! }
@@ -122,9 +126,9 @@ nonisolated enum RemoteRoute: Equatable, Sendable {
     /// The route to a linked Mac: through its Obysphere when it paired through one (a Mac paired
     /// so takes this iPhone through it alone), else the local network when Bonjour found it, else
     /// its tunnel. With no Mac linked there's none, and the iPhone keeps talking to the runner it has.
-    static func choose(lan: URL?, link: MacLink?, paired: Bool, relayed: Bool = false) -> RemoteRoute? {
+    static func choose(lan: URL?, link: MacLink?, paired: Bool) -> RemoteRoute? {
         guard paired, let link else { return nil }
-        if relayed { return .relay }
+        if link.relayed == true { return .relay }
         if let lan { return .home(lan) }
         return .away(link.tunnelURL)
     }

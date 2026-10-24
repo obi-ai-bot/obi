@@ -175,17 +175,14 @@ extension URLSessionWebSocketTask: RelaySocket {}
 actor PhoneRelay {
     typealias Connect = @Sendable (URLRequest) -> any RelaySocket
 
-    /// The welcome didn't open with the key the QR code pinned: shown plainly, and only pairing
-    /// again with the Mac's code (a new key, from the Mac itself) clears it.
-    struct KeyChanged: LocalizedError {
-        var errorDescription: String? {
-            "Your Mac's key isn't the one this iPhone paired with, so Oby won't talk to it. Pair again with the code in Oby on your Mac."
-        }
-    }
-
     static let unreachable = RunnerError(message: "Your Mac isn't reachable.")
     static let forgotten = RunnerError(message: "This iPhone was removed from your Mac.", status: 401)
     static let replaced = RunnerError(message: "Another connection took this iPhone's place at your Obysphere. Open Oby again to reconnect.")
+    /// No welcome: obid answers nothing to a hello it can't open, so a Mac whose key changed looks
+    /// like this, and only pairing again pins its new key.
+    static let unanswered = RunnerError(message: "Your Mac isn't answering. If this keeps happening, pair again with the code in Oby on your Mac.")
+    /// The most chunks of one answer held for a reader slower than the Mac (64 KiB each at most).
+    static let held = 256
 
     nonisolated let link: RelayLink
     private let connect: Connect
@@ -208,12 +205,14 @@ actor PhoneRelay {
     /// After a 4008 (the Mac isn't connected) no socket opens before this, the wait doubling from
     /// 30 seconds to 5 minutes; `resume` (the person asks) opens one at once.
     private var notBefore = Date.distantPast
-    private var backoff: TimeInterval = 0
+    private(set) var backoff: TimeInterval = 0
 
     private struct Answer {
         let url: URL
         var head: CheckedContinuation<HTTPURLResponse, Error>?
         let body: AsyncThrowingStream<Data, Error>.Continuation
+        /// When the Mac last sent something on it.
+        var heard = Date.now
     }
 
     init(_ link: RelayLink, connect: @escaping Connect = PhoneRelay.urlSession) {
@@ -241,7 +240,7 @@ actor PhoneRelay {
         let head = try encoder.encode(Head(method: request.httpMethod ?? "GET", path: path, headers: headers))
         let body = request.httpBody ?? Data()
         try await ready()
-        let (answer, sink) = AsyncThrowingStream<Data, Error>.makeStream()
+        let (answer, sink) = AsyncThrowingStream<Data, Error>.makeStream(bufferingPolicy: .bufferingOldest(Self.held))
         let asked = Mutex<UInt32>(0)
         let response = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (waiting: CheckedContinuation<HTTPURLResponse, Error>) in
@@ -256,13 +255,8 @@ actor PhoneRelay {
                 let parts = stride(from: 0, to: body.count, by: 65_536).map { body.subdata(in: $0..<min($0 + 65_536, body.count)) }
                 let sent = post([RelayFrame(stream: stream, kind: .open, payload: head)]
                     + parts.map { RelayFrame(stream: stream, kind: .data, payload: $0) } + [RelayFrame(stream: stream, kind: .end)])
-                let current = generation
                 Task { if case .failure(let error) = await sent.result { fail(stream, error) } }
-                // Unanswered for long, even while it can't go out: a new hello, on a new socket.
-                Task {
-                    try? await Task.sleep(for: .seconds(request.timeoutInterval))
-                    late(stream, current)
-                }
+                Task { await watch(stream, quiet: request.timeoutInterval) }
             }
         } onCancel: {
             let stream = asked.withLock { $0 }
@@ -306,21 +300,18 @@ actor PhoneRelay {
 
     private func sayHello() {
         guard let key = link.macKey, let hello = try? RelayEnvelope.Hello(to: key) else {
-            stopped = KeyChanged()
-            return drop(KeyChanged())
+            stopped = RunnerError(message: "This pairing's key for your Mac can't be used. Pair again with the code in Oby on your Mac.")
+            return drop(stopped!)
         }
         self.hello = hello
         let socket = socket ?? open()
         let current = generation
         Task {
-            do { try await socket.send(.data(hello.bytes)) } catch { ended(current) }
-        }
-        // No welcome within a few seconds, even if the hello couldn't go: start over, on a new socket.
-        Task {
+            // Sent once the socket is up (URLSession gives up on an upgrade after its request's 60 seconds).
+            do { try await socket.send(.data(hello.bytes)) } catch { return ended(current) }
+            // No welcome within a few seconds of the hello going out: start over, on a new socket.
             try? await Task.sleep(for: .seconds(5))
-            if current == generation, session == nil, self.hello?.bytes == hello.bytes {
-                drop(RunnerError(message: "Your Mac isn't answering."))
-            }
+            if current == generation, session == nil, self.hello?.bytes == hello.bytes { drop(Self.unanswered) }
         }
     }
 
@@ -376,21 +367,17 @@ actor PhoneRelay {
     }
 
     private func welcome(_ envelope: Data) {
-        // Waiting for a welcome, what's left of a session before is dropped.
-        guard let hello, envelope.count > 1, envelope[envelope.startIndex + 1] == 2 else { return }
-        do {
-            session = try hello.welcomed(envelope)
-            epoch += 1
-            self.hello = nil
-            backoff = 0
-            for started in waiting { started.resume() }
-            waiting = []
-        } catch RelayEnvelope.Refused.notTheMac {
-            stopped = KeyChanged()
-            drop(KeyChanged())
-        } catch {
-            drop(RunnerError(message: "Your Mac's answer couldn't be read."))
-        }
+        // Waiting for a welcome, what's left of a session before is dropped. obid answers nothing to
+        // a hello it can't open, so a welcome that doesn't start this hello's session is an earlier
+        // hello's, come late, or forged: it changes nothing, and the hello still waits for its own.
+        guard let hello, envelope.count > 1, envelope[envelope.startIndex + 1] == 2,
+              let started = try? hello.welcomed(envelope) else { return }
+        session = started
+        epoch += 1
+        self.hello = nil
+        backoff = 0
+        for started in waiting { started.resume() }
+        waiting = []
     }
 
     private func take(_ frame: RelayFrame) {
@@ -401,6 +388,8 @@ actor PhoneRelay {
         }
         guard var answer = answers[frame.stream] else { return }
         struct Head: Decodable { var status: Int; var headers: [String: String]? }
+        answer.heard = .now
+        answers[frame.stream] = answer
         switch frame.kind {
         case .open:
             guard let waiting = answer.head else { return }
@@ -412,7 +401,9 @@ actor PhoneRelay {
             answers[frame.stream] = answer
             waiting.resume(returning: response)
         case .data:
-            answer.body.yield(frame.payload)
+            if case .dropped = answer.body.yield(frame.payload) {
+                stop(frame.stream, RunnerError(message: "Your Mac's answer came faster than Oby could take it."))
+            }
         case .end:
             guard answer.head == nil else { return fail(frame.stream, RunnerError(message: "Your Mac's answer couldn't be read.")) }
             answers[frame.stream] = nil
@@ -437,17 +428,28 @@ actor PhoneRelay {
         answer.body.finish(throwing: error)
     }
 
-    /// The caller stopped waiting (left the events screen): the Mac stops answering it.
-    private func stop(_ stream: UInt32) {
+    /// The caller stopped waiting (left the events screen), or the answer can't go on: the Mac
+    /// stops answering it.
+    private func stop(_ stream: UInt32, _ error: Error = CancellationError()) {
         guard answers[stream] != nil else { return }
-        fail(stream, CancellationError())
+        fail(stream, error)
         post([RelayFrame(stream: stream, kind: .reset)])
     }
 
-    private func late(_ stream: UInt32, _ current: Int) {
-        guard current == generation, answers[stream]?.head != nil else { return }
-        fail(stream, URLError(.timedOut))
-        drop(URLError(.networkConnectionLost))
+    /// Nothing from the Mac on a stream for `quiet` seconds (its request's timeout; an event stream
+    /// and a wait send something every 15). Before its answer began, the session is stuck: a new
+    /// hello, on a new socket. After, that answer alone ends.
+    private func watch(_ stream: UInt32, quiet: TimeInterval) async {
+        while true {
+            try? await Task.sleep(for: .seconds(quiet))
+            guard let answer = answers[stream] else { return }
+            guard Date.now.timeIntervalSince(answer.heard) >= quiet else { continue }
+            if answer.head != nil {
+                fail(stream, URLError(.timedOut))
+                return drop(URLError(.networkConnectionLost))
+            }
+            return stop(stream, URLError(.timedOut))
+        }
     }
 
     /// The socket ended: why, as the Sphere's close code or its refusal of the upgrade says.

@@ -236,9 +236,23 @@ struct RelayTests {
                 try GatewayEnvelope.decode(#"{"url":"https://sphere.example","link":{"hostname":"studio","name":"Studio","relay":\#(relay)},"secret":"s"}"#)
             }
         }
+        // A pasted one names its Mac plainly: a short hostname of letters, digits, dots and dashes,
+        // a short name of one line.
+        let relayed = String(decoding: try JSONEncoder().encode(mac.link), as: UTF8.self)
+        for (hostname, name) in [("", "Studio"), ("studio/evil", "Studio"), (String(repeating: "a", count: 254), "Studio"),
+                                 ("studio", ""), ("studio", "Studio\nPay here"), ("studio", String(repeating: "n", count: 65))] {
+            let link = String(decoding: try JSONEncoder().encode(["hostname": hostname, "name": name]), as: UTF8.self).dropLast()
+            #expect(throws: RunnerError.self, Comment(rawValue: "\(hostname) \(name)")) {
+                try GatewayEnvelope.decode(#"{"url":"https://sphere.example","link":\#(link),"relay":\#(relayed)},"secret":"s"}"#)
+            }
+        }
+        #expect((try? GatewayEnvelope.decode(#"{"url":"https://sphere.example","link":{"hostname":"Wellingtons-MacBook-Pro.local","name":"Wellington's MacBook Air","relay":\#(relayed)},"secret":"s"}"#)) != nil)
         // A Mac paired through its Obysphere is reached through it alone, at home too.
         let lan = URL(string: "http://192.168.1.20:8810")!
-        #expect(RemoteRoute.choose(lan: lan, link: envelope.link, paired: true, relayed: true) == .relay)
+        var paired = envelope.link
+        paired.relayed = true
+        #expect(RemoteRoute.choose(lan: lan, link: paired, paired: true) == .relay)
+        #expect(RemoteRoute.choose(lan: lan, link: envelope.link, paired: true) == .home(lan))
         #expect(RemoteRoute.relay.url.scheme == "oby-relay")
     }
 
@@ -253,19 +267,28 @@ struct RelayTests {
             #expect(error.message == "Your Mac isn't reachable.")
         }
         #expect(mac.sockets.count == 1)
-        // ...unless the person asks.
+        #expect(await relay.backoff == 30)
+        // ...doubling after each 4008, up to 5 minutes...
+        for wait in [60.0, 120, 240, 300, 300] {
+            await relay.resume()
+            await #expect(throws: RunnerError.self) { try await runner.send("GET", "v1/status") }
+            #expect(await relay.backoff == wait)
+        }
+        #expect(mac.sockets.count == 6)
+        // ...and at once when the person asks; a welcome starts the doubling over.
         mac.closeOnHello = nil
         await relay.resume()
         _ = try await runner.send("GET", "v1/status")
-        #expect(mac.sockets.count == 2)
+        #expect(mac.sockets.count == 7)
+        #expect(await relay.backoff == 0)
         // 4003: another socket of this phone's took over: never again by itself.
         mac.sockets.last?.close(4003)
         for _ in 0..<50 { try await Task.sleep(for: .milliseconds(10)) }
         await #expect(throws: RunnerError.self) { try await runner.send("GET", "v1/status") }
-        #expect(mac.sockets.count == 2)
+        #expect(mac.sockets.count == 7)
         await relay.resume()
         _ = try await runner.send("GET", "v1/status")
-        #expect(mac.sockets.count == 3)
+        #expect(mac.sockets.count == 8)
     }
 
     @Test func aForgottenPhoneIsRemoved() async throws {
@@ -298,32 +321,99 @@ struct RelayTests {
         #expect(mac.hellos == 3 && mac.sockets.count == 1)
     }
 
-    /// A hello that can't go out still times out, and so does a request: nothing waits forever.
-    @Test func aSocketThatNeverSendsStillTimesOut() async throws {
+    /// obid answers nothing to a hello it can't open, so a welcome that doesn't open is an earlier
+    /// hello's, come late, or forged: ignored, while the hello waits for its own.
+    @Test func aLateWelcomeIsIgnored() async throws {
         let mac = FakeMac()
-        mac.stall = true
+        mac.lateWelcome = true
         let runner = Runner(base: RemoteRoute.relayBase, token: "t", relay: mac.relay())
-        do {
-            _ = try await runner.send("GET", "v1/status")
-            Issue.record("a request went through a socket that sends nothing")
-        } catch let error as RunnerError {
-            #expect(error.message == "Your Mac isn't answering.")
-        }
+        _ = try await runner.send("GET", "v1/status")
+        #expect(mac.hellos == 1 && mac.sockets.count == 1)
     }
 
-    @Test func anotherKeyIsRefusedPlainlyAndNotRetried() async throws {
+    /// Only a forged welcome (the Sphere with a key of its own): nothing starts, no false "key
+    /// changed", and the next request tries again on a new socket.
+    @Test func aForgedWelcomeAloneIsNoAnswer() async throws {
         let mac = FakeMac()
         mac.impostor = true
+        let relay = mac.relay()
+        let runner = Runner(base: RemoteRoute.relayBase, token: "t", relay: relay)
+        do {
+            _ = try await runner.send("GET", "v1/status")
+            Issue.record("a forged welcome started a session")
+        } catch let error as RunnerError {
+            #expect(error.message == PhoneRelay.unanswered.message)
+        }
+        mac.impostor = false
+        _ = try await runner.send("GET", "v1/status")
+        #expect(mac.sockets.count == 2)
+    }
+
+    /// An answer that starts and then goes quiet ends, and the Mac is told to stop it; the session goes on.
+    @Test func aQuietAnswerTimesOut() async throws {
+        let mac = FakeMac()
+        mac.quietAfterHead = true
         let runner = Runner(base: RemoteRoute.relayBase, token: "t", relay: mac.relay())
-        await #expect(throws: PhoneRelay.KeyChanged.self) { try await runner.send("GET", "v1/status") }
-        await #expect(throws: PhoneRelay.KeyChanged.self) { try await runner.send("GET", "v1/status") }
-        #expect(mac.sockets.count == 1)
-        // Shown plainly: pair again.
-        let notice = ReachNotice.of(.offline("x"), online: true, status: nil, paired: true, lastSeen: nil, keyChanged: true)
-        #expect(notice == .keyChanged)
-        #expect(Phone.needsPairing(linked: true, runner: nil, notice: notice))
-        #expect(notice?.title == "Your Mac's key changed")
-        #expect(UnpairedLine.message(.keyChanged).contains("Pair again"))
+        await #expect(throws: URLError.self) { try await runner.send("GET", "v1/status", timeout: 1) }
+        try await mac.until { $0.contains { $0.kind == .reset && $0.stream == 1 } }
+        mac.quietAfterHead = false
+        _ = try await runner.send("GET", "v1/status")
+        #expect(mac.hellos == 1)
+    }
+
+    /// An answer the reader doesn't keep up with is held only so far: then it ends and the Mac stops it.
+    @Test func anAnswerFasterThanItsReaderIsBounded() async throws {
+        let mac = FakeMac()
+        mac.flood = PhoneRelay.held + 10
+        let relay = mac.relay()
+        let (response, body) = try await relay.send(URLRequest(url: RemoteRoute.relayBase.appending(path: "v1/artifacts/a/1/big")))
+        #expect(response.statusCode == 200)
+        try await mac.until { $0.contains { $0.kind == .reset && $0.stream == 1 } }
+        // What was held is still read, then the answer ends with why.
+        var chunks = 0
+        await #expect(throws: RunnerError.self) { for try await _ in body { chunks += 1 } }
+        #expect(chunks == PhoneRelay.held)
+    }
+
+    /// A pairing that fails closes its socket, and nothing of it is kept.
+    @Test func aFailedPairingClosesItsSocket() async throws {
+        let mac = FakeMac()
+        mac.answer = { _, _ in (401, Data(#"{"error":"That pairing code is not valid."}"#.utf8)) }
+        let phone = Phone()
+        let before = phone.link
+        await #expect(throws: RunnerError.self) {
+            try await phone.pairRelay(mac.link, credential: "used", mac: MacLink(name: "Studio", hostname: "studio"), connect: mac.connect)
+        }
+        #expect(mac.sockets.count == 1 && mac.sockets[0].cancelled)
+        #expect(phone.link == before)
+        #expect(RelayStore.read() != mac.link)
+    }
+
+    /// A Mac paired through its Obysphere isn't restored as a tunnel pairing without its relay, and
+    /// a device token only unreadable now (the iPhone locked) doesn't unpair.
+    @Test func aRelayedPairingIsntRestoredWithoutItsRelay() throws {
+        let savedLink = UserDefaults.standard.data(forKey: "mac.link")
+        let hadToken = GatewayTokenStore.read()
+        let hadRelay = RelayStore.read()
+        defer {
+            UserDefaults.standard.set(savedLink, forKey: "mac.link")
+            if let hadToken { try? GatewayTokenStore.save(hadToken) } else { GatewayTokenStore.remove() }
+            if let hadRelay { try? RelayStore.save(hadRelay) } else { RelayStore.remove() }
+        }
+        try GatewayTokenStore.save("tok-relay")
+        RelayStore.remove()
+        UserDefaults.standard.set(try MacLink(name: "Studio", hostname: "studio", relayed: true).encoded(), forKey: "mac.link")
+        #expect(Phone().link == nil)
+        #expect(UserDefaults.standard.data(forKey: "mac.link") == nil)
+        #expect(GatewayTokenStore.isMissing())
+        // With its relay, it's back, reached through it.
+        let mac = FakeMac()
+        try GatewayTokenStore.save("tok-relay")
+        try RelayStore.save(mac.link)
+        UserDefaults.standard.set(try MacLink(name: "Studio", hostname: "studio", relayed: true).encoded(), forKey: "mac.link")
+        let phone = Phone()
+        #expect(phone.link?.relayed == true && phone.route == .relay)
+        #expect(!RelayStore.isMissing())
     }
 }
 
@@ -391,16 +481,28 @@ nonisolated final class FakeMac: @unchecked Sendable {
     var resetSession = false
     /// Answer hellos with a welcome of another key's.
     var impostor = false
-    /// Nothing the phone sends ever goes out (an upgrade that hangs).
-    var stall = false
+    /// Before each welcome, one for an earlier hello, come late.
+    var lateWelcome = false
+    /// Answer with a head and then nothing.
+    var quietAfterHead = false
+    /// Answer with this many 64 KiB chunks at once, and no end.
+    var flood = 0
 
     var link: RelayLink {
         RelayLink(sphere: URL(string: "https://sphere.example")!, id: Self.relayID, token: Self.token,
                   key: mac.publicKey.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: ""))
     }
 
-    func relay() -> PhoneRelay {
-        PhoneRelay(link) { request in
+    func relay() -> PhoneRelay { PhoneRelay(link, connect: connect) }
+
+    /// Waits up to 2 seconds for what the Mac heard to satisfy `heard`.
+    func until(_ heard: ([RelayFrame]) -> Bool) async throws {
+        for _ in 0..<100 where !heard(lock.withLock { frames }) { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(heard(lock.withLock { frames }))
+    }
+
+    var connect: PhoneRelay.Connect {
+        { request in
             let socket = FakeSocket(request: request, mac: self)
             self.lock.withLock { self.sockets.append(socket) }
             if let refuse = self.refuse {
@@ -420,6 +522,7 @@ nonisolated final class FakeMac: @unchecked Sendable {
                 let other = TestMac(agreement: .init())
                 return socket.deliver(.data(try! other.welcome(try! RelayEnvelope.Hello(to: other.publicKey).bytes).0))
             }
+            if lateWelcome { socket.deliver(.data(try! mac.welcome(try! RelayEnvelope.Hello(to: mac.publicKey).bytes).0)) }
             let (welcome, session) = try! mac.welcome(envelope)
             lock.withLock { self.session = session; lastStream = 0 }
             return socket.deliver(.data(welcome))
@@ -457,6 +560,14 @@ nonisolated final class FakeMac: @unchecked Sendable {
             skip = false
             _ = lock.withLock { session!.seal(Data()) }
         }
+        if quietAfterHead {
+            return send(RelayFrame(stream: stream, kind: .open, payload: Data(#"{"status":200,"headers":{}}"#.utf8)))
+        }
+        if flood > 0 {
+            send(RelayFrame(stream: stream, kind: .open, payload: Data(#"{"status":200,"headers":{}}"#.utf8)))
+            for _ in 0..<flood { send(RelayFrame(stream: stream, kind: .data, payload: Data(count: 65_536))) }
+            return
+        }
         if head.path == "/v1/events", let streaming {
             send(RelayFrame(stream: stream, kind: .open, payload: Data(#"{"status":200,"headers":{"content-type":"text/event-stream"}}"#.utf8)))
             return send(RelayFrame(stream: stream, kind: .data, payload: streaming))
@@ -478,6 +589,8 @@ nonisolated final class FakeSocket: RelaySocket, @unchecked Sendable {
     private var closed = false
     private(set) var sent: [URLSessionWebSocketTask.Message] = []
     private(set) var closeCode: URLSessionWebSocketTask.CloseCode = .invalid
+    /// PhoneRelay closed it.
+    private(set) var cancelled = false
     var response: URLResponse?
 
     init(request: URLRequest, mac: FakeMac) {
@@ -526,12 +639,12 @@ nonisolated final class FakeSocket: RelaySocket, @unchecked Sendable {
             return closed
         }
         if isClosed { throw URLError(.networkConnectionLost) }
-        if mac?.stall == true { try await Task.sleep(for: .seconds(3600)) }
         if case .data(let data) = message { mac?.heard(data, on: self) }
     }
 
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         lock.withLock {
+            cancelled = true
             closed = true
             waiter?.resume(throwing: URLError(.cancelled))
             waiter = nil

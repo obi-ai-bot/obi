@@ -286,9 +286,13 @@ struct GatewayEnvelope: Decodable, Equatable {
             throw RunnerError(message: "That isn't Oby's pairing QR code. Scan the one the Mac's Settings › Runner shows.")
         }
         // Through an Obysphere the hostname is only the Mac's name: the relay is the way, and its
-        // key the Mac's, sealed to from the first call.
+        // key the Mac's, sealed to from the first call. A pasted one still names its Mac plainly:
+        // a hostname of letters, digits, dots and dashes, a name of one line, both short.
         if let relay = envelope.relay {
-            guard relay.isValid, !envelope.link.hostname.isEmpty else {
+            let host = envelope.link.hostname, name = envelope.link.name
+            guard relay.isValid, (1...253).contains(host.count),
+                  host.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }),
+                  (1...64).contains(name.count), !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
                 throw RunnerError(message: "That invitation's Obysphere isn't one Oby can reach safely, so Oby won't pair with it.")
             }
             return envelope
