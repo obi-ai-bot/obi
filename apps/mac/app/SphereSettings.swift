@@ -21,10 +21,8 @@ struct SphereSettingsView: View {
     @State private var comparing: SphereModel.Member?
     @State private var job: Job.ID?
     @State private var sent: String?
-    /// Host your own: the address pasted, why it isn't one yet, and whether a token was copied.
-    @State private var address = ""
-    @State private var hostProblem: String?
-    @State private var tokenCopied = SphereModel.madeToken != nil
+    /// Host your own: kept while Oby runs, so the token Deploy… made outlives this page.
+    @State private var host = HostOwn.shared
     private let feed: RunnerFeed
 
     init(feed: RunnerFeed) {
@@ -41,9 +39,12 @@ struct SphereSettingsView: View {
         .onChange(of: OpenedInvite.shared.invite, initial: true) { _, opened in
             guard let opened else { return }
             OpenedInvite.shared.invite = nil
-            if sphere.joined { sphere.problem = "This Oby is in an Obysphere already."; return }
             pasted = opened.link
-            open(opened)
+            Task {
+                // The membership first: on a page just opened it isn't read yet.
+                try? await sphere.refresh()
+                if sphere.joined { sphere.problem = "This Oby is in an Obysphere already." } else { open(opened) }
+            }
         }
         // While the page is open: the membership, the members and what waits, every 20 seconds.
         .task {
@@ -81,6 +82,7 @@ struct SphereSettingsView: View {
                     }
                 }
             }
+            .onChange(of: trusted) { if trusted { preview() } }
         } else {
             SetGroup("Join an Obysphere", footer: "Paste the invite link someone in it sent you.", problem: sphere.problem) {
                 SetRow("Invite link") { SetField("Invite link", text: $pasted, prompt: "https://…/join#…", width: 320) }
@@ -117,55 +119,57 @@ struct SphereSettingsView: View {
         }
     }
 
-    /// The Join screen for `found`: what the Sphere says of it (its name, who's in it, a Workspace
-    /// limit), or the link's own words if it can't say.
+    /// The Join screen for `found`, in the link's own words until the Sphere may be asked.
     private func open(_ found: InviteLink) {
         trusted = false
-        sphere.run { invite = (try? await sphere.preview(found)) ?? found }
+        invite = found
+        preview()
     }
 
-    /// Host your own (Sangam's design has no screen for it): Deploy makes the operator token, copies
-    /// it concealed and opens Cloudflare's deploy page; the address pasted back makes it the server,
-    /// keeps the token under its host and opens Create. The token is never on screen.
+    /// What the Sphere says of the invite shown (its name, who's in it, a Workspace limit): for a
+    /// server Oby doesn't know, only once "I trust" is ticked (`SphereModel.shown`).
+    private func preview() {
+        guard let found = invite else { return }
+        sphere.run {
+            let seen = await sphere.shown(found, trusted: trusted)
+            if invite?.id == found.id { invite = seen }
+        }
+    }
+
+    /// Host your own (Sangam's design has no screen for it; `HostOwn`): Deploy… copies the token and
+    /// opens Cloudflare's deploy page; the address is checked on Return or Check, without the token,
+    /// and used once you say it's yours; then Create. The token is never on screen.
     private var hostYourOwn: some View {
-        SetGroup("Host your own", footer: "Oby keeps the token in your Mac's Keychain under your Obysphere's address, and sends it nowhere else. One never used is forgotten when Oby quits or you deploy again; if Cloudflare has it already, deploy again and paste the new one over SPHERE_OPERATOR_TOKEN in your Worker's Settings › Variables and Secrets.", problem: hostProblem) {
-            SetRow("Deploy to Cloudflare", about: tokenCopied
-                   ? "Oby copied your Obysphere's operator token: paste it where Cloudflare asks for SPHERE_OPERATOR_TOKEN."
+        SetGroup("Host your own", footer: "Oby keeps the token in this Mac's Keychain under the address you confirm, and sends it only there. One never used is forgotten when Oby quits or you deploy again; if Cloudflare has it already, deploy again and paste the new one over SPHERE_OPERATOR_TOKEN in your Worker's Settings › Variables and Secrets.", problem: host.problem) {
+            SetRow("Deploy to Cloudflare", about: host.made != nil
+                   ? "Oby copied your Obysphere's operator token, on this Mac only: paste it where Cloudflare asks for SPHERE_OPERATOR_TOKEN."
                    : "Your own Obysphere, on your Cloudflare account. Oby copies the token it needs, for you to paste there.") {
-                Button("Deploy…") {
-                    let token = SphereModel.newOperatorToken()
-                    SphereModel.madeToken = token
-                    Self.copySecret(token)
-                    tokenCopied = true
-                    NSWorkspace.shared.open(Self.deploy)
-                }
-                .buttonStyle(.set)
+                Button("Deploy…") { NSWorkspace.shared.open(host.deploy()) }.buttonStyle(.set)
             }
             SetRow("Your Obysphere's address", about: "Once Cloudflare is done, your Worker's address.") {
-                SetField("Your Obysphere's address", text: $address, prompt: "https://obi-sphere.you.workers.dev", width: 280)
-                    .onSubmit { Task { await hostOwn() } }
+                SetField("Your Obysphere's address", text: $host.address, prompt: "https://obi-sphere.you.workers.dev", width: 280)
+                    .onSubmit { Task { await host.check() } }
+            }
+            if let checked = host.checked, let name = checked.host() {
+                SetRow("Use \(name)?", about: host.made == nil ? "It becomes your Obysphere server."
+                       : "Oby sends it the token it copied, keeps the token in your Keychain under \(name), and makes it your Obysphere server.") {
+                    HStack {
+                        Button("Not mine") { host.checked = nil }.buttonStyle(.set)
+                        Button("Use it") {
+                            Task {
+                                guard await host.use() else { return }
+                                serverText = checked.absoluteString
+                                creating = true
+                            }
+                        }
+                        .buttonStyle(.set)
+                    }
+                }
+            } else {
+                SetRow("") { Button("Check") { Task { await host.check() } }.buttonStyle(.set).disabled(host.address.isEmpty) }
             }
         }
-        // Checked as it's pasted.
-        .task(id: address) {
-            hostProblem = nil
-            guard !address.isEmpty, (try? await Task.sleep(for: .milliseconds(400))) != nil else { return }
-            await hostOwn()
-        }
-    }
-
-    static let deploy = URL(string: "https://deploy.workers.cloudflare.com/?url=https://github.com/obi-ai-bot/obi-sphere/tree/main/server")!
-
-    private func hostOwn() async {
-        do {
-            let url = try await SphereModel.hostOwn(address, token: SphereModel.madeToken)
-            SphereModel.madeToken = nil
-            (tokenCopied, hostProblem, address) = (false, nil, "")
-            serverText = url.absoluteString
-            creating = true
-        } catch {
-            hostProblem = error.localizedDescription
-        }
+        .disabled(host.busy)
     }
 
     private func saveServer() {
@@ -185,11 +189,15 @@ struct SphereSettingsView: View {
     /// nspasteboard.org's marker for a secret on the clipboard.
     static let concealed = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
 
-    /// `secret` on the clipboard, concealed: clipboard managers that honour it don't keep it.
-    static func copySecret(_ secret: String, to pasteboard: NSPasteboard = .general) {
-        pasteboard.clearContents()
+    /// `secret` on this Mac's clipboard only (no Universal Clipboard), concealed: clipboard managers
+    /// that honour it don't keep it. Answers the clipboard's change count, to clear it later if it's
+    /// still this.
+    @discardableResult
+    static func copySecret(_ secret: String, to pasteboard: NSPasteboard = .general) -> Int {
+        pasteboard.prepareForNewContents(with: .currentHostOnly)
         pasteboard.setString(secret, forType: .string)
         pasteboard.setString("", forType: concealed)
+        return pasteboard.changeCount
     }
 
     /// Its id from its name (Sangam's `slugOf`): lowercase letters, digits and single hyphens.

@@ -20,7 +20,8 @@ struct SphereScreens {
     }
 
     /// The Join screen an oby://join link opened, with the trust question for a server Oby doesn't
-    /// know; then Host your own once Deploy copied the token.
+    /// know (in the link's own words: nothing is asked of it yet); then Host your own once Deploy
+    /// copied the token, and once an address is checked.
     @Test func anOpenedJoinLinkAndHostYourOwn() async throws {
         let obid = RunnerStub { request in
             request.path == "/v1/obid/sphere" ? (200, #"{"state": "none", "owner": "wellington"}"#) : (404, "{}")
@@ -29,9 +30,14 @@ struct SphereScreens {
         feed.stageAlerts(following: obid.runner)
         OpenedInvite.shared.invite = InviteLink(opened: URL(string: "oby://join/obi-sphere.acme.workers.dev#sphere=acme&name=Acme&by=sangam&id=inv-1&secret=s")!)
         try await save(settings(SphereSettingsView(feed: feed)), as: "sphere-join-opened")
-        SphereModel.madeToken = "made"
-        defer { SphereModel.madeToken = nil }
+        let host = HostOwn.shared
+        host.made = ("made", 0)
+        defer { (host.made, host.address) = (nil, "") }
         try await save(settings(SphereSettingsView(feed: feed)), as: "sphere-host-your-own")
+        // Checked, waiting for the owner to say it's theirs.
+        host.address = "obi-sphere.acme.workers.dev"
+        host.checked = URL(string: "https://obi-sphere.acme.workers.dev")
+        try await save(settings(SphereSettingsView(feed: feed)), as: "sphere-host-your-own-confirm")
     }
 
     private func settings(_ page: some View) -> some View {

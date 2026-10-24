@@ -135,11 +135,16 @@ struct SphereTests {
     }
 
     /// Host your own, with a fake Obysphere and obid: Deploy's token, copied concealed (paste one, into
-    /// Cloudflare); the address (paste two), checked and kept with the token under its host; then
-    /// Create makes the Obysphere with that token.
+    /// Cloudflare); the address (paste two), asked nothing until Check, and then without the token;
+    /// the token goes to that host only once it's confirmed, and is kept under it; then Create makes
+    /// the Obysphere with it.
     @MainActor @Test func hostYourOwnGoesFromDeployToACreatedObysphereWithTwoPastes() async throws {
-        let token = SphereModel.newOperatorToken()
-        // The server's own order: the operator token first, then the body.
+        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.tests.\(UUID().uuidString)"))
+        let board = NSPasteboard(name: .init("com.deskree.oby.tests.\(UUID().uuidString)"))
+        let host = HostOwn(defaults: defaults, pasteboard: board)
+        #expect(host.deploy() == HostOwn.deployPage)
+        let token = try #require(host.made?.token)
+        // The server's own order: the operator token first (401 wrong or missing), then the body.
         let server = RunnerStub { request in
             switch (request.method, request.path) {
             case ("GET", "/v0.1/health"): (200, #"{"ok": true, "protocol": "obi/0.1"}"#)
@@ -160,8 +165,6 @@ struct SphereTests {
             default: (200, "{}")
             }
         }
-        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.tests.\(UUID().uuidString)"))
-        let board = NSPasteboard(name: .init("com.deskree.oby.tests.\(UUID().uuidString)"))
         let session = SphereServer.session
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [RunnerStubProtocol.self] + (configuration.protocolClasses ?? [])
@@ -174,22 +177,48 @@ struct SphereTests {
         }
 
         #expect(token.count == 43 && token.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "-_".contains($0)) })
-        #expect(SphereModel.newOperatorToken() != token)
-        SphereSettingsView.copySecret(token, to: board)
         #expect(board.string(forType: .string) == token && board.types?.contains(SphereSettingsView.concealed) == true)
 
-        await #expect(throws: RunnerError.self) { try await SphereModel.hostOwn("https://localhost:8787", token: token, defaults: defaults) }
-        await #expect(throws: RunnerError.self) { try await SphereModel.hostOwn("\(obid.host)", token: token, defaults: defaults) }
-        #expect(defaults.string(forKey: SphereModel.serverKey) == nil)
-        #expect(try SphereModel.operatorToken.value(obid.host) == nil)
-        // A token the server doesn't have is never kept, nor the server.
-        await #expect(throws: RunnerError.self) { try await SphereModel.hostOwn(server.host, token: "another", defaults: defaults) }
+        // Typed or pasted, an address asks nothing: not a prefix of it, not the whole of it.
+        for typed in ["o", String(server.host.dropLast(3)), " \(server.host)/ "] { host.address = typed }
+        try await Task.sleep(for: .milliseconds(800))
+        #expect(server.requests.isEmpty && host.checked == nil)
+
+        await host.check()
+        let url = try #require(host.checked)
+        #expect(url.absoluteString == "https://\(server.host)", "pasted as the dashboard shows it, without https://")
+        #expect(server.requests.map { "\($0.method) \($0.path)" } == ["GET /v0.1/health", "POST /v0.1/spheres"])
+        #expect(server.requests.allSatisfy { $0.authorization == nil }, "the token goes nowhere before the host is confirmed")
         #expect(defaults.string(forKey: SphereModel.serverKey) == nil)
         #expect(try SphereModel.operatorToken.value(server.host) == nil)
-        // Pasted as the dashboard shows it, without https://.
-        let url = try await SphereModel.hostOwn(" \(server.host)/ ", token: token, defaults: defaults)
-        #expect(url.absoluteString == "https://\(server.host)" && defaults.string(forKey: SphereModel.serverKey) == url.absoluteString)
+
+        // Refused: not public, and not an Obysphere. A new address takes back the check.
+        host.address = "https://localhost:8787"
+        #expect(host.checked == nil)
+        await host.check()
+        #expect(host.checked == nil && host.problem != nil)
+        host.address = obid.host
+        await host.check()
+        #expect(host.checked == nil && host.problem != nil)
+
+        // A server without this token keeps nothing: another Oby's Deploy… against the same server.
+        let otherBoard = NSPasteboard(name: .init("com.deskree.oby.tests.\(UUID().uuidString)"))
+        defer { otherBoard.releaseGlobally() }
+        let other = HostOwn(defaults: defaults, pasteboard: otherBoard)
+        _ = other.deploy()
+        other.address = server.host
+        await other.check()
+        #expect(await other.use() == false && other.problem != nil && other.made != nil)
+        #expect(defaults.string(forKey: SphereModel.serverKey) == nil)
+        #expect(try SphereModel.operatorToken.value(server.host) == nil)
+
+        // Confirmed: kept under that host, the server set, the clipboard cleared, the token forgotten.
+        host.address = server.host
+        await host.check()
+        #expect(await host.use())
         #expect(try SphereModel.operatorToken.value(server.host) == token)
+        #expect(defaults.string(forKey: SphereModel.serverKey) == url.absoluteString)
+        #expect(board.string(forType: .string) == nil && host.made == nil && host.address.isEmpty)
 
         let feed = RunnerFeed()
         feed.stageAlerts(following: obid.runner)
@@ -197,6 +226,58 @@ struct SphereTests {
         let created = server.requests.filter { $0.method == "POST" && $0.path == "/v0.1/spheres" && $0.json?["sphere"] != nil }
         #expect(created.count == 1 && created.first?.authorization == "Bearer \(token)")
         #expect(obid.requests.contains { $0.method == "POST" && $0.path == "/v1/obid/sphere/join" })
+    }
+
+    /// A Deploy… while the token is being used makes a new one: that one, and the clipboard holding
+    /// it, stay.
+    @MainActor @Test func aNewDeployWhileUsingKeepsTheNewToken() async throws {
+        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.tests.\(UUID().uuidString)"))
+        let board = NSPasteboard(name: .init("com.deskree.oby.tests.\(UUID().uuidString)"))
+        let host = HostOwn(defaults: defaults, pasteboard: board)
+        _ = host.deploy()
+        let first = try #require(host.made?.token)
+        let server = RunnerStub { request in
+            if request.path == "/v0.1/health" { return (200, #"{"ok": true}"#) }
+            // While the first token is checked, the owner chooses Deploy… again.
+            if request.authorization == "Bearer \(first)" { DispatchQueue.main.sync { MainActor.assumeIsolated { _ = host.deploy() } } }
+            return (request.authorization == nil ? 401 : 400, "{}")
+        }
+        let session = SphereServer.session
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RunnerStubProtocol.self] + (configuration.protocolClasses ?? [])
+        SphereServer.session = URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
+        defer {
+            SphereServer.session = session
+            try? SphereModel.operatorToken.remove(server.host)
+            board.releaseGlobally()
+        }
+        host.address = server.host
+        await host.check()
+        #expect(await host.use())
+        let second = try #require(host.made?.token)
+        #expect(second != first && board.string(forType: .string) == second)
+        #expect(try SphereModel.operatorToken.value(server.host) == first)
+    }
+
+    /// The Join screen asks a server Oby doesn't know nothing until "I trust" is ticked.
+    @MainActor @Test func anUnknownServersPreviewWaitsForTrust() async throws {
+        let server = RunnerStub { request in
+            request.path == "/v0.1/spheres/acme/invitations/inv-1/preview" ? (200, #"{"name": "Acme Inc", "member_count": 4}"#) : (404, "{}")
+        }
+        let session = SphereServer.session
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RunnerStubProtocol.self] + (configuration.protocolClasses ?? [])
+        SphereServer.session = URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
+        defer { SphereServer.session = session }
+        let link = try #require(URL(string: "oby://join/\(server.host)#sphere=acme&name=Acme&by=sangam&id=inv-1&secret=s"))
+        let found = try #require(InviteLink(opened: link))
+        #expect(found.warning != nil)
+        let sphere = SphereModel(feed: RunnerFeed())
+        #expect(await sphere.shown(found, trusted: false) == found)
+        #expect(server.requests.isEmpty)
+        let seen = await sphere.shown(found, trusted: true)
+        #expect(seen.name == "Acme Inc" && seen.members == 4)
+        #expect(server.requests.map(\.path) == ["/v0.1/spheres/acme/invitations/inv-1/preview"])
     }
 
     @Test func anObysphereIdComesFromItsName() {

@@ -300,6 +300,106 @@ final class OpenedInvite {
     var invite: InviteLink?
 }
 
+// MARK: Host your own
+
+/// Settings › Obysphere › Host your own. Deploy… makes the operator token and copies it; the address
+/// pasted back is checked only when asked (Return or Check), without the token; the token goes to
+/// that host only once the owner confirms it's theirs, to check the server has it, and is then
+/// kept under that host and nowhere else.
+@MainActor @Observable
+final class HostOwn {
+    static let shared = HostOwn()
+    static let deployPage = URL(string: "https://deploy.workers.cloudflare.com/?url=https://github.com/obi-ai-bot/obi-sphere/tree/main/server")!
+
+    /// The token made for the deploy, and the clipboard's change count once Oby copied it. Only in
+    /// memory: one never used is forgotten when Oby quits or Deploy… makes another.
+    var made: (token: String, clipboard: Int)?
+    /// What's typed or pasted: changing it asks nothing, and takes back a check.
+    var address = "" { didSet { if address != oldValue { (checked, problem) = (nil, nil) } } }
+    /// The address checked, waiting for the owner to say it's theirs.
+    var checked: URL?
+    var problem: String?
+    private(set) var busy = false
+    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let pasteboard: NSPasteboard
+
+    init(defaults: UserDefaults = .standard, pasteboard: NSPasteboard = .general) {
+        (self.defaults, self.pasteboard) = (defaults, pasteboard)
+    }
+
+    /// A new token, 32 random bytes in base64url (the server takes 32 characters or more), on this
+    /// Mac's clipboard only; the page to open.
+    func deploy() -> URL {
+        let token = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }.base64url
+        made = (token, SphereSettingsView.copySecret(token, to: pasteboard))
+        return Self.deployPage
+    }
+
+    /// Return or Check: `address` (https:// may be left out) is a public https address where an
+    /// Obysphere answers, asked without the token. When a token was made, the server must have one:
+    /// an empty `POST /v0.1/spheres` is 401 then, 403 with none set, and creates nothing.
+    func check() async {
+        (checked, problem) = (nil, nil)
+        var text = address.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !text.contains("://") { text = "https://" + text }
+        guard let url = URL(string: text), let host = url.host() else {
+            problem = "That isn't an address, like https://obi-sphere.you.workers.dev."
+            return
+        }
+        if let refused = SphereServer.problem(url) {
+            problem = refused
+            return
+        }
+        busy = true
+        defer { busy = false }
+        do {
+            let server = SphereServer(base: url)
+            guard try await server.call("GET", "health")["ok"] as? Bool == true else { throw RunnerError(message: "\(host) answers, but not as an Obysphere.") }
+            if made != nil {
+                do {
+                    _ = try await server.call("POST", "spheres", json: [String: Any]())
+                } catch let error as RunnerError where error.status == 403 {
+                    throw RunnerError(message: "\(host) has no operator token yet. Paste the one Oby copied as SPHERE_OPERATOR_TOKEN in your Worker's Settings › Variables and Secrets, then check again.")
+                } catch let error as RunnerError where error.status == 401 {}
+            }
+            checked = url
+        } catch {
+            problem = error.localizedDescription
+        }
+    }
+
+    /// The owner said `checked` is theirs: the token goes there once, to check the server has it (an
+    /// empty `POST /v0.1/spheres` with it is 400, with another 401), then it's kept under that host,
+    /// the clipboard is cleared if it still holds it, and the address is the server. True when done.
+    func use() async -> Bool {
+        guard let url = checked, let host = url.host() else { return false }
+        let token = made?.token
+        busy = true
+        defer { busy = false }
+        do {
+            if let token {
+                do {
+                    _ = try await SphereServer(base: url).call("POST", "spheres", bearer: token, json: [String: Any]())
+                } catch let error as RunnerError where error.status == 401 || error.status == 403 {
+                    throw RunnerError(message: "\(host) doesn't have the token Oby copied. Choose Deploy… for a new one (close the page it opens), paste it as SPHERE_OPERATOR_TOKEN in your Worker's Settings › Variables and Secrets, then check again.")
+                } catch let error as RunnerError where error.status == 400 {}
+                try SphereModel.operatorToken.save(token, as: host)
+                // Deploy… may have made another meanwhile: that one stays.
+                if let made, made.token == token {
+                    if pasteboard.changeCount == made.clipboard { pasteboard.clearContents() }
+                    self.made = nil
+                }
+            }
+            defaults.set(url.absoluteString, forKey: SphereModel.serverKey)
+            address = ""
+            return true
+        } catch {
+            problem = error.localizedDescription
+            return false
+        }
+    }
+}
+
 // MARK: The model
 
 /// This Mac's place in its Obysphere: what obid says of its membership, the Sphere's name and
@@ -392,39 +492,6 @@ final class SphereModel {
     /// made for. Every other Mac creates an Obysphere by signing in with Google, when the server lets
     /// its Workspace (sphere-api.md section 3.1).
     nonisolated static let operatorToken = KeychainVault(service: "obi-sphere-operator-token", label: "obi-sphere operator token")
-    /// Host your own: the operator token Oby made for the Obysphere being deployed, until its address
-    /// is pasted and it's kept under that host. Only in memory: Oby forgets one never used when it quits.
-    static var madeToken: String?
-    /// A new operator token: 32 random bytes, base64url (the server takes 32 characters or more).
-    nonisolated static func newOperatorToken() -> String { SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }.base64url }
-
-    /// Host your own, once Cloudflare deployed it: `text` (https:// may be left out) has to be a public
-    /// https address where an Obysphere answers `GET /v0.1/health`, and that takes `token`, the one
-    /// made for that deploy. Then it's this Oby's server, and the token is kept under its host and
-    /// nowhere else. A wrong address never replaces a token that works.
-    nonisolated static func hostOwn(_ text: String, token: String?, defaults: UserDefaults = .standard) async throws -> URL {
-        var text = text.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if !text.contains("://") { text = "https://" + text }
-        guard let url = URL(string: text), let host = url.host() else { throw RunnerError(message: "That isn't an address, like https://obi-sphere.you.workers.dev.") }
-        if let problem = SphereServer.problem(url) { throw RunnerError(message: problem) }
-        let server = SphereServer(base: url)
-        guard try await server.call("GET", "health")["ok"] as? Bool == true else {
-            throw RunnerError(message: "\(host) answers, but not as an Obysphere.")
-        }
-        if let token {
-            // The server checks the operator token before the body: an empty one is 400 with the right
-            // token, 401 with another, 403 with none set. Nothing is created.
-            do {
-                _ = try await server.call("POST", "spheres", bearer: token, json: [String: Any]())
-            } catch let error as RunnerError where error.status == 401 || error.status == 403 {
-                throw RunnerError(message: "\(host) doesn't have the token Oby copied. Choose Deploy… for a new one (close the page it opens), paste it as SPHERE_OPERATOR_TOKEN in your Worker's Settings › Variables and Secrets, then paste the address again.")
-            } catch let error as RunnerError where error.status == 400 {}
-            try operatorToken.save(token, as: host)
-        }
-        defaults.set(text, forKey: serverKey)
-        return url
-    }
-
     /// The team link the admin made last, kept so Settings can copy it again (its secret is shown once).
     nonisolated static let teamLinks = KeychainVault(service: "com.deskree.oby.sphere-link", label: "Oby Obysphere link")
     /// Not in an Obysphere yet, with a server to make one on.
@@ -617,6 +684,14 @@ final class SphereModel {
         invite.domain = seen["domain"] as? String
         invite.members = seen["member_count"] as? Int
         return invite
+    }
+
+    /// What the Join screen shows of `found`: the Sphere's own words once it may be asked (the server
+    /// Oby knows, or one the owner said they trust), else only the link's. Nothing goes to a server
+    /// before that.
+    func shown(_ found: InviteLink, trusted: Bool) async -> InviteLink {
+        guard found.warning == nil || trusted else { return found }
+        return (try? await preview(found)) ?? found
     }
 
     /// Joins with `invite` (docs/runner-api.md, `POST /v1/obid/sphere/join`): obid's key, its card
