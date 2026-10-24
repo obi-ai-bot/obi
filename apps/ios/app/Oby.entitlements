@@ -4,5 +4,12 @@
 <dict>
 	<key>aps-environment</key>
 	<string>development</string>
+	<!-- The app's own group first, so items saved with no group stay where they were (the Mac's device
+	     token, the relay's pushSecret); the second is the one the push extension shares (apps/ios/push). -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)$(OBY_IPHONE_BUNDLE_ID)</string>
+		<string>$(AppIdentifierPrefix)$(OBY_IPHONE_BUNDLE_ID).push</string>
+	</array>
 </dict>
 </plist>

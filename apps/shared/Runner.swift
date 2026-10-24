@@ -1154,13 +1154,16 @@ nonisolated struct Runner: Sendable {
     func settle(_ id: String, answer: String? = nil, done: Bool? = nil, later: Date? = nil) async throws -> InboxItem {
         struct Body: Encodable { var answer: String?; var done: Bool?; var later: Date? }
         #if os(macOS)
-        let data = try await send("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, done: done, later: later))
+        let data = try await send("POST", "v1/inbox/\(Self.inboxSegment(id))/answer", body: Body(answer: answer, done: done, later: later))
         guard let item = InboxItem.runner(data) else { throw RunnerError(message: "The runner's answer couldn't be read.") }
         return item
         #else
-        return try await call("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, done: done, later: later))
+        return try await call("POST", "v1/inbox/\(Self.inboxSegment(id))/answer", body: Body(answer: answer, done: done, later: later))
         #endif
     }
+
+    /// An inbox item's id as one path segment: an id from elsewhere (a push) can't reach another route.
+    static func inboxSegment(_ id: String) -> String { id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id }
 
     /// Moves a job to another tool, account or model (each nil to keep it or let the runner pick):
     /// the runner answers with the job, or why it couldn't.
@@ -1453,11 +1456,11 @@ nonisolated struct Runner: Sendable {
     func settle(_ id: String, answer: String, approval: Approval) async throws -> InboxItem {
         struct Body: Encodable { var answer: String; var approval: Approval }
         #if os(macOS)
-        let data = try await send("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, approval: approval))
+        let data = try await send("POST", "v1/inbox/\(Self.inboxSegment(id))/answer", body: Body(answer: answer, approval: approval))
         guard let item = InboxItem.runner(data) else { throw RunnerError(message: "The runner's answer couldn't be read.") }
         return item
         #else
-        return try await call("POST", "v1/inbox/\(id)/answer", body: Body(answer: answer, approval: approval))
+        return try await call("POST", "v1/inbox/\(Self.inboxSegment(id))/answer", body: Body(answer: answer, approval: approval))
         #endif
     }
 
@@ -1670,13 +1673,13 @@ nonisolated struct Runner: Sendable {
         return answer.push
     }
 
-    /// Hands the runner the app's device token, for alerts when a job needs the user. Answers
-    /// whether the runner pushes.
-    func registerNotifications(token: Data) async throws -> Bool {
-        struct Body: Encodable { var token: String; var topic: String; var environment: String }
+    /// Hands the runner what it pushes alerts with, through Deskree's relay: the relay's `pushId` and
+    /// `pushSecret`, and the public key it seals each alert to (apps/ios/push/SealedPush.swift).
+    /// Never the device token, which only the relay has. Answers whether the runner pushes.
+    func registerNotifications(_ apns: PushRelay.HandOver) async throws -> Bool {
+        struct Body: Encodable { var apns: PushRelay.HandOver }
         struct Answer: Decodable { var push: Bool }
-        let body = Body(token: Self.hex(token), topic: Bundle.main.bundleIdentifier ?? "", environment: Self.environment)
-        let answer: Answer = try await call("POST", "v1/notifications", body: body)
+        let answer: Answer = try await call("POST", "v1/notifications", body: Body(apns: apns))
         return answer.push
     }
 
