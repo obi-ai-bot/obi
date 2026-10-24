@@ -63,6 +63,14 @@ jiff = "0.2.37"
 # The job channel (native roots) and the Slack listener (#839) share one version.
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "__rustls-tls", "rustls-tls-native-roots"] }
 
+# obid ships inside Oby.app without symbols: 58.9 MB for both architectures, against 73.6 MB with
+# them (2026-10-23, docs/release.md, "Full builds"). Panics still say their file and line. No LTO:
+# thin LTO alone made it bigger; with one codegen unit it was 22.6 MB instead of 28.0 MB for arm64,
+# but rebuilding after a change in obid took 467 s instead of 81 s, and every build of the Mac app,
+# Debug too, builds obid for release.
+[profile.release]
+strip = true
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

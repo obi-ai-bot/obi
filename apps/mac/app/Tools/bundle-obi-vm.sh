@@ -10,6 +10,10 @@ set -euo pipefail
 
 root="$SRCROOT/.."
 helpers="$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
+# Only a full build carries it (OBY_FULL_BUILD=1, docs/release.md): sharing is hidden in the launch
+# build (AGENTS.md, "The launch build"). Without it, what an earlier full build left goes; obid
+# then says "This Oby has no obi-vm" (core/crates/obid/src/sphere/hosting.rs).
+if [[ "${OBY_FULL_BUILD:-}" != 1 ]]; then rm -f "$helpers/obi-vm"; exit 0; fi
 mkdir -p "$helpers"
 pin="$root/core/obi-vm/image.json"
 if [[ ! -f "$pin" ]]; then

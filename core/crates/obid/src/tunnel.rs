@@ -21,6 +21,9 @@ use tokio::sync::{Notify, watch};
 pub const TOKEN: &str = "oby.remote.tunnel";
 /// The longest wait before starting a cloudflared that stopped again.
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// What obid says without cloudflared beside it: the Mac app's launch build, Linux, install.sh.
+const NO_CLOUDFLARED: &str =
+    "This obid has no cloudflared: remote access needs a full build of Oby's Mac app.";
 
 /// How the tunnel is: `off`, `starting`, `connected` or `failed`, with a line saying why.
 #[derive(Clone, Debug, PartialEq)]
@@ -78,10 +81,7 @@ impl Tunnel {
     /// `PUT /v1/obid/tunnel`: keeps `token` in the vault and (re)starts cloudflared.
     pub fn put(&self, token: &str) -> Result<(), (u16, String)> {
         if self.binary.is_none() {
-            return Err((
-                409,
-                "This obid has no cloudflared: remote access comes with the Mac app.".into(),
-            ));
+            return Err((409, NO_CLOUDFLARED.into()));
         }
         let token = token.trim();
         let base64ish = |c: char| c.is_ascii_alphanumeric() || "+/=_-".contains(c);
@@ -144,7 +144,7 @@ impl Tunnel {
                 }
             };
             let Some(binary) = self.binary.clone() else {
-                self.show("failed", Some("This obid has no cloudflared.".into()));
+                self.show("failed", Some(NO_CLOUDFLARED.into()));
                 tokio::select! {
                     () = self.changed.notified() => continue,
                     _ = stopping.changed() => return,

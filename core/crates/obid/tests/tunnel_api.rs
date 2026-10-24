@@ -230,7 +230,9 @@ fn an_obid_without_cloudflared_refuses_with_why() {
     );
     assert_eq!(refused.status, 409, "{}", refused.text);
     assert!(
-        refused.text.contains("comes with the Mac app"),
+        refused
+            .text
+            .contains("remote access needs a full build of Oby's Mac app"),
         "{}",
         refused.text
     );

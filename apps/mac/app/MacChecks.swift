@@ -7,16 +7,22 @@ import OSLog
 /// clean worktree of the pull request's head, one at a time, and reports pass or fail with the
 /// failing tests' names. It also takes the Apple checks agents ask for mid-round (#118,
 /// Engine/AppleChecks.swift), first: their commits come from the runner as a git bundle. Settings ›
-/// Runner turns each off.
+/// Runner turns each on; both are off by default since the launch build (AGENTS.md, 2026-10-23).
 @Observable
 final class MacChecks {
-    /// Settings › Runner: "Run merge checks on this Mac", on by default.
+    /// Settings › Runner: "Run merge checks on this Mac", off by default.
     static let setting = "runMergeChecks"
-    static var enabled: Bool { UserDefaults.standard.object(forKey: setting) as? Bool ?? true }
-    /// Settings › Runner: "Build and test agents' work on this Mac", on by default. Agents' code
+    static var enabled: Bool { UserDefaults.standard.object(forKey: setting) as? Bool ?? false }
+    /// Settings › Runner: "Build and test agents' work on this Mac", off by default. Agents' code
     /// runs here before Oby's review has read it.
     static let appleSetting = "runAppleChecks"
-    static var appleEnabled: Bool { UserDefaults.standard.object(forKey: appleSetting) as? Bool ?? true }
+    static var appleEnabled: Bool { UserDefaults.standard.object(forKey: appleSetting) as? Bool ?? false }
+
+    /// Registers both defaults as off, so Settings › Runner's toggles (whose own @AppStorage
+    /// defaults say on) show what's true: a registered default wins over @AppStorage's.
+    init() {
+        UserDefaults.standard.register(defaults: [Self.setting: false, Self.appleSetting: false])
+    }
     /// What this Mac calls itself in the check's results, like "Wellingtons-MacBook-Pro". Off the
     /// main actor: looking the host name up can block.
     @concurrent static func name() async -> String {
