@@ -27,8 +27,8 @@ const PULL: &str = "https://github.com/obi-e2e/fixture-app/pull/7";
 /// A stand-in `gh` in `folder/bin`, keeping its state in `folder/gh`: every call's arguments
 /// (`calls`), its environment (`env`), the title and description it was given, the open pull
 /// requests `pr list` answers (`open`: `__HEAD__` stands for the commit obid's clone has the
-/// branch at, which is what obid pushed), whether `pr list` fails (`list-fails`), and what `pr
-/// view` answers (`view.json`).
+/// branch at, which is what obid pushed), whether `pr list` fails (`list-fails`, or once for the
+/// branch's own lookup, as GitHub's 502: `list-fails-once`), and what `pr view` answers (`view.json`).
 fn fake_gh(folder: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = folder.join("bin");
@@ -44,6 +44,9 @@ prev=
 case "$1 $2" in
   "pr list")
     [ -f "$dir/list-fails" ] && {{ echo 'GraphQL: Could not resolve to a Repository' >&2; exit 1; }}
+    case "$*" in *--head*)
+      [ -f "$dir/list-fails-once" ] && {{ rm "$dir/list-fails-once"; echo 'HTTP 502: Bad Gateway (https://api.github.com/graphql)' >&2; exit 1; }} ;;
+    esac
     [ -f "$dir/open" ] || exit 0
     for a in "$@"; do [ "$prev" = --head ] && branch="$a"; prev="$a"; done
     oid=$(git -C '{clone}' rev-parse "refs/heads/$branch")
@@ -84,6 +87,15 @@ fn obid_with(folder: &Folder, path_first: &Path) -> (Obid, PathBuf, Value) {
     let remote = fixture(&folder.0.join("fixture"));
     let config = config(&folder.0, &remote, &agent());
     (start(&folder.0, &config, Some(path_first)), remote, config)
+}
+
+/// [`obid_with`], its quiet window (`stallAfter`) cut to `seconds`, which caps the waits before
+/// each try again of a publish GitHub or the remote didn't take.
+fn obid_retrying_within(folder: &Folder, path_first: &Path, seconds: u64) -> (Obid, PathBuf) {
+    let remote = fixture(&folder.0.join("fixture"));
+    let mut config = config(&folder.0, &remote, &agent());
+    config["stallAfter"] = json!(seconds);
+    (start(&folder.0, &config, Some(path_first)), remote)
 }
 
 fn dispatch(obid: &Obid, job: Value) -> String {
@@ -724,9 +736,9 @@ fn someone_elses_push_is_never_overwritten() {
     assert_eq!(remote_branch(&remote, &branch), Some(their_commit));
 }
 
-/// The push went out and then GitHub's pull request lookup failed (#627): the job counts its
-/// pushed commits, and `publishError` is the pull request's own failure, not "not published".
-/// Publishing by hand is still offered, for the pull request.
+/// The push went out and then GitHub's pull request lookup failed (#627), in a way a later try
+/// wouldn't change: the job counts its pushed commits, and `publishError` is the pull request's
+/// own failure, not "not published". Publishing by hand is still offered, for the pull request.
 #[test]
 fn a_pull_request_that_fails_after_the_push_still_counts_the_push() {
     let folder = Folder::new("publish-no-pull");
@@ -753,8 +765,39 @@ fn a_pull_request_that_fails_after_the_push_still_counts_the_push() {
     assert_eq!(job["outgoing"][0]["action"], "push");
     assert_eq!(job["outgoing"][0]["id"], head.as_str());
     assert_eq!(stage(&job, "publish")["state"], "failed");
+    // Not tried again: GitHub doesn't know the repository.
+    let lookups = calls_now(&folder.0)
+        .lines()
+        .filter(|call| call.starts_with("pr list") && call.contains("--head"))
+        .count();
+    assert_eq!(lookups, 1, "{}", calls_now(&folder.0));
     let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None);
     assert_eq!(answer.status, 200, "{}", answer.text);
+}
+
+/// GitHub answers 502 once: obid publishes again after a wait (`Publishing again in …`), and the
+/// job ends published, with nothing for the owner to do.
+#[test]
+fn a_publish_github_turned_down_is_tried_again() {
+    let folder = Folder::new("publish-retry");
+    let bin = fake_gh(&folder.0);
+    std::fs::write(folder.0.join("gh/list-fails-once"), "").unwrap();
+    let (obid, _) = obid_retrying_within(&folder, &bin, 3);
+    let id = dispatch(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: hello.txt"}),
+    );
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}\n{}", obid.log());
+    assert_eq!(job["published"], PULL, "{job}");
+    assert_eq!(job["publishError"], Value::Null, "{job}");
+    let log = obid.log();
+    assert!(
+        log.contains(&format!(
+            "job {id}: Publishing again in 3 seconds (1 of 3): Pushed, but "
+        )) && log.contains("HTTP 502: Bad Gateway"),
+        "{log}"
+    );
 }
 
 /// A remote that isn't GitHub (here the fixture's `file://` one, with no `pullRequests` in the

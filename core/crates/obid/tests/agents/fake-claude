@@ -5,6 +5,10 @@
 //   EDIT: <file>     adds a line to the file and stages it, for COMMIT to commit with its own
 //   DRAFT: <file>    writes the file in the worktree and leaves it uncommitted, then goes on with
 //                    the rest of the prompt
+//   COMMIT WHEN TOLD told by obid to commit what it left uncommitted, commits it all and ends the
+//                    turn with "Committed the draft." (without it, that turn is "Nothing to do.")
+//   KEEP PROMPTS     from now on appends every prompt it gets to .obi/prompts.log, each ended by a
+//                    line "<<<end of prompt>>>"
 //   SLEEP            beats: writes a growing count to .obi/beat every 50 ms until it is ended
 //   FAIL             ends the turn with an error result
 //   LIMITED: <s>     says the account is full (a rate_limit_event whose 5-hour window resets <s>
@@ -65,8 +69,8 @@
 //                    "Done: … Left: … Failed: …", or says nothing when the task said NO NOTE
 //   ON PURPOSE       in a fix round's quoted task: ends the turn with "FAILS AS ASKED: …"
 //   AGAIN: <words>   keeps the words (maybe none) in .obi/again, then goes on with the rest of the
-//                    prompt; a later "Try again, …" that finds them writes .obi/tried and ends the
-//                    turn with them
+//                    prompt; a later "Try again, …" (after the check's output, when one stopped the
+//                    job) that finds them writes .obi/tried and ends the turn with them
 //   BUMP: <file> <a> <b>  changes `= <a>` to `= <b>` in the file and commits it
 //   obid's decision round  (it compared the change with earlier decisions) keeps the change and
 //                    ends the turn with "Kept it: …", having copied .obi/inputs/decisions.md to
@@ -137,6 +141,11 @@ rl.on("line", (line) => {
   let prompt = typeof message.message.content === "string" ? message.message.content : "";
   emit({ type: "system", subtype: "init", cwd: process.cwd(), session_id: session, tools: ["Bash", "Read", "Edit"], mcp_servers: [], model: "fake", permissionMode: "default", apiKeySource: "none" });
   if (leaked.length) return result(`leaked: ${leaked.join(", ")}`, true);
+  if (prompt.includes("KEEP PROMPTS")) {
+    mkdirSync(".obi", { recursive: true });
+    writeFileSync(".obi/keep-prompts", "");
+  }
+  if (existsSync(".obi/keep-prompts")) appendFileSync(".obi/prompts.log", `${prompt}\n<<<end of prompt>>>\n`);
   if (prompt.includes("TOKENS")) {
     mkdirSync(".obi", { recursive: true });
     tokens = (existsSync(".obi/tokens-turn") ? Number(readFileSync(".obi/tokens-turn", "utf8")) : 0) + 1;
@@ -188,6 +197,15 @@ rl.on("line", (line) => {
     execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Bump ${bump[1]}`]);
     return result(`Bumped ${bump[1]}.`);
   }
+  if (prompt.includes("COMMIT WHEN TOLD")) {
+    mkdirSync(".obi", { recursive: true });
+    writeFileSync(".obi/commit-when-told", "");
+  }
+  if (prompt.startsWith("Your turn ended with changes") && existsSync(".obi/commit-when-told")) {
+    execFileSync("git", ["add", "--all"]);
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "Add the draft"]);
+    return result("Committed the draft.");
+  }
   const commit = prompt.match(/COMMIT: (\S+)/);
   const ask = prompt.match(/ASK: (\{.*\})/);
   const asks = prompt.match(/ASKS: (\[.*\])/);
@@ -206,7 +224,7 @@ rl.on("line", (line) => {
     mkdirSync(".obi", { recursive: true });
     writeFileSync(".obi/again", again[1].trim());
   }
-  if (prompt.startsWith("Try again") && existsSync(".obi/again")) {
+  if (prompt.includes("Try again, picking up where you left off") && existsSync(".obi/again")) {
     writeFileSync(".obi/tried", "");
     result(readFileSync(".obi/again", "utf8"));
   } else if (commit) {

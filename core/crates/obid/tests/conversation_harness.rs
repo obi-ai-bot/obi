@@ -1037,53 +1037,82 @@ fn the_plan_loop_answers_when_the_session_cant_run() {
     assert_eq!(turns(&obid).len(), 2);
 }
 
-/// A turn that used the web (a search, or a command that reached it) doesn't start work by itself:
-/// the job waits in the inbox for the owner's Start, as the plan loop's research does (#374). One
-/// that used only the owner's words and repositories starts it at once.
-#[test]
-fn work_planned_after_the_web_waits_for_the_owners_start() {
-    let (_folder, obid) = obid("harness-web", true);
-    let dispatch = r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#;
-    // The web, a read of repos/, and a search with no path (the whole room, repos/ in it: R1).
-    for (n, words) in [
-        format!("WEB {dispatch}"),
-        format!("READREPO {dispatch}"),
-        format!("GREP {dispatch}"),
-    ]
-    .iter()
-    .enumerate()
-    {
-        let answer = said(&obid, json!({"said": words, "new": true}));
-        assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
-        assert!(
-            answer.body["text"]
-                .as_str()
-                .unwrap()
-                .contains("waiting in your inbox"),
-            "{}",
-            answer.text
-        );
-        let starts = inbox(&obid)
-            .into_iter()
-            .filter(|i| i["kind"] == "start")
-            .count();
-        assert_eq!(starts, n + 1, "{words}");
-    }
-    let jobs = call(&obid, "GET", "/v1/jobs", None);
-    assert_eq!(jobs.body.as_array().map_or(0, Vec::len), 0, "{}", jobs.text);
-    let answer = said(&obid, json!({"said": dispatch, "new": true}));
-    assert_eq!(
-        answer.body["jobs"].as_array().map_or(0, Vec::len),
-        1,
+/// The one job `answer` started, after its turn read something untrusted: it runs in Sandbox mode
+/// at most and publishes only when the owner does (the owner's decision of 2026-10-23); no Start
+/// item waits in the inbox.
+fn started_untrusted(obid: &Obid, answer: &Answer) -> Value {
+    let cards = answer.body["jobs"].as_array().unwrap();
+    assert_eq!(cards.len(), 1, "{}", answer.text);
+    assert!(
+        answer.body["text"]
+            .as_str()
+            .unwrap()
+            .contains("I read something I didn't write first, so it publishes only when you do."),
         "{}",
         answer.text
     );
+    assert!(
+        !inbox(obid).iter().any(|i| i["kind"] == "start"),
+        "{:?}",
+        inbox(obid)
+    );
+    let id = cards[0]["id"].as_str().unwrap();
+    let job = call(obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["untrusted"], true, "{job}");
+    assert_ne!(job["mode"], "bypass", "{job}");
+    job
+}
+
+/// A turn that read something untrusted (the web, repos/, a search of the whole room) starts the
+/// work it plans at once, in Sandbox mode at most, and only the owner publishes it (the owner's
+/// decision of 2026-10-23, replacing #374's Start item); a Bypass job too runs in Sandbox mode.
+/// One that used only the owner's words starts trusted.
+#[test]
+fn work_planned_after_reading_starts_but_only_the_owner_publishes() {
+    let (_folder, obid) = obid("harness-web", true);
+    let dispatch = r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#;
+    // The web, a read of repos/, and a search with no path (the whole room, repos/ in it: R1).
+    for words in [
+        format!("WEB {dispatch}"),
+        format!("READREPO {dispatch}"),
+        format!("GREP {dispatch}"),
+    ] {
+        let answer = said(&obid, json!({"said": words, "new": true}));
+        started_untrusted(&obid, &answer);
+    }
+    let bypass = r#"WEB OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build", "mode": "bypass"}"#;
+    let answer = said(&obid, json!({"said": bypass, "new": true}));
+    assert_eq!(started_untrusted(&obid, &answer)["mode"], "sandbox");
+    let answer = said(&obid, json!({"said": dispatch, "new": true}));
+    let id = answer.body["jobs"][0]["id"].as_str().unwrap();
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["untrusted"], Value::Null, "{job}");
+
+    // What it committed waits for the owner's Publish, as a standing rule's job's does.
+    let commits = r#"WEB OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "JOB-COMMITS: a.txt", "kind": "build"}"#;
+    let answer = said(&obid, json!({"said": commits, "new": true}));
+    let id = started_untrusted(&obid, &answer)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = ended(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["commits"], 1, "{job}");
+    assert_eq!(job["published"], Value::Null, "{job}");
+    assert_eq!(job["outgoing"], json!([]), "{job}");
+    assert_eq!(
+        job["reason"],
+        "Oby read something it didn't write before it started this job, so it publishes only when you do: Publish opens its pull request."
+    );
+    let offered = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None);
+    assert_eq!(offered.status, 200, "{}", offered.text);
 }
 
 /// What a job hears is the owner's own words this turn; the agent's go along quoted, as data. Told
 /// something after it ended, a job gets a follow-up (Sangam's design, the owner's decision of
-/// 2026-10-18) whose request is the owner's words alone and whose card goes on the turn; a turn
-/// that used the web only proposes it, a `start` item for the owner's Start.
+/// 2026-10-18) whose request is the owner's words alone and whose card goes on the turn; after a
+/// turn that used the web the follow-up starts too, and only the owner publishes it (the owner's
+/// decision of 2026-10-23).
 #[test]
 fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
     let (_folder, obid) = obid("harness-tell", true);
@@ -1145,103 +1174,43 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
     assert!(!prompt[..quoted].contains("AGENT-WORDS-1\n"), "{prompt}");
     assert_eq!(ended(&obid, &id)["status"], first["status"]);
 
-    let jobs = call(&obid, "GET", "/v1/jobs", None)
-        .body
-        .as_array()
-        .unwrap()
-        .len();
     let web = format!(r#"WEB OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-2"}}"#);
-    let waits = said(&obid, json!({"said": web, "conversation": conversation}));
+    let told = said(&obid, json!({"said": web, "conversation": conversation}));
     assert!(
-        waits.body["text"]
+        told.body["text"]
             .as_str()
             .unwrap()
-            .contains("waits for your Start"),
+            .contains("started a follow-up"),
         "{}",
-        waits.text
+        told.text
     );
-    let start = inbox(&obid)
-        .into_iter()
-        .find(|i| i["kind"] == "start")
-        .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
-    // The card reads as the owner wrote it: their words, then the agent's, never the fences the
-    // agent's prompt keeps.
-    let text = start["text"].as_str().unwrap();
+    let cards = told.body["jobs"].as_array().unwrap();
+    assert_eq!(cards.len(), 1, "{}", told.text);
+    let web_follow = cards[0]["id"].as_str().unwrap().to_owned();
     assert!(
-        text.contains(&format!("Your words:\n{web}"))
-            && text.ends_with("What Oby adds for its agent:\nAGENT-WORDS-2"),
-        "{start}"
+        !inbox(&obid).iter().any(|i| i["kind"] == "start"),
+        "{:?}",
+        inbox(&obid)
     );
-    assert!(
-        !text.contains("quoted-") && !text.contains("Everything between"),
-        "{start}"
-    );
-    assert_eq!(start["title"], "Follow-up: Add a greeting");
-    std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(
-        call(&obid, "GET", "/v1/jobs", None)
-            .body
-            .as_array()
-            .unwrap()
-            .len(),
-        jobs,
-        "nothing started"
-    );
+    let follow = ended(&obid, &web_follow);
+    assert_eq!(follow["untrusted"], true, "{follow}");
+    assert_eq!(follow["followUpOf"], id.as_str());
+    assert_eq!(follow["request"], web.as_str());
 
-    // A follow-up of the job working already takes the item's Start once it's at work: it hears
-    // the words, the item is done, and nothing else starts.
+    // Told again in the conversation, the job's working follow-up (quiet for two minutes) hears
+    // it: no second follow-up, and its card goes on the answer.
     let pausing = call(
         &obid,
         "POST",
         &format!("/v1/jobs/{id}/messages"),
-        Some(&json!({"text": "PAUSE: 30000"})),
+        Some(&json!({"text": "STALLS-ONCE"})),
     );
     assert_eq!(pausing.status, 201, "{}", pausing.text);
     let follow = pausing.body["id"].as_str().unwrap().to_owned();
-    // Still getting ready, it isn't at work: the item's words would wait for nothing, or answer
-    // what it asks next. Start is refused, naming it, and the item stays open.
-    let item = start["id"].as_str().unwrap();
-    let refused = call(
-        &obid,
-        "POST",
-        &format!("/v1/inbox/{item}/answer"),
-        Some(&json!({"answer": "Start"})),
-    );
-    assert_eq!(refused.status, 409, "{}", refused.text);
-    assert!(refused.text.contains(&follow), "{}", refused.text);
-    assert!(inbox(&obid).iter().any(|i| i["id"] == item), "still open");
     within(60, "the follow-up is at work", || {
         let body = call(&obid, "GET", &format!("/v1/jobs/{follow}"), None).body;
         (body["status"] == "running" && body["step"] == "Starting Claude Code").then_some(())
     });
-    let answered = call(
-        &obid,
-        "POST",
-        &format!("/v1/inbox/{item}/answer"),
-        Some(&json!({"answer": "Start"})),
-    );
-    assert_eq!(answered.status, 200, "{}", answered.text);
-    assert_eq!(answered.body["job"], follow.as_str());
-    assert!(answered.body["done"].is_string(), "{}", answered.text);
-    let heard = call(&obid, "GET", &format!("/v1/jobs/{follow}"), None).body;
-    assert!(
-        heard["notes"].to_string().contains("AGENT-WORDS-2"),
-        "{heard}"
-    );
-    // Its step shows the owner's words, not the agent's quoted after them.
-    assert_eq!(heard["step"], format!("You: {web}"), "{heard}");
-    assert_eq!(
-        call(&obid, "GET", "/v1/jobs", None)
-            .body
-            .as_array()
-            .unwrap()
-            .len(),
-        jobs + 1,
-        "only the follow-up the owner started"
-    );
-
-    // Told again in the conversation, the job's working follow-up hears it: no second follow-up,
-    // and its card goes on the answer.
     let again = format!(r#"OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-3"}}"#);
     let on_it = said(&obid, json!({"said": again, "conversation": conversation}));
     assert!(
@@ -1258,38 +1227,45 @@ fn a_job_hears_the_owners_words_and_the_agents_only_quoted() {
         "{}",
         on_it.text
     );
-    ended(&obid, &follow);
+    let heard = call(&obid, "GET", &format!("/v1/jobs/{follow}"), None).body;
+    assert!(
+        heard["notes"].to_string().contains("AGENT-WORDS-3"),
+        "{heard}"
+    );
+    // Its step shows the owner's words, not the agent's quoted after them.
+    assert_eq!(heard["step"], format!("You: {again}"), "{heard}");
+}
 
-    // A proposal names the conversation it was made in (another than the job's here), which
-    // shows it; a later follow-up that ended, here done with nothing committed, leaves it open as
-    // it was.
-    let web = format!(r#"WEB OBY oby_tell_job {{"id": "{id}", "words": "AGENT-WORDS-4"}}"#);
-    let elsewhere = said(&obid, json!({"said": web, "new": true}));
-    let elsewhere = elsewhere.body["conversation"].as_str().unwrap().to_owned();
-    assert_ne!(elsewhere, conversation);
-    let proposed = inbox(&obid)
-        .into_iter()
-        .find(|i| i["kind"] == "start")
-        .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
-    assert_eq!(proposed["conversation"], elsewhere.as_str(), "{proposed}");
-    std::thread::sleep(Duration::from_millis(1100));
-    let other = call(
+/// `oby_jobs` lists obid's own fields only, never a job's step (its agent's own words could steer
+/// the turn): reading the list leaves the turn trusted, so the work it starts next publishes by
+/// itself. A fix with a check started from the conversation gets 3 rounds (#958).
+#[test]
+fn listing_jobs_reads_nothing_an_agent_wrote() {
+    let (_folder, obid) = obid("harness-jobs-list", true);
+    let first = said(
         &obid,
-        "POST",
-        &format!("/v1/jobs/{id}/messages"),
-        Some(&json!({"text": "and the docs"})),
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#,
+               "new": true}),
     );
-    assert_eq!(other.status, 201, "{}", other.text);
-    assert_eq!(
-        ended(&obid, other.body["id"].as_str().unwrap())["status"],
-        "done"
+    let conversation = first.body["conversation"].as_str().unwrap().to_owned();
+    let id = first.body["jobs"][0]["id"].as_str().unwrap().to_owned();
+    ended(&obid, &id);
+    let listed = said(
+        &obid,
+        json!({"said": "OBY oby_jobs {}", "conversation": conversation}),
     );
-    let still = inbox(&obid)
-        .into_iter()
-        .find(|i| i["id"] == proposed["id"])
-        .unwrap_or_else(|| panic!("{:?}", inbox(&obid)));
-    assert_eq!(still["text"], proposed["text"]);
-    assert_eq!(still["options"], json!(["Start", "Cancel"]));
+    let text = oby_said(&listed);
+    assert!(text.contains(&id) && text.contains("\"phase\""), "{text}");
+    assert!(!text.contains("\"step\""), "{text}");
+    let next = said(
+        &obid,
+        json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Fix the greeting", "kind": "fix", "check": "true"}"#,
+               "conversation": conversation}),
+    );
+    let id = next.body["jobs"][0]["id"].as_str().expect(&next.text);
+    let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["untrusted"], Value::Null, "{job}");
+    assert_eq!(job["rounds"], 3, "{job}");
 }
 
 /// One turn starts at most ten jobs and tells jobs at most ten times: past that a tool says why.
@@ -1446,32 +1422,12 @@ fn the_taint_lasts_across_resumed_turns() {
         &obid,
         json!({"said": dispatch, "conversation": conversation}),
     );
-    assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
     let recorded = turns(&obid);
     assert_eq!(
         recorded[0]["pid"], recorded[1]["pid"],
         "the later turn went to the waiting Claude Code, and the taint with it"
     );
-    assert!(
-        answer.body["text"]
-            .as_str()
-            .unwrap()
-            .contains("waiting in your inbox"),
-        "{}",
-        answer.text
-    );
-    assert!(
-        inbox(&obid).iter().any(|i| i["kind"] == "start"),
-        "a start item: {:?}",
-        inbox(&obid)
-    );
-    assert_eq!(
-        call(&obid, "GET", "/v1/jobs", None)
-            .body
-            .as_array()
-            .map_or(0, Vec::len),
-        0
-    );
+    started_untrusted(&obid, &answer);
 }
 
 /// The ToolSearch call before an MCP tool (the deferred-tool lookup) is Oby's own bookkeeping: no
@@ -1618,8 +1574,8 @@ fn attachments_reach_the_session_in_its_room() {
     assert!(!copied.join("leak.bin").exists());
 }
 
-/// An attachment is untrusted input: a turn that gets one proposes the work it dispatches for the
-/// owner's Start, never starts it at once (P2).
+/// An attachment is untrusted input (P2): the work a turn that gets one dispatches publishes only
+/// when the owner does.
 #[test]
 fn an_attachment_makes_the_turns_work_wait() {
     let (_folder, obid) = obid("harness-attach-taint", true);
@@ -1632,19 +1588,7 @@ fn an_attachment_makes_the_turns_work_wait() {
         &obid,
         json!({"said": dispatch, "new": true, "attachments": attached}),
     );
-    assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
-    assert!(
-        inbox(&obid).iter().any(|i| i["kind"] == "start"),
-        "a start item: {:?}",
-        inbox(&obid)
-    );
-    assert_eq!(
-        call(&obid, "GET", "/v1/jobs", None)
-            .body
-            .as_array()
-            .map_or(0, Vec::len),
-        0
-    );
+    started_untrusted(&obid, &answer);
 }
 
 /// An attachment larger than the cap is left out, not copied, and the prompt says so (P3).
@@ -2366,7 +2310,7 @@ fn a_moved_job_continues_in_a_new_session() {
 }
 
 /// A task list written after the web carries that taint: fed to a later turn, even a new clean
-/// session's, it taints that turn, so the work it starts waits for the owner.
+/// session's, it taints that turn, so the work it starts publishes only when the owner does.
 #[test]
 fn a_task_list_written_after_the_web_taints_the_turns_it_reaches() {
     let (_folder, obid) = obid("harness-tasks-taint", true);
@@ -2382,15 +2326,11 @@ fn a_task_list_written_after_the_web_taints_the_turns_it_reaches() {
     session["web"] = json!(false);
     std::fs::write(&kept, session.to_string()).unwrap();
     let dispatch = r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#;
-    let proposed = said(
+    let started = said(
         &obid,
         json!({"said": dispatch, "conversation": conversation}),
     );
-    assert!(
-        proposed.body["jobs"].as_array().is_none_or(Vec::is_empty),
-        "the list's taint makes it a proposal: {}",
-        proposed.text
-    );
+    started_untrusted(&obid, &started);
     let session: Value = serde_json::from_slice(&std::fs::read(&kept).unwrap()).unwrap();
     assert_eq!(session["web"], true, "{session}");
     // Read back, it's quoted as data.

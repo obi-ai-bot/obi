@@ -324,7 +324,7 @@ fn the_fourth_stall_asks_the_owner() {
 }
 
 /// What the agent wrote in its note can't make the supervisor do what's the owner's: a Bypass
-/// start is only proposed, and with no decision of its own the owner is asked. The note never reaches the turn's prompt, only oby_job's quoted answer.
+/// start past its bounds is refused, and with no decision of its own the owner is asked. The note never reaches the turn's prompt, only oby_job's quoted answer.
 #[test]
 fn the_note_cant_trigger_a_gated_action() {
     let (_folder, obid) = obid("supervisor-note");
@@ -353,10 +353,10 @@ fn the_note_cant_trigger_a_gated_action() {
         .iter()
         .map(|i| i["kind"].as_str().unwrap())
         .collect();
-    // The Bypass start waits for the owner; the stall is theirs to decide.
+    // The stall is theirs to decide; the Bypass start was refused, so nothing else waits.
     assert!(kinds.contains(&"question"), "{items}");
     assert!(
-        kinds.iter().any(|k| *k == "start" || *k == "confirm"),
+        !kinds.iter().any(|k| *k == "start" || *k == "confirm"),
         "{items}"
     );
     let prompts: Vec<String> = std::fs::read_to_string(

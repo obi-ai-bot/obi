@@ -11,7 +11,8 @@ use serde_json::json;
 use support::*;
 
 /// A stand-in gh: signed in once `$HOME/signed` is there; its sign-in prints a code and waits for
-/// `$HOME/approve`, as the real one waits for the person on GitHub's page.
+/// `$HOME/approve`, as the real one waits for the person on GitHub's page, and gives up once obid
+/// or the test's folder is gone, so a test that ends leaves none behind.
 const GH: &str = r#"#!/bin/sh
 case "$1 $2" in
   "auth status")
@@ -27,7 +28,11 @@ case "$1 $2" in
     echo '! One-time code (AB12-CD34) copied to clipboard' >&2
     echo 'Open this URL to continue in your web browser: https://github.com/login/device' >&2
     echo 'gho_NEVER_PASSED_ON' >&2
-    while [ ! -f "$HOME/approve" ]; do sleep 0.1; done
+    echo $$ > "$HOME/gh-pid"
+    while [ ! -f "$HOME/approve" ]; do
+      kill -0 "$PPID" 2>/dev/null && [ -d "$HOME" ] || exit 1
+      sleep 0.1
+    done
     touch "$HOME/signed" ;;
   *) exit 1 ;;
 esac
@@ -177,4 +182,26 @@ fn back_to_back_sign_ins_keep_their_own_folders() {
         call(&obid, "GET", "/v1/github", None).body["signIn"]["userCode"],
         "AB12-CD34"
     );
+}
+
+/// A sign-in left waiting when its test ends (obid gone, the approve file never written) ends too:
+/// the stand-in gh never outlives its test.
+#[test]
+fn a_waiting_sign_in_ends_with_its_test() {
+    let folder = Folder::new("github-sign-in-left");
+    let remote = folder.0.join("remote.git");
+    let config = config(&folder.0, &remote, &stub_agent());
+    let bin = stand_in_gh(&folder.0);
+    let obid = start(&folder.0, &config, Some(&bin));
+    let started = call(&obid, "POST", "/v1/github/sign-in", None);
+    assert_eq!(started.status, 200, "{}", started.text);
+    let pid: i32 = std::fs::read_to_string(folder.0.join("env-home/gh-pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let alive = || nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+    assert!(alive());
+    drop(obid);
+    within(10, "the stand-in gh to end", || (!alive()).then_some(()));
 }

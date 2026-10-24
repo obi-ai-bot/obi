@@ -376,6 +376,11 @@ pub struct Job {
     /// publishes only when the owner publishes it by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<RuleMark>,
+    /// The conversation that started it had read something it didn't write (a file, a command's
+    /// output, the web, an attachment): it runs in Sandbox mode at most and publishes only when
+    /// the owner does, as a standing rule's job (the owner's decision of 2026-10-23).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untrusted: bool,
 }
 
 /// Which standing rule started a job (#1314): the rule's id and type.
@@ -545,6 +550,7 @@ impl Job {
             window_share: None,
             routine: None,
             rule: None,
+            untrusted: false,
             ran_secs: None,
             budget_from: None,
         }
@@ -826,6 +832,9 @@ impl Job {
         // A standing rule's job (#1314) says which rule started it.
         if let Some(rule) = &self.rule {
             value["rule"] = json!({"id": rule.id, "type": rule.kind});
+        }
+        if self.untrusted {
+            value["untrusted"] = json!(true);
         }
         value["teammates"] = json!(self.teammates);
         if let Some(context) = &self.context {

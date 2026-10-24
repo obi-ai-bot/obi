@@ -74,8 +74,9 @@ pub struct Session {
     pub jobs: Mutex<Vec<Value>>,
     /// The turn's own word, which fences what agents wrote in a tool's answer.
     pub nonce: String,
-    /// The turn reached the web (a search, a fetch, a command obid let reach it): the work its
-    /// tools start waits for the owner's Start, a job that ended's follow-up too (#374).
+    /// The turn read something untrusted (the web, a file, a command's output, an attachment): the
+    /// jobs its tools start, follow-ups too, run in Sandbox mode at most and publish only when the
+    /// owner does (the owner's decision of 2026-10-23).
     pub web: AtomicBool,
     /// How many times this turn's tools started a job, and told one something.
     pub dispatched: AtomicUsize,

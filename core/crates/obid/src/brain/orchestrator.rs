@@ -118,8 +118,10 @@ impl Seen {
         let now = Snapshot::of(job);
         let before = self.jobs.insert(id.to_owned(), now.clone());
         // A stalled job a conversation started is that conversation's to supervise
-        // (super::supervisor), not an event of the orchestrator's.
+        // (super::supervisor), not an event of the orchestrator's; one waiting for its usage
+        // reset is tried again by obid itself then, and a retry now hits the same limit.
         if !job["dismissed"].is_null()
+            || !job["resumesAt"].is_null()
             || (!job["stalled"].is_null() && !job["conversation"].is_null())
         {
             return vec![];
@@ -912,6 +914,20 @@ mod tests {
         assert_eq!(Seen::default().job(&stalled).len(), 1);
         stalled["conversation"] = serde_json::json!("c1");
         assert!(Seen::default().job(&stalled).is_empty());
+    }
+
+    /// A job waiting for its usage reset is tried again by obid itself then: no event, so the
+    /// orchestrator never retries it into the same limit. Once it fails after that, it is one.
+    #[test]
+    fn a_job_waiting_for_its_reset_is_no_event() {
+        let mut seen = Seen::default();
+        let mut waiting = serde_json::json!({"id": "j1", "status": "interrupted", "title": "Limited", "limit": null, "reviewError": null, "dismissed": null, "resumesAt": "2026-10-23T12:00:00Z"});
+        assert!(seen.job(&waiting).is_empty());
+        waiting["status"] = serde_json::json!("running");
+        waiting["resumesAt"] = serde_json::Value::Null;
+        assert!(seen.job(&waiting).is_empty());
+        waiting["status"] = serde_json::json!("interrupted");
+        assert_eq!(seen.job(&waiting).len(), 1);
     }
 
     /// Every published job says obid doesn't run Oby's review yet (#525): that's no event, or

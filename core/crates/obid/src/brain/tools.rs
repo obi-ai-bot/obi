@@ -28,7 +28,7 @@ const VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 fn list() -> Value {
     let id = json!({"type": "string", "description": "The job's id, as oby_jobs gives it."});
     json!([
-        {"name": "oby_jobs", "description": "Lists Oby's jobs, newest first: id, title, status, step, repo, agent, account, mode, pull request, archived. Archived jobs are left out unless archived is true.",
+        {"name": "oby_jobs", "description": "Lists Oby's jobs, newest first: id, title, status, phase (prepare, work, check or publish), round and rounds, repo, agent, account, mode, pull request, archived. What a job's agent is doing and said is in oby_job. Archived jobs are left out unless archived is true.",
          "inputSchema": {"type": "object", "properties": {
              "status": {"type": "string", "description": "Only jobs in this status: queued, running, done, failed, stopped, interrupted."},
              "repo": {"type": "string", "description": "Only jobs on this repository (owner/name)."},
@@ -220,6 +220,10 @@ fn answered(called: Result<String, String>) -> Value {
     json!({"content": [{"type": "text", "text": crate::secrets::known().redact(&text)}],
            "isError": failed})
 }
+
+/// Why a supervisor turn (super::supervisor) starts no job past its own bounds: after something
+/// untrusted, a watched turn's jobs start and publish only by hand, but nobody watches this one.
+const UNWATCHED_START: &str = "A turn nobody watches starts no other work: say what should happen, and the owner can start it.";
 
 /// The tool's answer, or why it refused.
 async fn call(
@@ -1420,8 +1424,8 @@ fn told(owner: &str, agent: &str, nonce: &str) -> String {
 }
 
 /// oby_tell_job: message_job with the owner's words and the agent's quoted. A job that ended gets
-/// a follow-up whose request is the owner's words alone; after the web it's only proposed, a
-/// `start` item for the owner's Start (#374).
+/// a follow-up whose request is the owner's words alone; after something untrusted was read it
+/// publishes only when the owner does (the owner's decision of 2026-10-23).
 async fn tell(
     shared: &Arc<Shared>,
     session: &Session,
@@ -1478,6 +1482,9 @@ async fn tell(
             actions::already_on_it(shared, &job, &next, &words, source(session)),
         );
     }
+    if session.supervising.is_some() {
+        return Err(UNWATCHED_START.into());
+    }
     // A follow-up is a job the turn starts: it counts against the turn's ten, and a job gets one
     // follow-up a turn.
     capped(&session.dispatched, "starts jobs")?;
@@ -1501,16 +1508,8 @@ async fn tell(
     {
         new.title = Some(title);
     }
-    if source(session) == crate::jobs::Source::Untrusted {
-        let added = agent_ready(added)?;
-        return Ok(actions::propose_follow_up(
-            shared,
-            &job,
-            &new,
-            Some(&added),
-            &session.conversation,
-        ));
-    }
+    // After something untrusted was read, it publishes only when the owner does.
+    new.untrusted = source(session) == crate::jobs::Source::Untrusted;
     new.turn = actions::started_by(&job, &session.conversation, &session.control.turn);
     outcome_answer(session, actions::follow_up(shared, &job, new))
 }
@@ -1559,6 +1558,11 @@ async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
             )),
         };
         return outcome_answer(session, outcome);
+    }
+    // Past its own bounds, a turn nobody watches starts nothing: what an agent's note says would
+    // otherwise start work no one asked for.
+    if session.supervising.is_some() {
+        return Err(UNWATCHED_START.into());
     }
     let mode = match &start.mode {
         None => None,
@@ -1611,14 +1615,16 @@ async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
     };
     let control = session.control.clone();
     let live = move || control.live();
-    // A turn that reached the web proposes the work: it waits for the owner's Start (#374).
+    // A turn that read something untrusted starts the work in Sandbox mode at most, and only the
+    // owner publishes it (the owner's decision of 2026-10-23).
     let researched = session.web.load(Ordering::SeqCst);
     let Talk::Reply { text, jobs } =
         actions::answer(shared, &planned, &asked, researched, &live).await
     else {
         return Err("The turn ended before the job started.".into());
     };
-    if jobs.is_empty() && !bypass && !researched {
+    // Only a trusted turn's Bypass job waits, for the owner's Confirm.
+    if jobs.is_empty() && !(bypass && !researched) {
         return Err(text);
     }
     let cards: Vec<Value> = jobs
@@ -1637,7 +1643,7 @@ async fn dispatch(shared: &Arc<Shared>, session: &Session, args: Value) -> Resul
     })
 }
 
-/// oby_jobs: the jobs, newest first, what agents wrote (their steps) quoted.
+/// oby_jobs: the jobs, newest first, in obid's own fields only (nothing an agent wrote), quoted.
 fn jobs(shared: &Shared, session: &Session, args: Value) -> Result<String, String> {
     let Listing {
         status,
@@ -1656,7 +1662,10 @@ fn jobs(shared: &Shared, session: &Session, args: Value) -> Result<String, Strin
         .take(limit.unwrap_or(20).clamp(1, 100))
         .map(|j| {
             json!({"id": j.id, "title": super::briefing::line(&j.short_title(), 80),
-                   "status": j.status.as_str(), "step": super::briefing::line(&j.step, 200),
+                   // Its `step` can be its agent's own words, which would steer this turn: oby_job
+                   // reads them, quoted, and marks the turn untrusted.
+                   "status": j.status.as_str(), "phase": j.phase, "round": j.current_round(),
+                   "rounds": j.max_rounds(),
                    "repo": j.repo, "agent": j.agent, "account": j.account,
                    "mode": crate::jobs::Jobs::mode_of(&j).as_str(), "pr": j.pr,
                    "published": j.published, "archived": j.archived.is_some(),
