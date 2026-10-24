@@ -29,12 +29,20 @@ final class Voice {
     @ObservationIgnored private var analyzer: SpeechAnalyzer?
     @ObservationIgnored private var input: AsyncStream<AnalyzerInput>.Continuation?
     @ObservationIgnored private var results: Task<Void, Never>?
+    /// Tests' words, in place of the microphone (`init(saying:)`).
+    @ObservationIgnored private var saying: (() -> String)?
 
     private static let silence = [Float](repeating: 0, count: 32)
     /// The language picked in Settings › Voice, read on each start: changing it needs no restart.
     private static var locale: Locale { VoiceSettings.locale }
     /// "English", "Português (Brasil)".
     private static var language: String { VoiceSettings.name(locale) }
+
+    /// A voice for tests: it never opens the microphone, and `finish` hands over what `saying` gives.
+    convenience init(saying: @escaping () -> String) {
+        self.init()
+        self.saying = saying
+    }
 
     struct Problem: LocalizedError {
         var errorDescription: String?
@@ -105,7 +113,7 @@ final class Voice {
     private func open(_ context: [String], session: Int) async throws {
         // Let go (or cancelled) before the microphone could open: nothing to hear.
         var stillListening: Bool { phase == .listening && self.session == session }
-        guard stillListening else { return }
+        guard stillListening, saying == nil else { return }
         if downloading { throw Problem("Oby is getting the \(Self.language) speech model. Try again in a minute.") }
         guard await Self.microphoneAllowed() else {
             throw Problem("Oby can't hear you. Allow the microphone in System Settings › Privacy & Security › Microphone.")
@@ -187,7 +195,7 @@ final class Voice {
                 Task { await analyzer.cancelAndFinishNow() }
             }
         }
-        return cancel ? "" : words.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cancel ? "" : (saying?() ?? words).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Runs `work`, waiting for it at most `limit`: true if it finished. Work that never ends is left behind.

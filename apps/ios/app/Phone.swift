@@ -158,29 +158,16 @@ final class Phone {
     func archive(_ id: String) { archivedHere.insert(id) }
     /// What Oby's answering or asking in the thread shown, else nothing.
     var talkHere: Talk { talkIn == current ? talk : .none }
-    @ObservationIgnored private let speaker = PhoneSpeaker()
     @ObservationIgnored private var planning: Task<Void, Never>?
-    @ObservationIgnored private var spoken = false
-    var speakReplies = UserDefaults.standard.object(forKey: "voice.speakReplies") as? Bool ?? true {
-        didSet {
-            UserDefaults.standard.set(speakReplies, forKey: "voice.speakReplies")
-            if !speakReplies { speaker.stop() }
-        }
-    }
 
-    /// Tap the mic: Oby stops talking, and what you say goes to `update` as it's heard. A reply
-    /// still on its way stays silent: speaking it would take the microphone's audio session.
+    /// Tap the mic: what you say goes to `update` as it's heard.
     func dictate(update: @escaping (String) -> Void) {
         guard !voice.active, !voice.finishing else { return }
-        spoken = false
-        speaker.stop()
         voice.start(context: PhoneSpeech.context(repos: jobs.map(\.repo)), update: update)
     }
 
     func cancelVoice() {
-        spoken = false
         voice.cancel()
-        speaker.stop()
     }
 
     /// The app left the front: dictation stops and keeps its words, and a microphone still being
@@ -188,8 +175,6 @@ final class Phone {
     /// makes the app inactive too: preparation carries on through it.
     func leftForeground(background: Bool) {
         if background || !voice.asking { voice.finish() }
-        spoken = false
-        speaker.stop()
     }
 
     /// A runner that isn't a paired Mac, at the address Settings › Runner gives; nil on a fresh
@@ -701,7 +686,6 @@ final class Phone {
     func ask(_ words: String, spoken: Bool = false, new: Bool = false) {
         guard let said = ChatThread.words(words) else { return }
         cancelVoice()
-        self.spoken = spoken
         let starts = new && conversations != nil
         if starts {
             current = nil
@@ -738,8 +722,6 @@ final class Phone {
     func cancel() {
         planning?.cancel()
         planning = nil
-        spoken = false
-        speaker.stop()
         // The words the user gave up on leave the thread, as on the Mac; the runner still lists
         // them with its answer if it got them, and then they show.
         dropPending()
@@ -771,7 +753,6 @@ final class Phone {
     private func plan(_ said: String, answer: (question: String, option: String)?, voice: Bool = false, new: Bool = false,
                       id: String = UUID().uuidString.lowercased()) {
         planning?.cancel()
-        speaker.stop()
         dropPending()
         stopProblem = nil
         talk = .thinking(said)
@@ -905,13 +886,6 @@ final class Phone {
         self.talk = talk
         for job in started { apply(.job(job)) }
         if !started.isEmpty { Notifications.ask() }
-        if request.voice, speakReplies {
-            switch talk {
-            case .reply(let text): speaker.say(text)
-            case .question(_, let question): speaker.say(question.text)
-            default: break
-            }
-        }
     }
 
     // MARK: Jobs

@@ -11,7 +11,7 @@ import CoreGraphics
 final class TalkKey {
     enum Key { case fn, controlOption }
     /// `press` comes the moment a talk key goes down, before anything else is known (it may turn
-    /// out to be a shortcut): Oby stops speaking on it.
+    /// out to be a shortcut): the reply the pill shows goes on it.
     enum Event { case press(Key), start(Key), handsFree, send, cancel }
 
     var on: (Event) -> Void = { _ in }
@@ -102,21 +102,27 @@ final class TalkKey {
         }
     }
 
-    /// Oby spoke its reply in hands-free mode and listens again for yours: the next press of
-    /// either key sends, as after fn + Space, and Escape cancels.
-    func listenAgain() {
-        wait?.cancel()
-        held = nil
+    /// A talk key is down, or a turn it started is under way: the microphone is the user's now.
+    var busy: Bool { held != nil || talking }
+
+    /// Oby's reply showed in hands-free mode and it listens again for yours: the next press of
+    /// either key sends, as after fn + Space, and Escape cancels. Never while a key is down or a
+    /// turn is under way: that press is the user's own, and its release must still close the
+    /// microphone. False then, and nothing changes.
+    func listenAgain() -> Bool {
+        guard !busy else { return false }
         talking = true
         handsFree = true
+        return true
     }
 
     private func press(_ key: Key) {
+        // Control-Option is VoiceOver's while it runs, for every command: never a press of Oby's.
+        if key == .controlOption, NSWorkspace.shared.isVoiceOverEnabled { return }
         on(.press(key))
         // Hands-free ends at the next press, of either key.
         if handsFree { stop(.send); return }
         guard held == nil, !talking else { return }
-        if key == .controlOption, NSWorkspace.shared.isVoiceOverEnabled { return }
         held = key
         wait?.cancel()
         wait = Task {

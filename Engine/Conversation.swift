@@ -22,7 +22,7 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     /// The user said it out loud (the Mac's talk key), so the window says "You, by voice". Nil when
     /// typed, and on turns the runner kept.
     var voice: Bool?
-    /// Longer Markdown answer beneath Oby's short spoken reply; never sent to speech.
+    /// Longer Markdown answer beneath Oby's short reply.
     var details: String?
     /// The conversation it's in, read from obid (#493); nil from a runner with one thread and on
     /// this Mac's own turns.

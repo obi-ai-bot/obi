@@ -1277,6 +1277,28 @@ final class RunnerFeed {
     @ObservationIgnored private var asked: [String: (said: String, question: Plan.Question, at: Date)] = [:]
     /// Each conversation's last answer that alerted, for a question that comes after its turn.
     @ObservationIgnored private var answered: [String: (turn: Turn, at: Date)] = [:]
+    /// The talk key's turn shows Oby's reply now: on its way (Thinking), or in the pill (the app sets it).
+    @ObservationIgnored var pillShowsTalk: () -> Bool = { false }
+    /// The talk key's last words, until obid lists them, and the conversation they joined: Oby's
+    /// answer there shows in the pill, so that one answer doesn't alert (`talkAnswered`: it came).
+    @ObservationIgnored private var talkWords: String?
+    @ObservationIgnored private var talkConversation: String?
+    @ObservationIgnored private var talkAnswered = false
+    /// The answer the pill showed instead of an alert: a question that comes after it alerts with it.
+    @ObservationIgnored private var pillAnswer: (conversation: String, turn: Turn, at: Date)?
+
+    /// The talk key's words are on their way to obid; nil: written down still, or the turn ended,
+    /// so no conversation's answer is the pill's.
+    func talking(_ said: String?) {
+        talkWords = said?.trimmingCharacters(in: .whitespacesAndNewlines)
+        talkConversation = nil
+        talkAnswered = false
+    }
+
+    /// The window in front shows the conversation the talk key's words joined, where their reply shows.
+    var talkShown: Bool { talkConversation.map { windowShows(.conversation($0)) } ?? false }
+    /// The talk key's words were listed, so `talkShown` can answer now: the pill decides again (the app sets it).
+    @ObservationIgnored var onTalkListed: () -> Void = {}
 
     /// An alert for each inbox ask that waits for the owner and isn't told yet (`Alerts.alerts`). One
     /// the window shows stays untold, and alerts once the window goes (`windowLeft`).
@@ -1308,12 +1330,19 @@ final class RunnerFeed {
     }
 
     /// A turn of any conversation. The owner's words, from any app, settle the alert of Oby's answer
-    /// there; Oby's answer alerts unless the window shows that conversation.
+    /// there; Oby's answer alerts unless the window shows that conversation, or the talk key's pill
+    /// shows it (the talk key's words went there, and it's the turn's answer).
     func heard(_ turn: Turn, _ extras: TurnExtras) {
         guard let conversation = turn.conversation else { return }
+        if turn.who == .user, let words = talkWords, turn.text.trimmingCharacters(in: .whitespacesAndNewlines) == words {
+            talkWords = nil
+            talkConversation = conversation
+            onTalkListed()
+        }
         if let settled = Alerts.settled(by: turn) {
             asked[conversation] = nil
             answered[conversation] = nil
+            if pillAnswer?.conversation == conversation { pillAnswer = nil }
             withdraw([settled])
             return
         }
@@ -1321,7 +1350,16 @@ final class RunnerFeed {
         guard Alerts.answers(turn, extras: extras, known: known, told: told, asked: askedAt[conversation], now: .now) else { return }
         told.insert(turn.id)
         let question = asked.removeValue(forKey: conversation).flatMap { $0.at > .now.addingTimeInterval(-60) ? ($0.said, $0.question) : nil }
+        // The talk key's turn has one answer, this one, alerted or not: later ones there are news.
+        let turnsAnswer = conversation == talkConversation && !talkAnswered
+        if turnsAnswer { talkAnswered = true }
         guard !windowShows(.conversation(conversation)) else { return }
+        // The talk key's reply shows in the pill: its answer doesn't alert. A question with it does,
+        // for its options.
+        if turnsAnswer, question == nil, pillShowsTalk() {
+            pillAnswer = (conversation, turn, .now)
+            return
+        }
         answered[conversation] = (turn, .now)
         show(Alerts.answer(turn.text, in: conversation, title: title(of: conversation), question: question))
     }
@@ -1330,13 +1368,16 @@ final class RunnerFeed {
     /// when the turn came first (quietly, replacing it), else when it comes.
     private func noteQuestion(_ question: Plan.Question, said: String, in conversation: String) {
         guard !windowShows(.conversation(conversation)) else { return }
-        guard let (turn, at) = answered[conversation], at > .now.addingTimeInterval(-60) else {
+        let alerted = answered.removeValue(forKey: conversation)
+        let shown = pillAnswer?.conversation == conversation ? pillAnswer : nil
+        if shown != nil { pillAnswer = nil }
+        guard let (turn, at) = alerted ?? shown.map({ ($0.turn, $0.at) }), at > .now.addingTimeInterval(-60) else {
             asked[conversation] = (said, question, .now)
             return
         }
-        answered[conversation] = nil
         var alert = Alerts.answer(turn.text, in: conversation, title: title(of: conversation), question: (said, question))
-        alert.sound = false
+        // It replaces the answer's alert quietly; in place of the answer the pill showed, it's the first.
+        alert.sound = alerted == nil
         show(alert)
     }
 

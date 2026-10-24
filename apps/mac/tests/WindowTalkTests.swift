@@ -13,15 +13,75 @@ struct WindowTalkTests {
         #expect(ListeningLine.hint(finishing: true, handsFree: true, key: "Control-Option") == "Writing it down…")
     }
 
-    /// The owner's decision on #528: listening, thinking, then speaking, only while a turn started by
-    /// the talk key is under way, and not over a window that shows it already.
+    /// The owner's decision on #528: the pill only while a turn started by the talk key is under way,
+    /// and not over a window that shows it already. And of 2026-10-23: your words as you say them,
+    /// "Thinking", then Oby's reply in writing, never "Speaking".
     @Test func thePillShowsOnlyForATalkTurnTheWindowIsNotShowing() {
-        #expect([TalkStage.listening, .thinking, .speaking].map(\.word) == ["Listening", "Thinking", "Speaking"])
-        for stage in [TalkStage.listening, .thinking, .speaking] {
-            #expect(TalkStage.shows(stage, windowShowsTalk: false))
-            #expect(!TalkStage.shows(stage, windowShowsTalk: true))
+        for stage in [TalkStage.listening, .thinking, .replied] {
+            #expect(TalkStage.shows(stage, reply: false, windowShowsTalk: false, windowShowsReply: false))
+            #expect(!TalkStage.shows(stage, reply: false, windowShowsTalk: true, windowShowsReply: false), "Home shows what you say")
         }
-        #expect(!TalkStage.shows(nil, windowShowsTalk: false))
+        #expect(!TalkStage.shows(nil, reply: false, windowShowsTalk: false, windowShowsReply: false))
+        #expect(TalkStage.line(.listening, words: "", problem: nil) == "Listening")
+        #expect(TalkStage.line(.listening, words: "fix the vault tests", problem: nil) == "fix the vault tests")
+        #expect(TalkStage.line(.listening, words: "", problem: "Oby can't use the microphone.") == "Oby can't use the microphone.")
+        #expect(TalkStage.line(.thinking, words: "fix the vault tests", problem: nil) == "Thinking")
+        #expect(TalkStage.line(.replied, words: "fix the vault tests", problem: nil) == nil, "the reply shows on its own")
+        #expect(TalkStage.line(nil, words: "", problem: nil) == nil)
+    }
+
+    /// Home shows what you say but not Oby's reply: while a reply shows (and hands-free listens again
+    /// under it), the pill shows unless the window shows the conversation the words went to.
+    @Test func theReplyShowsInThePillUnlessItsConversationShows() {
+        for stage in [TalkStage.replied, .listening] {
+            #expect(TalkStage.shows(stage, reply: true, windowShowsTalk: true, windowShowsReply: false), "Home, or another conversation")
+            #expect(!TalkStage.shows(stage, reply: true, windowShowsTalk: true, windowShowsReply: true), "its conversation")
+            #expect(TalkStage.shows(stage, reply: true, windowShowsTalk: false, windowShowsReply: false), "closed")
+        }
+    }
+
+    private func recording(_ key: TalkKey) -> () -> [String] {
+        var events: [String] = []
+        key.on = { event in
+            switch event {
+            case .press: events.append("press")
+            case .start: events.append("start")
+            case .handsFree: events.append("handsFree")
+            case .send: events.append("send")
+            case .cancel: events.append("cancel")
+            }
+        }
+        return { events }
+    }
+
+    private func fn(_ key: TalkKey, down: Bool) {
+        _ = key.handle(.flagsChanged, code: 63, flags: down ? .maskSecondaryFn : [], repeating: false)
+    }
+
+    /// The reply lands while fn is going down, in the moment before its turn starts: Oby doesn't take
+    /// that press over for hands-free. fn's own turn starts, and letting go sends it, so the
+    /// microphone closes with the key.
+    @Test func aReplyDuringAPressLeavesThePressToYou() async throws {
+        let key = TalkKey()
+        let events = recording(key)
+        fn(key, down: true)
+        #expect(key.busy && !key.listenAgain(), "the press is yours")
+        for _ in 0..<40 where !events().contains("start") { try await Task.sleep(for: .milliseconds(50)) }
+        fn(key, down: false)
+        #expect(events() == ["press", "start", "send"])
+        #expect(!key.busy, "nothing listens after the key is let go")
+    }
+
+    /// With no key down, Oby listens again after its reply, and the next press ends it.
+    @Test func listeningAgainEndsAtTheNextPress() {
+        let key = TalkKey()
+        let events = recording(key)
+        #expect(!key.busy && key.listenAgain())
+        #expect(key.busy && !key.listenAgain(), "once")
+        fn(key, down: true)
+        fn(key, down: false)
+        #expect(events() == ["press", "send"])
+        #expect(!key.busy)
     }
 
     /// A regular Mac app (#528): a Dock icon, and its own menus while its window is in front, with

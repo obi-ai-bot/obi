@@ -32,7 +32,7 @@ struct SettingsScreen: View {
                 PermissionsSection(runner: phone.runner, defaultMode: phone.defaultMode, setDefault: phone.setDefaultMode)
                 RoutinesSection(runner: phone.runner, changes: phone.routineChanges)
                 NotificationsSection { UIApplication.shared.registerForRemoteNotifications() }
-                VoiceSection(speaks: Binding(get: { phone.speakReplies }, set: { phone.speakReplies = $0 }))
+                VoiceSection()
                 SetGroup("Appearance") {
                     SetRow("Appearance") {
                         SetSegmented("Appearance", selection: $appearance, options: Appearance.allCases.map { ($0, $0.label) })

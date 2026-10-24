@@ -765,7 +765,7 @@ nonisolated struct Turn: Codable, Identifiable, Equatable, Sendable {
     /// The user said it out loud (the iPhone's mic), so the thread says "You, by voice". Nil when
     /// typed, and on turns the runner kept.
     var voice: Bool?
-    /// Longer Markdown answer beneath Oby's short spoken reply; nil on older turns.
+    /// Longer Markdown answer beneath Oby's short reply; nil on older turns.
     var details: String?
     /// The conversation it's in (obid only, #493), or nil from a runner with one thread.
     var conversation: String?

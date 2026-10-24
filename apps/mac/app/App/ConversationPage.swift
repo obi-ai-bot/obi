@@ -153,9 +153,6 @@ struct ConversationPage: View {
                                 ObyAtWork(working: conversation.working, problem: feed.stopProblem, face: conversation.streamed.isEmpty)
                                     .padding(.top, rows.last?.turn.who == .oby ? 12 : 16)
                             }
-                            if model.speaker.speaking {
-                                Text("Speaking · press fn to stop").font(Tokens.font(11)).foregroundStyle(Tokens.muted).padding(.top, 8)
-                            }
                             Color.clear.frame(height: 1).id("end")
                         }
                         .frame(maxWidth: Tokens.column)
