@@ -245,19 +245,38 @@ struct PrimaryButton: View {
 }
 
 extension Phone {
-    /// Pairs with what the Mac's QR code (or an invitation pasted) says.
+    /// Pairs with what the Mac's QR code (or an invitation pasted) says: through the Mac's
+    /// Obysphere when it came through one, and then only so.
     func pair(scanned value: String) async throws {
         let envelope = try GatewayEnvelope.decode(value)
-        try await pairGateway(url: envelope.url, credential: envelope.secret, link: envelope.link)
+        if let relay = envelope.relay {
+            try await pairRelay(relay, credential: envelope.secret, mac: envelope.link)
+        } else {
+            try await pairGateway(url: envelope.url, credential: envelope.secret, link: envelope.link)
+        }
     }
 }
 
 /// What the Mac's pairing QR code carries (apps/mac/app/PairingView.swift): the gateway's URL, the Mac's
-/// link (its name and tunnel hostname) and the one-time secret.
+/// link (its name and tunnel hostname) and the one-time secret. Made while obid is in an Obysphere,
+/// the link has `relay` too (docs/runner-api.md, "obid only: the phone relay"): the Sphere, the
+/// relay, this phone's relay token and the Mac's key.
 struct GatewayEnvelope: Decodable, Equatable {
     var url: URL
     var link: MacLink
     var secret: String
+    var relay: RelayLink?
+
+    private enum Keys: String, CodingKey { case url, link, secret }
+    private struct Relayed: Decodable { var relay: RelayLink? }
+
+    init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: Keys.self)
+        url = try keys.decode(URL.self, forKey: .url)
+        link = try keys.decode(MacLink.self, forKey: .link)
+        relay = try keys.decode(Relayed.self, forKey: .link).relay
+        secret = try keys.decode(String.self, forKey: .secret)
+    }
 
     static func decode(_ text: String) throws -> GatewayEnvelope {
         let envelope: GatewayEnvelope
@@ -265,6 +284,22 @@ struct GatewayEnvelope: Decodable, Equatable {
             envelope = try JSONDecoder().decode(GatewayEnvelope.self, from: Data(text.utf8))
         } catch {
             throw RunnerError(message: "That isn't Oby's pairing QR code. Scan the one the Mac's Settings › Runner shows.")
+        }
+        // Through an Obysphere the hostname is only the Mac's name: the relay is the way, and its
+        // key the Mac's, sealed to from the first call. A pasted one still names its Mac plainly:
+        // a hostname of letters, digits, dots and dashes with a port at most (a Tailscale route's
+        // `mac.tail0000.ts.net:8443`), a name of one line, both short. Who the Mac is is its relay
+        // and key (MacLink.identity), never these.
+        if let relay = envelope.relay {
+            let host = envelope.link.hostname.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            let name = envelope.link.name
+            guard relay.isValid, (1...253).contains(host[0].count),
+                  host[0].allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }),
+                  host.count == 1 || (1...5).contains(host[1].count) && host[1].allSatisfy({ $0.isASCII && $0.isNumber }),
+                  (1...64).contains(name.count), !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                throw RunnerError(message: "That invitation's Obysphere isn't one Oby can reach safely, so Oby won't pair with it.")
+            }
+            return envelope
         }
         // An invitation pasted from a message could send this iPhone anywhere: it must point at
         // the Mac it names, over HTTPS, or at a gateway on the home network.
