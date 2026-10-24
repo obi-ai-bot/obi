@@ -3,6 +3,7 @@
 import CryptoKit
 import Foundation
 import LocalAuthentication
+import OSLog
 import Security
 
 /// A device's approval for one publish, as the runner checks it (docs/runner-api.md).
@@ -30,13 +31,14 @@ nonisolated struct Approval: Encodable, Equatable, Sendable {
     }
 }
 
-/// The device's publishing key: the iPhone's behind Face ID, the Mac's behind Touch ID. It lives in
-/// the Secure Enclave and signs only after the owner's face or finger, so the runner can tell a
-/// publish was approved on this device, by its owner, just now. What the prompt says is each app's.
+/// The device's publishing key: the iPhone's behind Face ID, the Mac's behind Touch ID or the Mac's
+/// password. It lives in the Secure Enclave and signs only after the owner's face, finger or
+/// password, so the runner can tell a publish was approved on this device, by its owner, just now.
+/// What the prompt says is each app's.
 nonisolated enum DeviceKey {
     static var isAvailable: Bool { SecureEnclave.isAvailable }
 
-    /// The public half, to register with the runner. Making the key doesn't ask for Face ID or Touch ID.
+    /// The public half, to register with the runner. Making the key doesn't ask for anything.
     static func publicKey() throws -> Data {
         try key(context: nil).publicKey.x963Representation
     }
@@ -88,12 +90,21 @@ nonisolated enum DeviceKey {
     #if os(macOS)
     // The Mac's login keychain, as its vault's (Engine/Vault.swift): it has no passcode class.
     private static let protection = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-    private static let noKey = "This Mac can't make a Touch ID key. Publishing from it needs Touch ID."
-    private static let biometry = "Touch ID"
+    // Touch ID or the Mac's password (AGENTS.md, "The launch build"): a Mac mini or Studio has no
+    // sensor, and a closed laptop can't reach its own.
+    private static let presence = SecAccessControlCreateFlags.userPresence
+    private static let noKey = "This Mac can't make its publishing key: it needs a login password."
+    private static let named = "publishing"
+    // A Touch ID-only key (`.biometryCurrentSet`, until 2026-10-23) was kept as `publish-key`: it
+    // never signs after the password, so the Mac makes this one and registers it (MacDevice.idKey).
+    private static let account = "publish-key.presence"
+    private static let biometryOnly = "publish-key"
     #else
     private static let protection = kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly
+    private static let presence = SecAccessControlCreateFlags.biometryCurrentSet
     private static let noKey = "This iPhone can't make a Face ID key."
-    private static let biometry = "Face ID"
+    private static let named = "Face ID"
+    private static let account = "publish-key"
     #endif
 
     private static func key(context: LAContext?) throws -> SecureEnclave.P256.Signing.PrivateKey {
@@ -101,7 +112,7 @@ nonisolated enum DeviceKey {
             return try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: saved, authenticationContext: context)
         }
         var error: Unmanaged<CFError>?
-        guard let access = SecAccessControlCreateWithFlags(nil, protection, [.privateKeyUsage, .biometryCurrentSet], &error) else {
+        guard let access = SecAccessControlCreateWithFlags(nil, protection, [.privateKeyUsage, presence], &error) else {
             throw error?.takeRetainedValue() ?? RunnerError(message: noKey)
         }
         let key: SecureEnclave.P256.Signing.PrivateKey
@@ -109,13 +120,21 @@ nonisolated enum DeviceKey {
         do {
             key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access, authenticationContext: context)
         } catch {
-            // No finger enrolled: Macs without a Touch ID sensor, or with none set up.
             throw RunnerError(message: noKey)
         }
         #else
         key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access, authenticationContext: context)
         #endif
         try save(key.dataRepresentation)
+        #if os(macOS)
+        // The Touch ID-only key it replaces: nothing signs with it any more.
+        let deleted = SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "com.deskree.oby",
+                                     kSecAttrAccount as String: biometryOnly] as CFDictionary)
+        if deleted != errSecSuccess && deleted != errSecItemNotFound {
+            Logger(subsystem: "com.deskree.oby", category: "device-key")
+                .error("couldn't delete the Touch ID-only publishing key: \(deleted, privacy: .public)")
+        }
+        #endif
         return key
     }
 
@@ -123,7 +142,7 @@ nonisolated enum DeviceKey {
     // this device's enclave can use.
     private static let item: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                               kSecAttrService as String: "com.deskree.oby",
-                                              kSecAttrAccount as String: "publish-key"]
+                                              kSecAttrAccount as String: account]
 
     private static func read() -> Data? {
         var query = item
@@ -137,7 +156,7 @@ nonisolated enum DeviceKey {
         add[kSecValueData as String] = blob
         add[kSecAttrAccessible as String] = protection
         let status = SecItemAdd(add as CFDictionary, nil)
-        guard status == errSecSuccess else { throw RunnerError(message: "Couldn't keep the \(biometry) key (\(status)).") }
+        guard status == errSecSuccess else { throw RunnerError(message: "Couldn't keep the \(named) key (\(status)).") }
     }
 }
 #endif

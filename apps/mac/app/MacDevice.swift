@@ -3,13 +3,13 @@ import LocalAuthentication
 import Observation
 import OSLog
 
-/// What signs a publish on this Mac: its Touch ID key (apps/shared/DeviceKey.swift), or a stand-in in tests.
+/// What signs a publish on this Mac: its Secure Enclave key (apps/shared/DeviceKey.swift), or a stand-in in tests.
 nonisolated protocol PublishingKey: Sendable {
     var isAvailable: Bool { get }
-    /// The public half, X9.63, to register with the runner. It doesn't ask for Touch ID.
+    /// The public half, X9.63, to register with the runner. It doesn't ask for anything.
     func publicKey() throws -> Data
-    /// Asks for Touch ID with the action as the reason, then signs it; throws when the user
-    /// cancels or Touch ID fails, so nothing is signed.
+    /// Asks for Touch ID or the Mac's password with the action as the reason, then signs it; throws
+    /// when the user cancels or it fails, so nothing is signed.
     func approve(job: String, action: String, device: String) async throws -> Approval
     /// The same for a change to the runner's connections (`Approval.connectionMessage`).
     func approveConnection(action: String, device: String) async throws -> Approval
@@ -17,43 +17,54 @@ nonisolated protocol PublishingKey: Sendable {
     func approveConfirm(item: String, title: String, device: String) async throws -> Approval
 }
 
-/// The Mac's Secure Enclave key, behind Touch ID.
+/// The Mac's Secure Enclave key, behind Touch ID or the Mac's password.
 nonisolated struct TouchIDKey: PublishingKey {
+    /// Makes the context that asks; a test's stands in for macOS's prompt.
+    var context: @Sendable () -> LAContext = { LAContext() }
+
     var isAvailable: Bool { DeviceKey.isAvailable }
+
+    /// Touch ID, with the Mac's password beside it; the password alone where Touch ID can't be used
+    /// (no sensor, or a closed laptop). The key accepts either (`.userPresence`), so a Touch ID-only
+    /// prompt would guard nothing: five wrong fingers lock Touch ID and macOS asks for the password.
+    static let policy = LAPolicy.deviceOwnerAuthentication
+
+    /// Whether Touch ID can approve right now, for the button's words.
+    static var touchID: Bool { LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) }
+
+    /// "Publish with Touch ID", or "with your password" where Touch ID can't be used.
+    static var publish: String { touchID ? "Publish with Touch ID" : "Publish with your password" }
 
     func publicKey() throws -> Data { try DeviceKey.publicKey() }
 
     func approve(job: String, action: String, device: String) async throws -> Approval {
-        let reason = Self.reason(action)
-        // Touch ID first, so a cancel says so; the key then signs with that same answer, without asking again.
-        return try await Task.detached {
-            let context = LAContext()
-            guard (try? await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)) == true else {
-                throw RunnerError(message: "Not published: Touch ID didn't approve it.")
-            }
-            return try DeviceKey.approve(job: job, action: action, device: device, context: context)
-        }.value
+        try await asked(action, refused: RunnerError(message: "Not published: it wasn't approved on this Mac.")) {
+            try DeviceKey.approve(job: job, action: action, device: device, context: $0)
+        }
     }
 
     func approveConnection(action: String, device: String) async throws -> Approval {
-        let reason = Self.reason(action)
-        return try await Task.detached {
-            let context = LAContext()
-            guard (try? await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)) == true else {
-                throw RunnerError(message: "Nothing changed: Touch ID didn't approve it.")
-            }
-            return try DeviceKey.approveConnection(action: action, device: device, context: context)
-        }.value
+        try await asked(action, refused: RunnerError(message: "Nothing changed: it wasn't approved on this Mac.")) {
+            try DeviceKey.approveConnection(action: action, device: device, context: $0)
+        }
     }
 
     func approveConfirm(item: String, title: String, device: String) async throws -> Approval {
-        let reason = Self.reason(title)
-        return try await Task.detached {
-            let context = LAContext()
-            guard (try? await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)) == true else {
-                throw ConfirmCancelled()
-            }
-            return try DeviceKey.approveConfirm(item: item, title: title, device: device, context: context)
+        try await asked(title, refused: ConfirmCancelled()) {
+            try DeviceKey.approveConfirm(item: item, title: title, device: device, context: $0)
+        }
+    }
+
+    /// Asks first, so a cancel throws `refused`; the key then signs with that same answer, without asking again.
+    private func asked(_ action: String, refused: some Error,
+                       sign: @escaping @Sendable (LAContext) throws -> Approval) async throws -> Approval {
+        let reason = Self.reason(action)
+        return try await Task.detached { [context] in
+            let asking = context()
+            guard (try? await asking.evaluatePolicy(Self.policy, localizedReason: reason)) == true else { throw refused }
+            // The key signs with that answer or not at all: no second prompt without the runner's sentence.
+            asking.interactionNotAllowed = true
+            return try sign(asking)
         }.value
     }
 
@@ -67,7 +78,7 @@ nonisolated struct TouchIDKey: PublishingKey {
 /// This Mac's publishing key with the runner (docs/runner-api.md, "POST /v1/devices"): a second key
 /// to the same door as the iPhone's. It registers on every connection; a new key needs pairing open
 /// on the runner, and until then Settings › Runner says the runner's one line, with Try again.
-/// With it, a runner's job publishes from here, after Touch ID.
+/// With it, a runner's job publishes from here, after Touch ID or the Mac's password.
 @Observable
 final class MacDevice {
     nonisolated enum State: Equatable, Sendable {
@@ -96,10 +107,10 @@ final class MacDevice {
 
     /// Settings › Runner's word for it.
     var status: String {
-        guard key.isAvailable else { return "Needs Touch ID" }
+        guard key.isAvailable else { return "Needs a Secure Enclave" }
         switch state {
         case .unregistered: return "Not registered yet"
-        case .registered: return "Registered, Touch ID"
+        case .registered: return "Registered, Touch ID or password"
         case .needsPairing, .failed: return "Not registered"
         }
     }
@@ -125,7 +136,7 @@ final class MacDevice {
     @discardableResult
     func register(with runner: Runner, again: Bool = true) async throws -> String {
         if !again, let id = id(on: runner) { return id }
-        guard key.isAvailable else { throw RunnerError(message: "Publishing from this Mac needs Touch ID.") }
+        guard key.isAvailable else { throw RunnerError(message: Self.noKey) }
         do {
             let id = try await runner.register(name: name, publicKey: try key.publicKey())
             defaults.set(id, forKey: Self.idKey(runner))
@@ -141,7 +152,7 @@ final class MacDevice {
     }
 
     /// Publishes a runner's job with exactly `action`, the runner's own sentence the user saw:
-    /// Touch ID signs it, then the runner checks the signature and pushes. A cancelled Touch ID
+    /// Touch ID or the password signs it, then the runner checks the signature and pushes. A cancel
     /// throws before anything is sent.
     func publish(_ job: String, action: String, with runner: Runner) async throws -> URL {
         let device = try await register(with: runner, again: false)
@@ -150,7 +161,7 @@ final class MacDevice {
     }
 
     /// Removes the runner's connection `name` (Settings › Connectors): the runner's own sentence,
-    /// signed after Touch ID, as a publish is. A cancelled Touch ID throws before anything changes.
+    /// signed after Touch ID or the password, as a publish is. A cancel throws before anything changes.
     /// The `oby-connection` signature also approves adding a connection, so this Mac signs only
     /// the sentence that removes this one (`removal`): anything else is refused, unsigned.
     func disconnect(_ name: String, with runner: Runner) async throws {
@@ -163,24 +174,27 @@ final class MacDevice {
         try await runner.disconnect(name, approval: approval)
     }
 
-    /// The owner's Confirm of inbox item `item` (#776): Touch ID with its title as the reason, then
-    /// the runner checks the signature and carries it out. A cancelled Touch ID throws
-    /// `ConfirmCancelled` before anything is sent; a Mac with no Touch ID can't confirm.
+    /// The owner's Confirm of inbox item `item` (#776): Touch ID or the password with its title as
+    /// the reason, then the runner checks the signature and carries it out. A cancel throws
+    /// `ConfirmCancelled` before anything is sent; a Mac with no Secure Enclave can't confirm.
     func confirm(_ item: String, title: String, with runner: Runner) async throws -> InboxItem {
-        guard key.isAvailable else { throw RunnerError(message: Self.noTouchID) }
+        guard key.isAvailable else { throw RunnerError(message: Self.noKey) }
         let device = try await register(with: runner, again: false)
         let approval = try await key.approveConfirm(item: item, title: title, device: device)
         return try await runner.settle(item, answer: "Confirm", approval: approval)
     }
 
-    /// What a Confirm says on a Mac that has no Touch ID (#776).
-    nonisolated static let noTouchID = "Confirm it on your iPhone: this Mac has no Touch ID."
+    /// What a publish or a Confirm says on a Mac with no Secure Enclave to keep its key (#776):
+    /// none that runs macOS 26, which needs Apple silicon or a T2 chip.
+    nonisolated static let noKey = "This Mac has no Secure Enclave to sign with: approve it on your iPhone."
 
     /// The runner's sentence for removing connection `name` (Runner/Connections.swift, `Connection.removal`).
     nonisolated static func removal(_ name: String) -> String { "Disconnect \(name)." }
 
-    private static func idKey(_ runner: Runner) -> String { "device.\(runner.base.host() ?? runner.base.absoluteString)" }
+    /// The id of the key that takes Touch ID or the password: a Touch ID-only key's, kept as
+    /// `device.<host>` until 2026-10-23, doesn't sign any more, so that Mac registers its new key once.
+    private static func idKey(_ runner: Runner) -> String { "device.presence.\(runner.base.host() ?? runner.base.absoluteString)" }
 }
 
-/// Touch ID was cancelled on a Confirm: nothing was signed or sent, and the card stays as it was.
+/// Touch ID or the password was cancelled on a Confirm: nothing was signed or sent, and the card stays as it was.
 nonisolated struct ConfirmCancelled: Error {}

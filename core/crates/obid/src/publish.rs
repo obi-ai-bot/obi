@@ -97,6 +97,13 @@ impl Outgoing {
 pub const NOT_REVIEWED: &str =
     "obid doesn't run Oby's review yet: a person reviews the pull request on GitHub.";
 
+/// The Review stage's line while that holds: what really happens next (AGENTS.md, "The launch build").
+pub const YOUR_REVIEW: &str = "Pull request open · waiting for your review on GitHub";
+
+/// The Merged stage's line once GitHub approves: obid never merges, so the owner does, from the
+/// pull request (the Mac and the iPhone open it from this line).
+pub const MERGE_ON_GITHUB: &str = "Merge it on GitHub";
+
 /// Something the scan found in what would go out: where, which rule, and the commit whose patch or
 /// message holds it. Never the secret itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

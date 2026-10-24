@@ -86,7 +86,7 @@ export default function TaskCard({ task, alone = false, onOpen, style }: {
                 // needs you; done, it waits on someone else (a reviewer), so a plain ring
                 const state: StageMark = s.state !== 'current' ? s.state : task.status === 'needs' ? 'needs' : done ? 'upcoming' : 'current';
                 const detail = s.id === 'work' && j.round ? `Round ${j.round[0]} of ${j.round[1]}`
-                  : s.id === 'review' && s.state === 'current' && done ? 'Waiting for review' : s.detail;
+                  : s.id === 'review' && s.state === 'current' && done ? 'Pull request open · waiting for your review on GitHub' : s.detail;
                 return (
                   <li key={s.id} className={`is-${state}`}>
                     <span className="tc-stage-mark"><StageIcon state={state} /></span>

@@ -254,7 +254,7 @@ fn a_done_job_publishes_by_itself_and_follows_its_pull_request() {
     assert!(calls_now(&folder.0).contains("pr view 7 --repo obi-e2e/fixture-app --json state,reviewDecision,mergedAt,baseRefName,headRefOid"));
     assert_eq!(
         stage(&followed, "review")["detail"],
-        "Waiting for review · obid doesn't run Oby's review yet: a person reviews the pull request on GitHub."
+        "Pull request open · waiting for your review on GitHub"
     );
     // Everything is published: nothing to publish by hand.
     let answer = call(&obid, "GET", &format!("/v1/jobs/{id}/publish"), None);
