@@ -350,7 +350,7 @@ struct KindPage: View {
                     GitHubToDo(kind: kind, work: phone.gitHubWork, columns: columns,
                                connect: connect == .signedOut ? ConnectGitHubCard(line: Self.connectLine, connect: nil) : nil,
                                loading: !phone.loaded && phone.connection == .connecting,
-                               start: { try await phone.startGitHubWork($0.id) }, later: { phone.gitHubLater.insert($0.id) })
+                               start: { try await phone.startGitHubWork($0.id, addRepository: $0.addsRepository) }, later: { phone.gitHubLater.insert($0.id) })
                 }
                 // A routine waiting for its next run says when (Sangam's tasks.ts).
                 if tab == .running { ForEach(upcoming) { UpcomingRoutineCard(routine: $0) } }

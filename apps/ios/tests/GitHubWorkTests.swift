@@ -24,6 +24,14 @@ struct GitHubWorkTests {
         #expect(WorkList.counts([WorkList.Item<String>](), toDo: 2)[.running] == 0)
     }
 
+    /// A review in a repository obid doesn't work in: Review it on the iPhone too, adding it first (#1118).
+    @Test func anUnknownRepositoryReviewAddsItFirst() throws {
+        let json = #"{"signedIn": true, "reviews": [{"id": "u", "list": "reviews", "repo": "acme/other", "number": 12, "title": "t", "url": "https://github.com/acme/other/pull/12", "known": false, "job": null}], "assigned": [], "mine": []}"#
+        let review = try Runner.decoder.decode(GitHubWork.self, from: Data(json.utf8)).items[0]
+        #expect(review.action == "Review it" && review.addsRepository)
+        #expect(review.note == "Oby doesn't work in acme/other yet: Review it adds it first.")
+    }
+
     @Test func connectAndLinks() {
         #expect(GitHubWork.Connect(GitHubWork(signedIn: false)) == .signedOut)
         #expect(GitHubWork.page("https://github.com/o/r/issues/1") != nil)

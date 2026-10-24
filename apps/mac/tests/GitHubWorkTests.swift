@@ -114,11 +114,40 @@ struct GitHubWorkTests {
         #expect(issue.who == nil && issue.headline == "Assigned to you in oby #251.")
         #expect(issue.action == nil && issue.label == "On GitHub")
         #expect(issue.note == "Oby doesn't work in deskree-inc/oby yet: add it to repos in obid's configuration.")
-        // Your own: where it stands, and nothing to start (obid doesn't yet).
-        #expect(mine.action == nil && mine.label == "Your pull request" && mine.note == nil)
+        // Your own, its checks failed: Fix it, its headline where it stands.
+        #expect(mine.action == "Fix it" && mine.label == "Start it?" && mine.note == nil)
         #expect(mine.headline == "Changes requested, checks failed.")
         #expect(GitHubWork.Item(id: "f", list: .mine, repo: "o/r", number: 3, title: "t", url: "").headline == "Open in r #3.")
         #expect(GitHubWork.Item(id: "e", list: .assigned, repo: "o/r", number: 2, title: "t", url: "").action == "Fix it")
+    }
+
+    /// A review in a repository obid doesn't work in: Review it, which adds it first (#1118).
+    @Test func anUnknownRepositoryReviewAddsItFirst() {
+        let review = GitHubWork.Item(id: "u", list: .reviews, repo: "acme/other", number: 12, title: "t", url: "", author: "Dima", known: false)
+        #expect(review.action == "Review it" && review.label == "Start it?" && review.addsRepository)
+        #expect(review.note == "Oby doesn't work in acme/other yet: Review it adds it first.")
+        let known = GitHubWork.Item(id: "k", list: .reviews, repo: "o/r", number: 1, title: "t", url: "")
+        #expect(!known.addsRepository && known.note == nil)
+        let issue = GitHubWork.Item(id: "i", list: .assigned, repo: "acme/other", number: 13, title: "t", url: "", known: false)
+        #expect(issue.action == nil && !issue.addsRepository)
+    }
+
+    /// Your own pull request offers Fix it only when its checks failed, on a branch of the repository
+    /// itself (#1119).
+    @Test func yourRedPullRequestOffersFixIt() throws {
+        func mine(_ checks: String?, fork: Bool = false, known: Bool = true) -> GitHubWork.Item {
+            GitHubWork.Item(id: "m", list: .mine, repo: "o/r", number: 5, title: "t", url: "", checks: checks, fork: fork, known: known)
+        }
+        #expect(mine("FAILURE").action == "Fix it" && mine("ERROR").action == "Fix it")
+        #expect(mine("SUCCESS").action == nil && mine("PENDING").action == nil && mine(nil).action == nil)
+        #expect(mine("FAILURE", fork: true).action == nil && mine("FAILURE", known: false).action == nil)
+        #expect(mine("SUCCESS").label == "Your pull request" && !mine("FAILURE").addsRepository)
+        let json = #"{"id": "m", "list": "mine", "repo": "o/r", "number": 5, "title": "t", "url": "https://github.com/o/r/pull/5", "checks": "FAILURE", "fork": true, "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#
+        #expect(try Runner.decoder.decode(GitHubWork.Item.self, from: Data(json.utf8)).fork)
+        // Its inbox offer notifies the Mac (it needs you); its card is the item's, not the conversation's.
+        let offer = #"{"id": "github-ci-m-aaaaaaaaaaaa", "kind": "github", "title": "CI failed: r #5", "text": "Checks failed on your pull request #5 in o/r.", "options": ["Fix CI", "Dismiss"], "created": "2026-10-23T10:00:00Z", "triage": "needs_you"}"#
+        let notice = try Runner.decoder.decode(WatchNotice.self, from: Data(offer.utf8))
+        #expect(WatchNotice.kinds.contains(notice.kind) && !notice.carded && notice.needsYou)
     }
 
     @Test func aDraftIsntReviewedYet() {

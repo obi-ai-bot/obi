@@ -187,10 +187,10 @@ final class RunnerFeed {
     }
 
     /// One click on a GitHub item: Oby's job on it, which joins the list as the runner's job.
-    func startGitHubWork(_ id: String) async throws {
+    func startGitHubWork(_ id: String, addRepository: Bool = false) async throws {
         guard let runner else { throw RunnerError(message: "Oby isn't following a runner.") }
         let asked = runnerChanges
-        let job = try await runner.startGitHubWork(id)
+        let job = try await runner.startGitHubWork(id, addRepository: addRepository)
         if runnerChanges == asked { apply(job) }
     }
     /// Merge checks this Mac runs for the runner (Settings › Runner, off by default).

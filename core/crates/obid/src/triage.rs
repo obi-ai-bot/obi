@@ -75,11 +75,12 @@ pub fn rule(item: &Item) -> Option<&'static str> {
 }
 
 /// A `github` item: a review requested of the owner needs them, unless its author is a bot (the
-/// feed's login, the only outside field a rule reads); an assigned issue is the model's to sort.
+/// feed's login, the only outside field a rule reads), and so do failed checks on the owner's own
+/// pull request; an assigned issue is the model's to sort.
 fn github(work: &Value) -> Option<&'static str> {
     match work["list"].as_str() {
         Some("reviews") if work["author"].as_str().is_some_and(is_bot) => Some(FYI),
-        Some("reviews") => Some(NEEDS_YOU),
+        Some("reviews" | "mine") => Some(NEEDS_YOU),
         _ => None,
     }
 }
@@ -124,6 +125,7 @@ fn subject(item: &Item) -> Option<(String, String)> {
     if let Some(work) = item.github.as_deref().filter(|_| item.kind == "github") {
         let kind = match work["list"].as_str() {
             Some("reviews") => "pull_request.review_requested",
+            Some("mine") => "check.failed",
             _ => "issue.assigned",
         };
         let on = format!("{}#{}", text(&work["repo"])?, text(&work["number"])?);

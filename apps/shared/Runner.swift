@@ -1130,9 +1130,11 @@ nonisolated struct Runner: Sendable {
     func refreshGitHubWork() async throws -> GitHubWork { try await call("POST", "v1/github/work/refresh", timeout: 150) }
 
     /// Starts Oby's job on a GitHub item, a review or a fix: the new job, or the one already on it.
+    /// `addRepository`: a review in a repository obid doesn't work in adds it first.
     @discardableResult
-    func startGitHubWork(_ id: String) async throws -> Job {
-        try await call("POST", "v1/github/work/\(id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id)/start")
+    func startGitHubWork(_ id: String, addRepository: Bool = false) async throws -> Job {
+        let body: [String: Bool]? = addRepository ? ["addRepository": true] : nil
+        return try await call("POST", "v1/github/work/\(id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? id)/start", body: body)
     }
     func report(_ id: String) async throws -> ResearchDocument { try await call("GET", "v1/jobs/\(id)/report") }
 

@@ -770,35 +770,33 @@ impl Link {
     }
 
     /// What a read of the owner's GitHub work found (crate::github_work): a `github` item for each
-    /// of `new` that never had one, open or done; and, with `present` (every item the feed holds
-    /// now, when no list was cut), each open `github` item whose work left the feed is done by
+    /// of `new` that never had one, open or done; and, with `live` (the inbox ids of every offer
+    /// the feed holds now, when no list was cut), each open `github` item that isn't one any more
+    /// (its work left the feed, or its pull request's head moved or isn't red now) is done by
     /// itself, with no answer.
     pub fn github_work(
         &self,
         new: &[crate::github_work::Item],
-        present: Option<&std::collections::HashSet<String>>,
+        live: Option<&std::collections::HashSet<String>>,
     ) {
         let now = time::now();
+        let known: Vec<bool> = new
+            .iter()
+            .map(|work| self.config.repos.find(&work.repo).is_some())
+            .collect();
         let mut changed = Vec::new();
         {
             let mut state = self.lock();
-            if let Some(present) = present {
+            if let Some(live) = live {
                 for item in state.inbox.values_mut() {
-                    let gone = item.kind == "github"
-                        && item.done.is_none()
-                        && item
-                            .github
-                            .as_deref()
-                            .and_then(|g| g["id"].as_str())
-                            .is_some_and(|id| !present.contains(id));
-                    if gone {
+                    if item.kind == "github" && item.done.is_none() && !live.contains(&item.id) {
                         item.done = Some(now);
                         changed.push(item.clone());
                     }
                 }
             }
-            for work in new {
-                let item = inbox::github_item(work, now);
+            for (work, known) in new.iter().zip(known) {
+                let item = inbox::github_item(work, known, now);
                 if !state.inbox.contains_key(&item.id) {
                     state.inbox.insert(item.id.clone(), item.clone());
                     changed.push(item);
@@ -938,13 +936,12 @@ impl Link {
         }
     }
 
-    /// Work on the feed item `work` started from the feed (`POST /v1/github/work/{id}/start`):
-    /// its open `github` item is done, answered with its start option, `job` the job on it.
-    pub fn github_started(&self, work: &str, job: &str) {
-        let id = inbox::github_item_id(work);
+    /// Work started from the feed (`POST /v1/github/work/{id}/start`): its open `github` item `id`
+    /// is done, answered with its start option, `job` the job on it.
+    pub fn github_started(&self, id: &str, job: &str) {
         let item = {
             let mut state = self.lock();
-            let Some(item) = state.inbox.get_mut(&id).filter(|i| i.done.is_none()) else {
+            let Some(item) = state.inbox.get_mut(id).filter(|i| i.done.is_none()) else {
                 return;
             };
             item.done = Some(time::now());
@@ -955,9 +952,10 @@ impl Link {
         self.save_item(&item);
     }
 
-    /// `POST /v1/inbox/{id}/answer` on a `github` item: `Review it` or `Fix it` starts the work as
-    /// `POST /v1/github/work/{id}/start` does (an error leaves the item open), `Dismiss` or done
-    /// settle it, later puts it off. Nothing is sent to GitHub.
+    /// `POST /v1/inbox/{id}/answer` on a `github` item: `Review it`, `Fix it` or `Fix CI` starts the
+    /// work as `POST /v1/github/work/{id}/start` does (a review in a repository obid doesn't work
+    /// in yet adds it first, as `addRepository` does; an error leaves the item open), `Dismiss` or
+    /// done settle it, later puts it off. Nothing is sent to GitHub.
     async fn answer_github(
         &self,
         mut item: Item,
@@ -977,13 +975,23 @@ impl Link {
                 }
                 if *answer == start {
                     let work = item.github.as_deref().cloned().unwrap_or_default();
-                    let started = crate::github_work::start_work(
-                        &self.jobs,
-                        &self.config,
-                        work["list"].as_str().unwrap_or_default(),
-                        work["repo"].as_str().unwrap_or_default(),
-                        work["number"].as_u64().unwrap_or_default(),
-                    )
+                    let list = work["list"].as_str().unwrap_or_default();
+                    let repo = work["repo"].as_str().unwrap_or_default();
+                    // The brain never gets here by itself: its answer to a `github` item is a
+                    // `confirm` item the owner signs (brain::actions, `owners_call`).
+                    let started = async {
+                        if list == "reviews" {
+                            crate::github_work::add_repository(&self.config, repo).await?;
+                        }
+                        crate::github_work::start_work(
+                            &self.jobs,
+                            &self.config,
+                            list,
+                            repo,
+                            work["number"].as_u64().unwrap_or_default(),
+                        )
+                        .await
+                    }
                     .await;
                     match started {
                         Ok((job, _)) => item.job = job.id,
