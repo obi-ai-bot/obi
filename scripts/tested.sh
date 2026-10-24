@@ -46,8 +46,9 @@ tested_toolchain() {
 }
 
 # HEAD's files for a suite, by content: `git ls-tree` with project.pbxproj's version lines
-# (what release.sh's bump changes) normalized, and the gitignored Signing.local.xcconfig, hashed.
-# Fails on a checkout with any change, untracked files included.
+# (what release.sh's bump changes) normalized, and the gitignored Signing.local.xcconfig, hashed;
+# for mac-tests, also which build it tests, launch or full (OBY_FULL_BUILD, docs/release.md, "Full
+# builds"). Fails on a checkout with any change, untracked files included.
 tested_fingerprint() {
     local suite="$1" normalized local_signing="$tested_root/apps/config/Signing.local.xcconfig"
     [[ -z "$(/usr/bin/git -C "$tested_root" status --porcelain --untracked-files=all)" ]] || return 1
@@ -60,6 +61,7 @@ tested_fingerprint() {
             | /usr/bin/awk -F'\t' -v OFS='\t' -v p="$tested_pbxproj" -v h="$normalized" \
                 '$2 == p { split($1, a, " "); $1 = a[1] " " a[2] " " h } { print }'
         if [[ -f "$local_signing" ]]; then printf 'Signing.local.xcconfig %s\n' "$(/usr/bin/shasum -a 256 < "$local_signing")"; fi
+        if [[ "$suite" == mac-tests ]]; then printf 'OBY_FULL_BUILD %s\n' "${OBY_FULL_BUILD:-0}"; fi
     } | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-64
 }
 
@@ -77,14 +79,15 @@ tested_hmac() {
 }
 
 # The suite's one command, run from the checkout. MacTests uses the release's DerivedData and
-# builds obid (in release, both architectures) into the cargo target the archive then reuses.
+# builds obid (in release, both architectures) into the cargo target the archive then reuses. It
+# tests the launch build unless OBY_FULL_BUILD=1 is in the environment (release.sh --full-build).
 tested_command() {
     local cache
     cache="$tested_caches/$(tested_toolchain)"
     case "$1" in
         swift-test) (cd "$tested_root" && "${tested_env[@]}" swift test) ;;
         mac-tests) (cd "$tested_root" && "${tested_env[@]}" xcodebuild -project apps/Oby.xcodeproj -scheme Oby -destination 'platform=macOS' \
-            -derivedDataPath "$cache/DerivedData" OBY_CARGO_TARGET_DIR="$cache/cargo" test) ;;
+            -derivedDataPath "$cache/DerivedData" OBY_CARGO_TARGET_DIR="$cache/cargo" OBY_FULL_BUILD="${OBY_FULL_BUILD:-0}" test) ;;
     esac
 }
 

@@ -193,7 +193,7 @@ final class RunnerFeed {
         let job = try await runner.startGitHubWork(id)
         if runnerChanges == asked { apply(job) }
     }
-    /// Merge checks this Mac runs for the runner (Settings › Runner, on by default).
+    /// Merge checks this Mac runs for the runner (Settings › Runner, off by default).
     let checks = MacChecks()
     /// This Mac's Touch ID key, registered on every connection: with it, the runner's jobs publish from here.
     let device = MacDevice()

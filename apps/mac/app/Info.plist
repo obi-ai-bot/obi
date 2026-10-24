@@ -6,7 +6,7 @@
 	     settings (GENERATE_INFOPLIST_FILE) and merged with this. Hosting and the key are build
 	     settings from apps/config/Signing.xcconfig. -->
 	<key>SUFeedURL</key>
-	<string>$(OBY_APPCAST_URL)</string>
+	<string>$(OBY_FEED_URL)</string>
 	<key>SUPublicEDKey</key>
 	<string>$(OBY_SPARKLE_PUBLIC_KEY)</string>
 	<key>SUEnableAutomaticChecks</key>

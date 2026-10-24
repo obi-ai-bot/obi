@@ -5,12 +5,16 @@ import Testing
 
 /// Remote access (#285): the cloudflared bundled with Oby, and this Mac's side of turning it on.
 struct RemoteAccessTests {
-    /// cloudflared ships inside a full build of Oby.app (apps/mac/app/Tools/bundle-cloudflared.sh,
-    /// OBY_FULL_BUILD=1): the pinned release, universal, signed with the app's identity and the
-    /// hardened runtime. The launch build leaves it out (docs/release.md, "Full builds").
-    @Test(.enabled(if: ObidTunnel.bundled != nil, "cloudflared is only in a full build (OBY_FULL_BUILD=1)"))
-    func cloudflaredIsBundledAndSigned() throws {
-        let binary = try #require(ObidTunnel.bundled)
+    /// A full build of Oby.app (OBY_FULL_BUILD=1) carries cloudflared, obi-vm and obid's web app, and
+    /// the launch build none of them (docs/release.md, "Full builds"). cloudflared, when it's there, is
+    /// the pinned release (apps/mac/app/Tools/bundle-cloudflared.sh), universal, signed with the app's
+    /// identity and the hardened runtime.
+    @Test func aFullBuildBundlesAllThreeAndTheLaunchBuildNone() throws {
+        let contents = Bundle.main.bundleURL.appending(path: "Contents")
+        let parts = ["MacOS/cloudflared", "Helpers/obi-vm", "Resources/obid/web/index.html"]
+        let there = parts.filter { FileManager.default.fileExists(atPath: contents.appending(path: $0).path) }
+        #expect(there.isEmpty || there == parts, Comment(rawValue: "only \(there) of \(parts)"))
+        guard let binary = ObidTunnel.bundled else { return }
         #expect(binary.path.hasSuffix("/Contents/MacOS/cloudflared"))
         #expect(FileManager.default.isExecutableFile(atPath: binary.path))
         let verified = try run("/usr/bin/codesign", ["--verify", "--strict", "--verbose=2", binary.path])
@@ -375,6 +379,14 @@ struct RemoteAccessTests {
         #expect(!remote.on)
         #expect(remote.problem == RemoteAccess.needsThisMac)
         #expect(exchange.requests.isEmpty && host.handed.isEmpty)
+    }
+
+    /// The launch build has no cloudflared: obid's tunnel isn't ready, so turning remote access on
+    /// stops there, before any sign-in or control-plane call (remoteAccessAsksForThisMacFirst).
+    @Test @MainActor func remoteAccessNeedsAFullBuild() {
+        var said: String?
+        do { try ObidTunnel().ready() } catch { said = error.localizedDescription }
+        #expect((said == RemoteAccess.needsFullBuild) == (ObidTunnel.bundled == nil), Comment(rawValue: said ?? "ready"))
     }
 
     /// obid's `tunnel` field, as Settings shows it.

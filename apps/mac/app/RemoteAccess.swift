@@ -89,6 +89,9 @@ final class RemoteAccess {
     /// Remote access reaches obid's gateway on this Mac: with Settings › Runner on a remote
     /// runner, there's no gateway here.
     static let needsThisMac = "Remote access reaches Oby's engine on this Mac: choose This Mac in Settings › Runner first."
+    /// The launch build has no cloudflared (docs/release.md, "Full builds"), so remote access stops
+    /// before it signs in or registers this Mac.
+    static let needsFullBuild = "Remote access needs a full build of Oby."
 
     /// Turning on needs a sign-in first: this Mac has no hostname (never set up, forgotten, or
     /// away 30 days), so Settings offers the providers' buttons, and the switch waits.
@@ -412,7 +415,10 @@ final class ObidTunnel: TunnelHost {
         return Runner(base: LocalRunner.url, token: token)
     }
 
-    func ready() throws { _ = try obid() }
+    func ready() throws {
+        guard Self.bundled != nil else { throw Shell.Failure(message: RemoteAccess.needsFullBuild) }
+        _ = try obid()
+    }
 
     func hand(_ token: String) async throws {
         struct Body: Encodable { var token: String }

@@ -24,16 +24,18 @@
 #   6. writes the appcast entry, with the merged pull requests since the last tag as release notes,
 #      and scans it for secrets: a finding anywhere, or no scanner, and nothing is published;
 #   7. uploads the DMG, checks that its public URL serves the same bytes, then uploads appcast.xml
-#      to R2 (wrangler, or aws against the R2 endpoint);
+#      (appcast-full.xml for a full build) to R2 (wrangler, or aws against the R2 endpoint);
 #   8. tags v<version>.
 #
 # --dry-run does everything up to the signatures with ad hoc identities, and leaves out the
 # notarization, the upload, the commit and the tag, so it runs on any Mac today. Everything lands in
 # build/release/ (gitignored).
 #
-# --full-build archives the full build (OBY_FULL_BUILD=1): cloudflared, obi-vm and obid's web app,
-# which the launch build leaves out, are in, and obi-vm's guest image is checked. Without it the
-# release checks that none of them is in the app (docs/release.md, "Full builds").
+# --full-build releases the full build (OBY_FULL_BUILD=1): cloudflared, obi-vm and obid's web app,
+# which the launch build leaves out, are in, and obi-vm's guest image is checked. It has its own
+# appcast (OBY_FULL_APPCAST_URL), DMG (Oby-<version>-full.dmg) and tag (v<version>-full), so it
+# reaches only full builds. Without it the release checks that none of them is in the app
+# (docs/release.md, "Full builds").
 #
 # Credentials come from the keychain (notarytool's profile, Sparkle's key, wrangler's own login,
 # or R2 keys under the service "oby-r2") or from .env.local (gitignored), and are never printed.
@@ -335,7 +337,7 @@ main() {
             --full-build) full_build=true ;;
             --from-upload) from_upload=true ;;
             --notes) shift; notes_file="${1:-}"; [[ -f "$notes_file" ]] || die "--notes needs a file" ;;
-            -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
+            -h|--help) sed -n '2,42p' "${BASH_SOURCE[0]}"; exit 0 ;;
             -*) die "unknown option $1" ;;
             *) [[ -z "$version" ]] || die "one version only"; version="$1" ;;
         esac
@@ -349,23 +351,35 @@ main() {
         command -v "$tool" >/dev/null 2>&1 || die "$tool isn't installed"
     done
 
-    local team feed base public_key
+    local team feed base public_key feed_setting=OBY_APPCAST_URL suffix=""
+    # A full build follows its own appcast (apps/config/Signing.xcconfig), with its DMG and tag named
+    # apart: a full release reaches only full builds, a launch release only launch builds.
+    if $full_build; then feed_setting=OBY_FULL_APPCAST_URL; suffix="-full"; fi
     team="$(setting OBY_TEAM_ID)"
-    feed="$(setting OBY_APPCAST_URL)"
+    feed="$(setting "$feed_setting")"
     public_key="$(setting OBY_SPARKLE_PUBLIC_KEY)"
     [[ -n "$team" ]] || die "OBY_TEAM_ID isn't set in apps/config/Signing.xcconfig"
-    [[ -n "$feed" ]] || die "OBY_APPCAST_URL isn't set in apps/config/Signing.xcconfig"
+    [[ -n "$feed" ]] || die "$feed_setting isn't set in apps/config/Signing.xcconfig"
+    [[ "$(setting OBY_APPCAST_URL)" != "$(setting OBY_FULL_APPCAST_URL)" ]] || die "OBY_APPCAST_URL and OBY_FULL_APPCAST_URL are the same appcast: a full release would reach every Oby"
     if [[ -z "$public_key" || "$public_key" == "$placeholder_public_key" ]]; then
         $dry_run || die "OBY_SPARKLE_PUBLIC_KEY in apps/config/Signing.xcconfig is still the placeholder: no shipped Oby could verify this update (docs/release.md, Sparkle keys)"
         note "OBY_SPARKLE_PUBLIC_KEY is still the placeholder: fine for a dry run"
     fi
     base="${feed%/*}"
+    local appcast="${feed##*/}"
+    # What scripts/tested.sh builds MacTests with, and what the archive gets on its command line, so
+    # apps/config/Signing.local.xcconfig can't make a release full, or lean.
+    OBY_FULL_BUILD="$($full_build && echo 1 || echo 0)"
+    export OBY_FULL_BUILD
 
     cd "$root"
     trap cleanup EXIT
-    local tag="v$version" last_tag start_head
+    local tag="v$version$suffix" last_tag start_head
     git rev-parse -q --verify "refs/tags/$tag" >/dev/null && die "$tag exists already"
-    last_tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+    # The notes and the history scan start at the last release of the same kind, else the last one.
+    local -a same_kind=(--match 'v*' --exclude 'v*-full')
+    $full_build && same_kind=(--match 'v*-full')
+    last_tag="$(git describe --tags --abbrev=0 "${same_kind[@]}" 2>/dev/null || git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
     start_head="$(git rev-parse HEAD)"
     if ! $dry_run && [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
         die "the working tree isn't clean: commit or put aside what's changed first"
@@ -376,13 +390,13 @@ main() {
     # A release that stopped at the upload (its build, DMG and appcast are in build/release/, and
     # HEAD is its version commit): publish what's there, through the same checks.
     if $from_upload; then
-        local dmg="$out/Oby-$version.dmg" build
-        [[ -f "$dmg" && -f "$out/appcast.xml" ]] || die "--from-upload needs build/release/Oby-$version.dmg and appcast.xml from this release"
-        build="$(git log -1 --format=%s | sed -nE "s/^chore\(release\): Oby $version \(([0-9]+)\)$/\1/p")"
-        [[ -n "$build" ]] || die "--from-upload runs on the release's own commit, chore(release): Oby $version (N)"
-        grep -q "<sparkle:shortVersionString>$version</sparkle:shortVersionString>" "$out/appcast.xml" || die "build/release/appcast.xml has no entry for $version"
+        local dmg="$out/Oby-$version$suffix.dmg" build
+        [[ -f "$dmg" && -f "$out/$appcast" ]] || die "--from-upload needs build/release/Oby-$version$suffix.dmg and $appcast from this release"
+        build="$(git log -1 --format=%s | sed -nE "s/^chore\(release\): Oby $version$suffix \(([0-9]+)\)$/\1/p")"
+        [[ -n "$build" ]] || die "--from-upload runs on the release's own commit, chore(release): Oby $version$suffix (N)"
+        grep -q "<sparkle:shortVersionString>$version</sparkle:shortVersionString>" "$out/$appcast" || die "build/release/$appcast has no entry for $version"
         spctl -a -t open --context context:primary-signature "$dmg" 2>/dev/null || die "$dmg isn't a notarized DMG Gatekeeper accepts"
-        publish "$dmg" "$version" "$build" "$tag" "$base"
+        publish "$dmg" "$version" "$build" "$tag" "$base" "$appcast"
         return
     fi
 
@@ -454,7 +468,7 @@ main() {
         build="$(( $(git rev-list --count HEAD) + 1 ))"
         sed -i '' -E "s/MARKETING_VERSION = [^;]+;/MARKETING_VERSION = $version;/; s/CURRENT_PROJECT_VERSION = [^;]+;/CURRENT_PROJECT_VERSION = $build;/" apps/Oby.xcodeproj/project.pbxproj
         git add apps/Oby.xcodeproj/project.pbxproj
-        git commit -q -m "chore(release): Oby $version ($build)"
+        git commit -q -m "chore(release): Oby $version$suffix ($build)"
         [[ "$(git rev-list --count HEAD)" == "$build" ]] || die "the build number and the commit count disagree"
         note "committed $(git rev-parse --short HEAD): build $build"
         start_head="$(git rev-parse HEAD)"
@@ -483,8 +497,7 @@ main() {
         MARKETING_VERSION="$version"
         CURRENT_PROJECT_VERSION="$build"
         OBY_CARGO_TARGET_DIR="$cache/cargo"
-        # Always said, so apps/config/Signing.local.xcconfig can't make a release full, or lean.
-        OBY_FULL_BUILD="$($full_build && echo 1 || echo 0)"
+        OBY_FULL_BUILD="$OBY_FULL_BUILD"
     )
     if $dry_run; then
         archive_args+=("${signing[@]}")
@@ -522,8 +535,11 @@ main() {
             [[ ! -e "$app/$part" ]] || die "the launch build carries $part: only --full-build does"
         done
     fi
+    local follows
+    follows="$(plutil -extract SUFeedURL raw -o - "$app/Contents/Info.plist")"
+    [[ "$follows" == "$feed" ]] || die "$kind follows $follows, not $feed ($feed_setting)"
     codesign --verify --deep --strict "$app" || die "Oby.app doesn't verify"
-    note "Oby $built, $kind, arm64 and x86_64, feed $(plutil -extract SUFeedURL raw -o - "$app/Contents/Info.plist")"
+    note "Oby $built, $kind, arm64 and x86_64, feed $follows"
 
     # The secret scan of the app before anything leaves this Mac, Apple's notary service included
     # (AGENTS.md); the commits' and the appcast's follow. If the scanner can't run, nothing is
@@ -564,7 +580,7 @@ main() {
 
     # 4. The DMG: Oby.app and an Applications link; create-dmg lays it out with the background.
     # One local per line: a local's value can't read a name declared on the same line.
-    local dmg_name="Oby-$version.dmg"
+    local dmg_name="Oby-$version$suffix.dmg"
     local dmg="$out/$dmg_name"
     local staging="$out/dmg"
     say "Building $dmg_name"
@@ -644,25 +660,25 @@ main() {
     local item pubdate
     pubdate="$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')"
     item="$(appcast_item "$version" "$build" "$pubdate" "$base/$dmg_name" "$length" "$signature" "$notes")"
-    write_appcast "$previous" "$item" "$out/appcast.xml"
-    xmllint --noout "$out/appcast.xml"
+    write_appcast "$previous" "$item" "$out/$appcast"
+    xmllint --noout "$out/$appcast"
     say "Appcast entry (xmllint: well-formed)"
     printf '%s\n' "$item"
-    if $scanner; then scan_paths "$out/appcast.xml"; fi
+    if $scanner; then scan_paths "$out/$appcast"; fi
 
     # 7. Upload, 8. tag.
     if $dry_run; then
         say "Dry run done: nothing uploaded or tagged"
         note "$dmg"
-        note "$out/appcast.xml"
+        note "$out/$appcast"
         exit 0
     fi
-    publish "$dmg" "$version" "$build" "$tag" "$base"
+    publish "$dmg" "$version" "$build" "$tag" "$base" "$appcast"
 }
 
 # 7. Upload, 8. tag: the DMG, checked at its public URL, then the appcast that points at it.
 publish() {
-    local dmg="$1" version="$2" build="$3" tag="$4" base="$5" dmg_name
+    local dmg="$1" version="$2" build="$3" tag="$4" base="$5" appcast="$6" dmg_name
     dmg_name="$(basename "$dmg")"
     say "Uploading to R2 ($bucket)"
     upload_r2 "$dmg" "$dmg_name" "application/octet-stream"
@@ -673,7 +689,7 @@ publish() {
         || die "$base/$dmg_name isn't the DMG just built (size or sha256): the appcast isn't uploaded"
     rm -f "$out/published.dmg"
     note "$base/$dmg_name serves this DMG (size and sha256)"
-    upload_r2 "$out/appcast.xml" "appcast.xml" "application/xml"
+    upload_r2 "$out/$appcast" "$appcast" "application/xml"
     say "Tagging $tag"
     git tag -a "$tag" -m "Oby $version ($build)"
     say "Released Oby $version ($build)"

@@ -10,9 +10,20 @@ OBY_TEAM_ID = 3UV9W5SV7W
 OBY_MAC_BUNDLE_ID = com.deskree.oby
 OBY_IPHONE_BUNDLE_ID = com.deskree.oby.ios
 
-// Where the Mac app looks for updates (apps/mac/app/Info.plist, SUFeedURL): the appcast scripts/release.sh
-// writes and uploads. "//" starts a comment in an xcconfig, so the empty $() keeps the URL whole.
+// Where the Mac app looks for updates (apps/mac/app/Info.plist, SUFeedURL, through OBY_FEED_URL): the
+// appcast scripts/release.sh writes and uploads. A full build follows its own appcast beside it, so it
+// never updates to the launch build, nor the launch build to it. "//" starts a comment in an xcconfig,
+// so the empty $() keeps the URL whole.
 OBY_APPCAST_URL = https:/$()/downloads.oby.deskree.com/appcast.xml
+OBY_FULL_APPCAST_URL = https:/$()/downloads.oby.deskree.com/appcast-full.xml
+
+// 0 for the launch build, 1 for a full build (docs/release.md, "Full builds"): with cloudflared, obi-vm
+// and obid's web app, following OBY_FULL_APPCAST_URL. Set 1 on the command line or in
+// Signing.local.xcconfig.
+OBY_FULL_BUILD = 0
+OBY_FEED_URL_0 = $(OBY_APPCAST_URL)
+OBY_FEED_URL_1 = $(OBY_FULL_APPCAST_URL)
+OBY_FEED_URL = $(OBY_FEED_URL_$(OBY_FULL_BUILD))
 
 // The control plane the Mac app signs in with for remote access (apps/mac/app/Info.plist,
 // ObyControlPlaneURL; Engine/ControlPlane.swift): Deskree's own instance. Running your own
