@@ -167,7 +167,7 @@ nonisolated struct Job: Codable, Identifiable, Equatable, Sendable {
         case id, request, agent, account, repo, branch, base, pr, kind, task, title, status, step, summary, session, created,
              started, finished, commits, published, pushed, publishError, issue, rounds, round, check, model, notes, pipeline,
              pullRequest, pullRequestError, dismissed, reviewing, review, reviewError, reviewOf, outgoing, question, mode, permission, moves, waiting, report,
-             conversation, turn, artifacts, followUpOf, tetrix, activity, usage, windowShare, estimate, checks, scan, diff, context,
+             conversation, turn, artifacts, followUpOf, routine, tetrix, activity, usage, windowShare, estimate, checks, scan, diff, context,
              reason, nextStep, resumesAt, stalled
         case stoppedMerge = "mergeNeedsYou"
         case stoppedReview = "reviewNeedsYou"
