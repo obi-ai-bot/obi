@@ -90,6 +90,9 @@ nonisolated struct TalkTurn: Equatable, Sendable {
     /// Escape: nothing is sent.
     mutating func cancelled() { relistening = false }
 
+    /// Stop all, by its keys or the menu: the words waiting don't listen again once their reply shows.
+    mutating func end() { handsFreeAsk = false }
+
     /// The words were written down. Words asked decide whether their reply listens again; a bare
     /// "stop" or "never mind", nothing heard, or a press while they were written down ends hands-free. True when nothing heard is worth
     /// saying ("Oby didn't catch that"): not when the press only ended Oby's listening again by

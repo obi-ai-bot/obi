@@ -7,7 +7,7 @@ import UserNotifications
 /// pill, Stop all, and the alerts that open the window on a job. Nothing of it draws over the screen
 /// but the pill.
 final class IslandController {
-    let desk = Desk()
+    let desk: Desk
     let feed = RunnerFeed()
     /// Sparkle (apps/mac/app/Updater.swift).
     let updater = Updater()
@@ -42,9 +42,27 @@ final class IslandController {
     /// else it goes to the latest conversation (#493). The app sets it.
     var windowShowsConversation: () -> Bool = { false }
 
-    init() {
+    /// What the talk key's turn reaches beyond Oby's own state. Tests give their own, so nothing
+    /// reaches a brain, Notification Center, VoiceOver, a modal guide or GitHub.
+    struct Outside {
+        /// The words go to Oby, as if typed.
+        var ask: (String) -> Void
+        /// An alert, replacing an earlier one with the same id.
+        var post: (_ title: String, _ id: String) -> Void = { IslandController.alert($0, id: $1) }
+        /// VoiceOver says it now, cutting off what it was saying.
+        var announce: (String) -> Void = { IslandController.announce($0) }
+        var guideGlobeKey: () -> Void = { Task { GlobeKey.guideOnce() } }
+        /// The repositories the voice listens for.
+        var knownRepos: () async -> [String] = { (try? await Workspace.knownRepos()) ?? [] }
+    }
+    var outside: Outside
+
+    /// Tests give a desk of their own and a voice with no microphone (`Voice(saying:)`).
+    init(desk: Desk = Desk(), voice: Voice = Voice()) {
+        self.desk = desk
         desk.issueSync.enabled = true
-        model = IslandModel(desk: desk, feed: feed, updater: updater, availability: availability)
+        outside = Outside(ask: { [desk] in desk.ask($0, spoken: true) })
+        model = IslandModel(desk: desk, feed: feed, updater: updater, availability: availability, voice: voice)
         model.remote = remote
         model.vault = .shared
         // A restart never interrupts a check this Mac runs for the runner.
@@ -236,8 +254,9 @@ final class IslandController {
     }
 
     /// Stop all (⌃⌥⌘. or the menu): every job on this Mac and on the runner stops now, and an alert
-    /// says how many.
+    /// says how many. The words waiting for a reply don't listen again once it shows.
     func stopAll() {
+        talkTurn.end()
         let here = desk.stopAll()
         Task {
             var line: String
@@ -249,18 +268,18 @@ final class IslandController {
             } catch {
                 line = "Stopped \(here) here. Couldn't reach the runner: \(error.localizedDescription)"
             }
-            Self.alert(line, id: "stop-all")
+            outside.post(line, "stop-all")
         }
     }
 
     /// The talk key: a turn starts, with the pill while the window isn't showing it, and what you
     /// said goes to the planner as if typed.
-    private func talk(_ event: TalkKey.Event) {
+    func talk(_ event: TalkKey.Event) {
         let voice = model.voice
         switch event {
         case .press:
             // The reply the pill shows goes, and VoiceOver stops reading it: you come first.
-            if talkTurn.pressed() { Self.announce(" ") }
+            if talkTurn.pressed() { outside.announce(" ") }
             hideReply()
         case .start(let key):
             talkTurn.started()
@@ -286,7 +305,7 @@ final class IslandController {
     private func listen(key: TalkKey.Key) {
         // Your own jobs' repositories first: they're the ones you're likeliest to name.
         model.voice.start(key: key, context: Voice.context(repos: desk.jobs.map(\.repo) + repos))
-        if repos.isEmpty { Task { repos = (try? await Workspace.knownRepos()) ?? [] } }
+        if repos.isEmpty { Task { repos = await outside.knownRepos() } }
         model.listening = true
         setTurn(.listening)
     }
@@ -294,7 +313,7 @@ final class IslandController {
     /// Oby answered what you said: the pill shows the reply's first lines in writing, never aloud
     /// (the owner's decision of 2026-10-23), and when those words were asked hands-free Oby listens
     /// again for yours at once, unless a talk key is down already: that press is yours (`TalkTurn`).
-    private func replied(_ text: String, spoken: Bool) {
+    func replied(_ text: String, spoken: Bool) {
         guard spoken else { return }
         let after = talkTurn.replied(text, keyDown: talkKey.busy, talking: model.voice.phase != .idle || model.listening)
         if after == .end {
@@ -316,14 +335,14 @@ final class IslandController {
             setTurn(.replied)
         case .show(announce: true):
             setTurn(.replied)
-            Self.announce(text)
+            outside.announce(text)
         case .carryOn, .end:
             break
         }
     }
 
     /// VoiceOver says `text` now, cutting off what it was saying.
-    private static func announce(_ text: String) {
+    static func announce(_ text: String) {
         NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
                              userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
@@ -355,7 +374,7 @@ final class IslandController {
         if !said.isEmpty {
             feed.conversations.nextToLatest = Self.toLatest(said, showsConversation: windowShowsConversation())
             if !cancels { feed.talking(said) }
-            desk.ask(said, spoken: true)
+            outside.ask(said)
         }
         // Talking again already: that's what shows.
         guard model.voice.phase == .idle, model.listening else { return }
@@ -364,13 +383,13 @@ final class IslandController {
             let problem = model.voice.problem
             setTurn(nil)
             // A press that only ends Oby's listening again says nothing.
-            if complain { Self.alert(problem ?? "Oby didn't catch that", id: "talk") }
+            if complain { outside.post(problem ?? "Oby didn't catch that", "talk") }
         } else if cancels {
             setTurn(nil)
         } else {
             watchThinking()
             // Not in the voice's queue: the alert waits for you, and talking mustn't.
-            if key == .fn { Task { GlobeKey.guideOnce() } }
+            if key == .fn { outside.guideGlobeKey() }
         }
     }
 

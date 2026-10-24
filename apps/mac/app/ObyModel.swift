@@ -11,7 +11,7 @@ final class IslandModel {
     /// The update waiting to be installed, if any (apps/mac/app/Updater.swift).
     let updater: Updater
     /// What you say while you hold fn.
-    let voice = Voice()
+    let voice: Voice
     /// What goes with the next request: screenshots, what you copied.
     let tray = Tray()
     /// The talk key is down (or hands-free is on), and what you said isn't sent yet.
@@ -29,8 +29,9 @@ final class IslandModel {
     var remote: RemoteAccess?
     var vault: Vault?
 
-    @MainActor init(desk: Desk, feed: RunnerFeed, updater: Updater = Updater(), availability: MacAvailability) {
+    @MainActor init(desk: Desk, feed: RunnerFeed, updater: Updater = Updater(), availability: MacAvailability, voice: Voice? = nil) {
         self.desk = desk
+        self.voice = voice ?? Voice()
         self.feed = feed
         self.availability = availability
         self.updater = updater
