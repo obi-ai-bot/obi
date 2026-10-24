@@ -93,7 +93,7 @@ A notification is a decision you can make from where it lands, or news that work
 
 ### Talking to Oby out loud
 
-The window's voice button listens on a click, until a second click or Stop, at most a minute, and leaves the words as a draft (Sangam's button; AGENTS.md). On the Mac, fn held (or fn + Space) talks from any app; on the iPhone a tap on the mic does what the click does. Nothing else ever opens the microphone.
+The window's voice button listens on a click, until a second click or Stop, at most a minute, and leaves the words as a draft (Sangam's button; AGENTS.md). On the Mac, fn held (or fn + Space) talks from any app; on the iPhone a tap on the mic does what the click does. Nothing else ever opens the microphone. Your words show as you talk, in the window and, with the window closed, in the talk pill; Oby answers in writing, never aloud (the owner's decision of 2026-10-23). The pill shows "Thinking", then the first lines of the reply for a few seconds or until the next press; after fn + Space, Oby listens again once its reply shows.
 
 ### Other people's Obys: the Obysphere
 

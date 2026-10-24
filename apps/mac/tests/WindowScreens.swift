@@ -257,17 +257,18 @@ struct WindowScreens {
         try await shoot("mac-task-rename", model: model(), state: state)
     }
 
-    /// The talk key's pill with the window closed (#528), at each stage of a turn.
-    @Test(arguments: [TalkStage.listening, .thinking, .speaking])
+    /// The talk key's pill with the window closed (#528), at each stage of a turn: Oby's reply in writing.
+    @Test(arguments: [TalkStage.listening, .thinking, .replied])
     func pill(_ stage: TalkStage) async throws {
         let model = model()
         model.turn = stage
+        if stage == .replied { model.reply = "The vault tests pass on dev. Two were slow; I opened a task to look at them." }
         let pill = TalkPillPanel(model: model)
         pill.place()
         pill.orderFrontRegardless()
         defer { pill.close() }
         try await Task.sleep(for: .milliseconds(500))
-        try await save("mac-pill-\(stage.word.lowercased())", window: pill)
+        try await save("mac-pill-\(stage)", window: pill)
     }
 
     /// Sangam's Settings building blocks (apps/shared/SettingsComponents.swift), on made-up settings:
@@ -281,7 +282,6 @@ struct WindowScreens {
                     SetRow("URL") { SetField("Runner URL", text: .constant(""), prompt: "http://tetrix-lab:8790") }
                 }
                 SetGroup("Voice") {
-                    SetRow("Speak replies to spoken requests") { Toggle("Speak replies", isOn: .constant(true)).toggleStyle(.set) }
                     SetRow("Keep my Mac available") { Toggle("Keep my Mac available", isOn: .constant(false)).toggleStyle(.set) }
                     SetRow("Speech language") { SetSelect("Speech language", selection: .constant("system"), options: [("system", "Mac language"), ("en-US", "English")]) }
                 }

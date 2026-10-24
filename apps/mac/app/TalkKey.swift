@@ -11,7 +11,7 @@ import CoreGraphics
 final class TalkKey {
     enum Key { case fn, controlOption }
     /// `press` comes the moment a talk key goes down, before anything else is known (it may turn
-    /// out to be a shortcut): Oby stops speaking on it.
+    /// out to be a shortcut): the reply the pill shows goes on it.
     enum Event { case press(Key), start(Key), handsFree, send, cancel }
 
     var on: (Event) -> Void = { _ in }

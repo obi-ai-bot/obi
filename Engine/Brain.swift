@@ -151,7 +151,7 @@ nonisolated struct Plan: Codable, Equatable, Sendable {
     /// Markdown that accompanies a short spoken reply.
     var details: String? = nil
 
-    /// How long a reply may be: a few short sentences, which the Mac also speaks.
+    /// How long a reply may be: a few short sentences, which the Mac's talk pill also shows.
     static let replyLength = 400
 
     static func decode(_ data: Data) throws -> Plan {

@@ -174,7 +174,7 @@ struct HomeView: View {
         }
     }
 
-    /// `spoken`: the draft has dictated words, so Oby may speak its reply.
+    /// `spoken`: the draft has dictated words, so the thread says "You, by voice".
     private func send(spoken: Bool) {
         phone.ask(text, spoken: spoken, new: true)
         text = ""

@@ -12,7 +12,7 @@ struct Composer: View {
     var prompt = "Reply to Oby…"
     /// The keyboard's focus, owned by the screen so it can take it after an edit or let it go.
     var typing: FocusState<Bool>.Binding
-    /// Sends the field; true when it has dictated words, so Oby may speak its reply.
+    /// Sends the field; true when it has dictated words ("You, by voice").
     let onSend: (_ spoken: Bool) -> Void
     /// While Oby works on a turn: Stop takes the end slot until there's something to send.
     var onStop: (() -> Void)? = nil

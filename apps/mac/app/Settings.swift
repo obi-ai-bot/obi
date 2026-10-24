@@ -64,8 +64,6 @@ struct GeneralSettingsView: View {
     @State private var rules: [PermissionRule] = []
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
     @State private var problem: String?
-    /// Oby reads its reply out loud when you talked to it (apps/mac/app/Speech.swift).
-    @AppStorage(Speaker.setting) private var speaks = true
 
     var body: some View {
         SetGroup(problem: problem) {
@@ -103,7 +101,7 @@ struct GeneralSettingsView: View {
             }
         }
         .onChange(of: mode) { _, chosen in if desk.defaultMode != chosen { desk.defaultMode = chosen } }
-        VoiceSection(speaks: $speaks, footer: "When you talk to Oby with fn, it answers out loud and, after fn + Space, listens again for your answer until you press fn or say “stop”. Typed messages are answered in writing. Pressing fn stops it mid-sentence.")
+        VoiceSection(footer: "When you talk to Oby with fn, your words show as you speak and Oby answers in writing. After fn + Space, it listens again for your answer once its reply shows, until you press fn or say “stop”.")
         NotificationsSection()
     }
 

@@ -66,7 +66,7 @@ final class Desk {
     /// Called when a job ends, for the notch's one line.
     var onFinish: (Job) -> Void = { _ in }
     /// Called with Oby's reply when a turn of `ask` ends, and whether the user spoke it (the Mac
-    /// then speaks the reply). Not for a turn that was cancelled or replaced.
+    /// then shows the reply in the talk key's pill). Not for a turn that was cancelled or replaced.
     var onReply: (_ text: String, _ spoken: Bool) -> Void = { _, _ in }
     /// Jobs and inbox items elsewhere for the brain's briefing: the runner's, on the Mac.
     @ObservationIgnored var elsewhere: () -> [Briefing.Place] = { [] }
@@ -632,7 +632,7 @@ final class Desk {
     /// The user said something: it joins the thread, and Oby thinks. The answer joins the thread
     /// too, or the island hears why not within `patience`. `shown` is what the thread shows when
     /// the brain gets more (an answer with its question). `spoken`: the user talked, so the Mac
-    /// speaks the reply. A bare "never mind", "stop" or "cancel" never reaches the brain: it ends
+    /// shows the reply in the talk key's pill. A bare "never mind", "stop" or "cancel" never reaches the brain: it ends
     /// the turn under way (its words leave the thread) and otherwise does nothing, so no job stops
     /// on a word; stopping work takes a job's name or "stop everything". Any other words replace
     /// the turn under way. `attachments` (a screenshot, what the user copied, as paths on this
@@ -883,7 +883,7 @@ final class Desk {
         return Array(turns[start..<end])
     }
 
-    /// What Oby says for a talk, as the thread shows it and the Mac speaks it: the question, or
+    /// What Oby says for a talk, as the thread and the talk key's pill show it: the question, or
     /// the reply. Nothing for nothing.
     static func reply(in talk: Talk) -> String? {
         switch talk {

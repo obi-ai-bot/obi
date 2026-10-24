@@ -13,15 +13,30 @@ struct WindowTalkTests {
         #expect(ListeningLine.hint(finishing: true, handsFree: true, key: "Control-Option") == "Writing it down…")
     }
 
-    /// The owner's decision on #528: listening, thinking, then speaking, only while a turn started by
-    /// the talk key is under way, and not over a window that shows it already.
+    /// The owner's decision on #528: the pill only while a turn started by the talk key is under way,
+    /// and not over a window that shows it already. And of 2026-10-23: your words as you say them,
+    /// "Thinking", then Oby's reply in writing, never "Speaking".
     @Test func thePillShowsOnlyForATalkTurnTheWindowIsNotShowing() {
-        #expect([TalkStage.listening, .thinking, .speaking].map(\.word) == ["Listening", "Thinking", "Speaking"])
-        for stage in [TalkStage.listening, .thinking, .speaking] {
+        for stage in [TalkStage.listening, .thinking, .replied] {
             #expect(TalkStage.shows(stage, windowShowsTalk: false))
             #expect(!TalkStage.shows(stage, windowShowsTalk: true))
         }
         #expect(!TalkStage.shows(nil, windowShowsTalk: false))
+        #expect(TalkStage.line(.listening, words: "", problem: nil) == "Listening")
+        #expect(TalkStage.line(.listening, words: "fix the vault tests", problem: nil) == "fix the vault tests")
+        #expect(TalkStage.line(.listening, words: "", problem: "Oby can't use the microphone.") == "Oby can't use the microphone.")
+        #expect(TalkStage.line(.thinking, words: "fix the vault tests", problem: nil) == "Thinking")
+        #expect(TalkStage.line(.replied, words: "fix the vault tests", problem: nil) == nil, "the reply shows on its own")
+        #expect(TalkStage.line(nil, words: "", problem: nil) == nil)
+    }
+
+    /// Once Oby's reply shows, hands-free words (fn + Space) have Oby listen again at once; held-key
+    /// words leave the reply showing; a turn you started meanwhile carries on.
+    @Test func handsFreeListensAgainOnceTheReplyShows() {
+        #expect(TalkStage.afterReply(handsFree: true, talking: false) == .listening)
+        #expect(TalkStage.afterReply(handsFree: false, talking: false) == .replied)
+        #expect(TalkStage.afterReply(handsFree: true, talking: true) == nil)
+        #expect(TalkStage.afterReply(handsFree: false, talking: true) == nil)
     }
 
     /// A regular Mac app (#528): a Dock icon, and its own menus while its window is in front, with

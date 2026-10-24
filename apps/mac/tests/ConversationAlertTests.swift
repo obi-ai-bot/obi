@@ -266,6 +266,25 @@ struct ConversationAlertTests {
         #expect(shown.list.count == 3)
     }
 
+    /// The talk key's words, with the pill up: Oby's answer in their conversation shows in the pill
+    /// (workstream V), so it doesn't alert as well; another conversation's does, and so does theirs
+    /// once the pill is gone.
+    @Test func anAnswerThePillShowsDoesntAlert() {
+        let (feed, shown, _) = Self.following()
+        feed.conversations.take([RunnerConversation(id: "c1", title: "Vault tests"), RunnerConversation(id: "c2", title: "Deploy")])
+        var pill = true
+        feed.pillShowsTalk = { pill }
+        feed.talking("how are the vault tests ")
+        feed.heard(Turn(date: .now, who: .user, text: "how are the vault tests", conversation: "c1"), TurnExtras())
+        feed.heard(Turn(id: "t-\(UUID().uuidString)", date: .now, who: .oby, text: "They pass on dev.", conversation: "c1"), TurnExtras())
+        #expect(shown.list.isEmpty, "the pill shows it")
+        feed.heard(Turn(id: "t-\(UUID().uuidString)", date: .now, who: .oby, text: "Deployed.", conversation: "c2"), TurnExtras())
+        #expect(shown.list.map(\.id) == ["turn-c2"], "not the pill's conversation")
+        pill = false
+        feed.heard(Turn(id: "t-\(UUID().uuidString)", date: .now, who: .oby, text: "Two were slow.", conversation: "c1"), TurnExtras())
+        #expect(shown.list.map(\.id) == ["turn-c2", "turn-c1"], "the pill is gone")
+    }
+
     /// Words from an alert go to its conversation; the window's own new conversation isn't touched.
     @Test func wordsFromAnAlertGoToTheirConversation() async throws {
         let (feed, shown, _, stub) = Self.following { request in

@@ -84,7 +84,7 @@ Each screen: what it shows, and what in obid fills it.
 
 | Page | What it shows | From |
 |---|---|---|
-| General | Open at login; Permissions on this Mac (default mode, saved rules with Remove); Voice (speak replies to spoken requests, speech language); Notifications | the Mac itself |
+| General | Open at login; Permissions on this Mac (default mode, saved rules with Remove); Voice (speech language; Oby answers in writing, never aloud, the launch build's decision of 2026-10-23); Notifications | the Mac itself |
 | Runner | Runner: This Mac / Remote (URL), login item, status with a green dot, job worktrees' size, last cleanup; This Mac: keep my Mac available; Permissions (the runner's default mode and rules); Checks on this Mac (merge checks, build and test agents' work); Apple Watch without iPhone; Publishing key | `GET /v1/status` (`runner`, `cleanup`, `permissions`), `GET`/`PUT /v1/settings/permissions`, `GET`/`DELETE /v1/permissions/rules`, `GET /v1/checks/next`, `GET`/`DELETE /v1/watches`, `POST /v1/devices` |
 | Remote access | reach this Mac from anywhere, hostname, status, Forget This Mac (signs in with Apple or Google the first time, never keeping an email, since 2026-10-20) | the Mac and Oby's control plane |
 | Accounts | "Most room: Deskree on Codex, 88% left this week"; each tool's accounts (name, "Paid by Deskree · Resets Thursday", a meter, "36% used", Remove); Add an account (Tool, Name, Paid by, Add Account) | `GET /v1/status` `accounts`, `accounts` events, `POST /v1/accounts/{id}/reserve` |

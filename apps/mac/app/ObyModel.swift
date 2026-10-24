@@ -12,8 +12,6 @@ final class IslandModel {
     let updater: Updater
     /// What you say while you hold fn.
     let voice = Voice()
-    /// Oby's reply, spoken, when you talked (apps/mac/app/Speech.swift).
-    let speaker = Speaker()
     /// What goes with the next request: screenshots, what you copied.
     let tray = Tray()
     /// The talk key is down (or hands-free is on), and what you said isn't sent yet.
@@ -21,6 +19,9 @@ final class IslandModel {
     /// Where the talk key's turn is, for the pill over the screen while the window isn't showing it
     /// (apps/mac/app/TalkPill.swift); nil when no turn started by the key is under way.
     var turn: TalkStage?
+    /// Oby's reply to the talk key's words, its first lines, while the pill shows it: a few seconds,
+    /// or until the next press.
+    var reply: String?
     /// The runner's job whose alert's Publish was clicked: its screen starts publishing, once.
     var publishing: String?
     /// Settings' Remote access (apps/mac/app/RemoteAccess.swift), and the vault its Vault page lists:
