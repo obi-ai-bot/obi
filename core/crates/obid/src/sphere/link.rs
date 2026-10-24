@@ -1899,7 +1899,8 @@ impl Link {
         };
         if let Some(membership) = revoked {
             let _ = self.files.save_membership(&membership);
-            // The sender and the clock stop now, not at their next wakeup: what's open is settled.
+            // The sender and the clock stop now, not at their next wakeup: what's open is settled
+            // here, its peers not told.
             self.settle_on_revoke();
             self.outbox.notify_one();
             // The relay's socket stops serving phones now, not at its next check.
@@ -2754,25 +2755,27 @@ impl Link {
             |e| e.expires_at().is_some_and(|t| t <= now) && e.kind != "share_offer",
             true,
             "expired",
-            "expired",
+            Some("expired"),
         );
     }
 
     /// obid's membership was revoked: no open incoming request can be answered any more, and the
-    /// clock that would expire them has stopped with the sender. Each is settled by itself now,
-    /// declined with reason `unavailable`.
+    /// clock that would expire them has stopped with the sender. Each is settled here, `declined`
+    /// with its inbox item done, and its peer isn't told: the sender stops at revocation, so a
+    /// decline queued now would never go, and none is built.
     fn settle_on_revoke(&self) {
-        self.settle_open(|_| true, false, "declined", "unavailable");
+        self.settle_open(|_| true, false, "declined", None);
     }
 
-    /// Settles the open requests `due` picks: an incoming one goes to `settled` with a decline for
-    /// `reason` and its inbox item done; an outgoing one, if `outgoing`, goes to `settled`.
+    /// Settles the open requests `due` picks: an incoming one goes to `settled` with its inbox item
+    /// done, and a decline for `reason` queued when there is one; an outgoing one, if `outgoing`,
+    /// goes to `settled`.
     fn settle_open(
         &self,
         due: impl Fn(&Exchange) -> bool,
         outgoing: bool,
         settled: &str,
-        reason: &str,
+        reason: Option<&str>,
     ) {
         let now = time::now();
         let mut changed = Vec::new();
@@ -2796,9 +2799,15 @@ impl Link {
                 exchange.state = settled.into();
                 exchange.updated = now;
                 if exchange.direction == "incoming" {
-                    let decline =
-                        self.reply_locked(&state, &exchange, "decline", json!({"reason": reason}));
-                    exchange.outbox.extend(decline);
+                    if let Some(reason) = reason {
+                        let decline = self.reply_locked(
+                            &state,
+                            &exchange,
+                            "decline",
+                            json!({"reason": reason}),
+                        );
+                        exchange.outbox.extend(decline);
+                    }
                     if let Some(item) = exchange
                         .inbox_item
                         .as_ref()
@@ -5998,7 +6007,8 @@ mod tests {
     }
 
     /// Revoked, obid can answer no request any more: each open incoming one is settled, its inbox
-    /// item done; an ended one, and one this Obi sent, are left as they are.
+    /// item done, with no decline queued (the sender has stopped); an ended one, and one this Obi
+    /// sent, are left as they are.
     #[tokio::test]
     async fn a_revoke_settles_open_incoming_requests() {
         let (link, home, _stop) = sender_link("sender-revoke", false);
@@ -6017,6 +6027,13 @@ mod tests {
         let mut open = Exchange::new("incoming", request("c-open"), "obi-ernesto".into(), None);
         open.state = "inbox".into();
         open.inbox_item = Some(item.id.clone());
+        let mut answering = Exchange::new(
+            "incoming",
+            request("c-answering"),
+            "obi-ernesto".into(),
+            None,
+        );
+        answering.state = "answering".into();
         let mut done = Exchange::new("incoming", request("c-done"), "obi-ernesto".into(), None);
         done.state = "done".into();
         let mut sent = Exchange::new("outgoing", request("c-sent"), "obi-ernesto".into(), None);
@@ -6024,14 +6041,20 @@ mod tests {
         {
             let mut state = link.lock();
             state.inbox.insert(item.id.clone(), item.clone());
-            for e in [&open, &done, &sent] {
+            for e in [&open, &answering, &done, &sent] {
                 state.exchanges.insert(e.correlation_id.clone(), e.clone());
             }
         }
 
         link.settle_on_revoke();
         let state = link.lock();
-        assert_eq!(state.exchanges["c-open"].state, "declined");
+        for cid in ["c-open", "c-answering"] {
+            assert_eq!(state.exchanges[cid].state, "declined");
+            assert!(
+                state.exchanges[cid].outbox.is_empty(),
+                "no decline for {cid}"
+            );
+        }
         assert!(state.inbox[&item.id].done.is_some());
         assert_eq!(state.exchanges["c-done"].state, "done");
         assert_eq!(state.exchanges["c-sent"].state, "sent");
