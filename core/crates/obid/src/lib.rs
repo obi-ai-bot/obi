@@ -316,6 +316,7 @@ pub async fn serve(
     let devices = devices::Devices::open(&config.home);
     let paired = gateway::Gateway::open(&config.home);
     let relay = relay::Relay::open(&config.home);
+    link.use_relay(relay.clone());
     let broker_host = if cfg!(target_os = "linux") {
         format!("http://10.0.2.2:{}", bound.port())
     } else {

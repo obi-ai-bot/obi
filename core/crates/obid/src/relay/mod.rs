@@ -69,6 +69,9 @@ const FRAMES_A_MINUTE: usize = 4_000;
 const BYTES_A_MINUTE: usize = 56 << 20;
 /// What the Mac's X25519 key is known by in crate::secrets: it never leaves obid.
 const KEY_SECRET: &str = "relay-key";
+/// A phone's new hello within this of its session's start is ignored: a leaked QR or a phone
+/// gone wrong can't make obid agree keys and welcome it faster than the lanes turn.
+const RESTART_EVERY: Duration = Duration::from_secs(1);
 /// The sealed `reset` on stream 0 that tells a phone its session is over.
 const OVER: &str = "The session is over: send a new hello.";
 
@@ -83,6 +86,7 @@ struct Kept {
 /// One phone's session: its envelopes' keys, its requests under way, and its lane's room.
 struct Live {
     epoch: u64,
+    started: Instant,
     sealer: Sealer,
     opener: Opener,
     last_stream: u32,
@@ -406,8 +410,16 @@ impl Relay {
         self.queued.notify_one();
     }
 
-    /// The phone's hello starts its session, replacing any before: the welcome to send.
+    /// The phone's hello starts its session, replacing any before: the welcome to send. A hello
+    /// within [`RESTART_EVERY`] of its session's start is ignored, before any key work.
     fn start(&self, device: &str, hello: &[u8]) -> Option<Vec<u8>> {
+        let recent = lock(&self.sessions)
+            .get(device)
+            .is_some_and(|l| l.started.elapsed() < RESTART_EVERY);
+        if recent {
+            tracing::debug!("the phone relay ignored a hello: its session just started");
+            return None;
+        }
         let kept = lock(&self.kept).clone()?;
         match kept.key.welcome(hello) {
             Ok(session) => {
@@ -417,6 +429,7 @@ impl Relay {
                     device.to_owned(),
                     Live {
                         epoch,
+                        started: Instant::now(),
                         sealer: session.sealer,
                         opener: session.opener,
                         last_stream: 0,
@@ -1096,6 +1109,32 @@ mod tests {
             frame: Frame::new(1, Kind::Data, vec![0; payload]),
             _room: None,
         }
+    }
+
+    /// A phone starts a session at most once a second; another phone isn't held up by it.
+    #[test]
+    fn a_phone_starts_over_at_most_once_a_second() {
+        let home = std::env::temp_dir().join(format!("obid-relay-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let relay = Relay::open(&home);
+        let mac = relay.kept().unwrap().key.public();
+        let hello = || envelope::Phone::hello(&mac).unwrap().hello;
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        assert!(relay.start(&a, &hello()).is_some());
+        let first = lock(&relay.sessions)[&a].epoch;
+        assert!(
+            relay.start(&a, &hello()).is_none(),
+            "a second hello within a second"
+        );
+        assert_eq!(lock(&relay.sessions)[&a].epoch, first, "the session stays");
+        assert!(relay.start(&b, &hello()).is_some(), "another phone's goes");
+        std::thread::sleep(RESTART_EVERY + Duration::from_millis(100));
+        assert!(
+            relay.start(&a, &hello()).is_some(),
+            "a second later it starts over"
+        );
+        assert_ne!(lock(&relay.sessions)[&a].epoch, first);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// One phone's long answer doesn't hold up another's: the lanes take turns, and a frame that
