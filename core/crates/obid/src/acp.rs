@@ -833,7 +833,7 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                         for (tool, input) in &calls {
                             let ruling = (self.decide)(tool, input);
                             match self.conn.settle(ruling).await {
-                                Ok(Answer::Allow) => {}
+                                Ok(Answer::Allow | Answer::AllowWith(_)) => {}
                                 Ok(deny) => {
                                     answer = deny;
                                     break;
@@ -846,7 +846,7 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                     }
                 };
                 let reply = match answer {
-                    Answer::Allow => match option(request, "allow_once") {
+                    Answer::Allow | Answer::AllowWith(_) => match option(request, "allow_once") {
                         Some(once) => selected(once),
                         None => {
                             self.notes.push(format!(
@@ -875,7 +875,7 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                     return;
                 };
                 let reply = match answer {
-                    Answer::Allow => {
+                    Answer::Allow | Answer::AllowWith(_) => {
                         self.plan_approved =
                             self.applied.as_deref() == Some(self.options.plan_mode.as_str());
                         json!({"outcome": {"outcome": "accepted"}})

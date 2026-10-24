@@ -509,12 +509,21 @@ pub enum PermissionNote {
 /// Who is told about permissions (the inbox: `crate::sphere::Link`).
 pub type PermissionHook = Arc<dyn Fn(PermissionNote) + Send + Sync>;
 
-/// A prompt waiting for the owner: the agent's call, its card, and where the answer goes.
+/// A prompt waiting for the owner: the agent's call, its card, and where the answer goes. An
+/// `AskUserQuestion` (#858) keeps its input and the owner's answers so far, one per question.
 struct Ask {
     call: Call,
     permission: Permission,
     reply: tokio::sync::oneshot::Sender<Answer>,
+    input: Value,
+    answers: Vec<String>,
 }
+
+/// Why words that aren't the owner's own don't answer the agent's question (#858).
+pub const QUESTION_IS_THE_OWNERS: &str =
+    "It waits for the owner to answer its question, in their inbox.";
+/// Why an answer to the agent's question (#858) isn't one.
+const QUESTION_NEEDS_AN_ANSWER: &str = "Answer its question with one of its options or your own words (up to 2,000 characters), or say no.";
 
 /// Why a permission wasn't answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2514,6 +2523,18 @@ impl Jobs {
         self.message_attaching(id, text, source, &[])
     }
 
+    /// [`Self::message`] with words the brain wrote (`message_job`, `oby_tell_job`): never the
+    /// answer to the agent's question, which is the owner's alone (#858), so refused while one
+    /// waits.
+    pub fn relay(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        source: Source,
+    ) -> Option<Result<Job, Refused>> {
+        self.message_as(id, text, source, &[], false)
+    }
+
     /// [`Self::message`] with files the owner attached (already checked to be in obid's
     /// attachments folder): they go with the follow-up the words start, and only with one.
     pub fn message_attaching(
@@ -2522,6 +2543,19 @@ impl Jobs {
         text: &str,
         source: Source,
         attachments: &[String],
+    ) -> Option<Result<Job, Refused>> {
+        self.message_as(id, text, source, attachments, true)
+    }
+
+    /// [`Self::message_attaching`]; `answers` says whether the words may answer the agent's
+    /// question (only the owner's own, as they wrote them, may).
+    fn message_as(
+        self: &Arc<Self>,
+        id: &str,
+        text: &str,
+        source: Source,
+        attachments: &[String],
+        answers: bool,
     ) -> Option<Result<Job, Refused>> {
         let job = self.get(id)?;
         let text = text.trim();
@@ -2591,6 +2625,21 @@ impl Jobs {
                 "It waits for the owner to approve its plan or send it back, in their inbox."
                     .into(),
             )));
+        }
+        // A question is answered only by the owner's own words, which are its answer (#858).
+        if let Some(question) = waiting.as_ref().filter(|p| p.is_question()) {
+            if !source.owners() || !answers {
+                return Some(Err(Refused(QUESTION_IS_THE_OWNERS.into())));
+            }
+            return Some(
+                self.answer_question(id, &question.id, text)
+                    .map_err(|e| match e {
+                        PermissionRefused::NoJob => Refused("There's no such job.".into()),
+                        PermissionRefused::NotWaiting(why) | PermissionRefused::Refused(why) => {
+                            Refused(why)
+                        }
+                    }),
+            );
         }
         if let Some(Permission { id: permission, .. }) = waiting {
             return Some(
@@ -2952,7 +3001,15 @@ impl Jobs {
         let plan = call.tool == "ExitPlanMode"
             && mode == Mode::Plan
             && Tool::from_id(&job.agent) == Some(Tool::Claude);
-        let verdict = if plan {
+        // The agent's question waits for the owner's own answer in every mode, Bypass too (#858):
+        // no mode or rule can answer it for them.
+        let question = call.tool == permissions::ASK_USER_QUESTION;
+        if question && call.questions.is_empty() {
+            let why = "Ask at least one question, each with its whole text and its options.";
+            self.answered(id, &call, worktree, Some(why));
+            return Ruling::Now(Answer::Deny(why.into()));
+        }
+        let verdict = if plan || question {
             permissions::Verdict::Ask
         } else {
             permissions::decide(&call, mode, &self.rules_for(&job.repo), &bounds)
@@ -2977,6 +3034,8 @@ impl Jobs {
                         call,
                         permission,
                         reply,
+                        input: input.clone(),
+                        answers: Vec::new(),
                     });
                     asks.len() == 1
                 };
@@ -3030,6 +3089,8 @@ impl Jobs {
             job.permission = first.clone();
             if first.as_ref().is_some_and(Permission::is_plan) {
                 job.step = "Waiting for your OK on the plan".into();
+            } else if first.as_ref().is_some_and(Permission::is_question) {
+                job.step = "Waiting for your answer".into();
             } else if first.is_some() {
                 job.step = "Waiting for your OK".into();
             } else if let Some(step) = step {
@@ -3054,9 +3115,12 @@ impl Jobs {
             };
             let mut kept = VecDeque::new();
             while let Some(ask) = asks.pop_front() {
-                // A secret or a plan waits for the owner's own answer: a new mode or rule never
-                // settles it.
-                if ask.permission.is_secret() || ask.permission.is_plan() {
+                // A secret, a plan or a question waits for the owner's own answer: a new mode or
+                // rule never settles it.
+                if ask.permission.is_secret()
+                    || ask.permission.is_plan()
+                    || ask.permission.is_question()
+                {
                     kept.push_back(ask);
                     continue;
                 }
@@ -3072,12 +3136,12 @@ impl Jobs {
             return;
         }
         let step = answered.first().map(|(ask, answer)| match answer {
-            Answer::Allow => format!("Allowed: {}", ask.permission.title),
+            Answer::Allow | Answer::AllowWith(_) => format!("Allowed: {}", ask.permission.title),
             Answer::Deny(_) => format!("Refused: {}", ask.permission.title),
         });
         for (ask, answer) in answered {
             let refused = match &answer {
-                Answer::Allow => None,
+                Answer::Allow | Answer::AllowWith(_) => None,
                 Answer::Deny(why) => Some(why.as_str()),
             };
             self.answered(id, &ask.call, &worktree, refused);
@@ -3107,6 +3171,17 @@ impl Jobs {
                 "Tell the agent something of up to 2,000 characters.".into(),
             ));
         }
+        // A question's no with words of the owner's own (the Mac's and the Watch's typed reply)
+        // is its answer, not a refusal (#858).
+        if decision == Decision::Deny
+            && let Some(words) = words
+            && self.lock().asks.get(id).is_some_and(|asks| {
+                asks.front()
+                    .is_some_and(|a| a.permission.id == permission && a.permission.is_question())
+            })
+        {
+            return self.answer_question(id, permission, words);
+        }
         let ask = {
             let mut state = self.lock();
             let asks = state.asks.get_mut(id);
@@ -3124,9 +3199,16 @@ impl Jobs {
                     "This one has no rule to save: allow it once instead.".into(),
                 ));
             }
+            // A question is answered with an option or words (`answer_question`); a no declines it.
+            if decision != Decision::Deny
+                && asks.front().is_some_and(|a| a.permission.is_question())
+            {
+                return Err(PermissionRefused::Refused(QUESTION_NEEDS_AN_ANSWER.into()));
+            }
             asks.pop_front().expect("one waits")
         };
         let plan = ask.permission.is_plan();
+        let question = ask.permission.is_question();
         let said = match decision {
             Decision::Allow if plan => permissions::APPROVE.to_owned(),
             Decision::Allow => permissions::ALLOW.to_owned(),
@@ -3137,6 +3219,9 @@ impl Jobs {
         let answer = match decision {
             Decision::Deny if plan => {
                 Answer::Deny(words.unwrap_or(permissions::PLAN_SENT_BACK).to_owned())
+            }
+            Decision::Deny if question => {
+                Answer::Deny(words.unwrap_or(permissions::QUESTION_DECLINED).to_owned())
             }
             Decision::Deny => Answer::Deny(words.unwrap_or(permissions::SAID_NO).to_owned()),
             _ => Answer::Allow,
@@ -3170,6 +3255,8 @@ impl Jobs {
             id,
             Some(if plan && decision == Decision::Deny {
                 "Planning again".to_owned()
+            } else if question {
+                "You didn't answer its question".to_owned()
             } else if plan {
                 "Plan approved".to_owned()
             } else if decision == Decision::Deny {
@@ -3178,6 +3265,79 @@ impl Jobs {
                 format!("Allowed: {title}")
             }),
         );
+        Ok(self.get(id).unwrap_or(job))
+    }
+
+    /// The owner answers the agent's waiting question (`AskUserQuestion`, #858): one of its
+    /// options by its label, several for a multiple choice, or their own words. With more of the
+    /// call's questions left, the next takes its place on a card of its own; after the last, the
+    /// agent hears every answer as the tool's (`updatedInput` with `answers`).
+    pub fn answer_question(
+        &self,
+        id: &str,
+        permission: &str,
+        answer: &str,
+    ) -> Result<Job, PermissionRefused> {
+        let job = self.get(id).ok_or(PermissionRefused::NoJob)?;
+        // The owner's words reach the agent without the vault's secrets, or not at all.
+        let answer = crate::vault::for_agent(answer.trim())
+            .map(|clean| crate::secrets::known().redact(&clean))
+            .map_err(|why| {
+                PermissionRefused::Refused(format!("Couldn't pass your answer on: {why}"))
+            })?;
+        let answer = answer.as_str();
+        let (settled, done) = {
+            let mut state = self.lock();
+            let Some(ask) = state
+                .asks
+                .get_mut(id)
+                .and_then(|asks| asks.front_mut())
+                .filter(|a| a.permission.id == permission)
+            else {
+                return Err(PermissionRefused::NotWaiting(
+                    "That question isn't waiting any more.".into(),
+                ));
+            };
+            let Some(asking) = ask.permission.question.clone() else {
+                return Err(PermissionRefused::Refused(
+                    "That isn't a question: allow it or say no.".into(),
+                ));
+            };
+            let Some(said) = permissions::question_answer(&asking.question, answer) else {
+                return Err(PermissionRefused::Refused(QUESTION_NEEDS_AN_ANSWER.into()));
+            };
+            ask.answers.push(said.clone());
+            let next = asking.index + 1;
+            let settled = (ask.permission.id.clone(), said);
+            if next < ask.call.questions.len() {
+                ask.permission =
+                    permissions::question_card(&ask.call, &permissions::new_id(), next);
+                (settled, None)
+            } else {
+                let ask = state
+                    .asks
+                    .get_mut(id)
+                    .and_then(VecDeque::pop_front)
+                    .expect("one waits");
+                (settled, Some(ask))
+            }
+        };
+        let (permission, said) = settled;
+        self.note(PermissionNote::Settled {
+            job: id.to_owned(),
+            permission,
+            answer: Some(said),
+        });
+        let step = match done {
+            Some(ask) => {
+                let updated =
+                    permissions::answered_input(&ask.input, &ask.call.questions, &ask.answers);
+                let _ = ask.reply.send(Answer::AllowWith(updated));
+                "You answered its question".to_owned()
+            }
+            None => "Waiting for your answer".to_owned(),
+        };
+        self.show(id, Some(step));
         Ok(self.get(id).unwrap_or(job))
     }
 
@@ -4552,8 +4712,8 @@ impl Jobs {
                     }
                     Ruling::Now(Answer::Deny(why))
                 }
-                Answer::Allow if obi_review => Ruling::Now(Answer::Allow),
-                Answer::Allow => jobs.rule_on(id, name, input, &worktree),
+                Answer::Allow | Answer::AllowWith(_) if obi_review => Ruling::Now(Answer::Allow),
+                Answer::Allow | Answer::AllowWith(_) => jobs.rule_on(id, name, input, &worktree),
             }
         };
         // The turn's own stop: the job's, and a loop's (an owner's job only).
@@ -11459,6 +11619,211 @@ mod tests {
             .unwrap();
         assert_eq!(approved.await.unwrap(), Answer::Allow);
         assert_eq!(jobs.get("j").unwrap().mode.as_deref(), Some("ask"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #858: Claude Code's `AskUserQuestion` waits for the owner in every mode, Bypass too: its
+    /// questions one after another, each answered by an option or the owner's words, then the
+    /// agent hears them all as the tool's input. A new mode, an allow or untrusted words don't
+    /// answer it; a no declines it; a stop drops it.
+    #[tokio::test]
+    async fn the_agents_question_waits_for_the_owners_answer() {
+        let root = std::env::temp_dir().join(format!("obid-question-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let mut job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        job.status = Status::Running;
+        job.mode = Some("bypass".into());
+        jobs.lock().jobs.insert("j".into(), job);
+        let worktree = root.join("worktree");
+        let input = json!({"questions": [
+            {"question": "Which store?", "header": "Store", "multiSelect": false,
+             "options": [{"label": "SQLite", "description": "One file"}, {"label": "Postgres"}]},
+            {"question": "Which checks?", "header": "Checks", "multiSelect": true,
+             "options": [{"label": "Unit"}, {"label": "Lint"}]}
+        ]});
+        let ask = || jobs.rule_on("j", permissions::ASK_USER_QUESTION, &input, &worktree);
+        let Ruling::Ask(answered) = ask() else {
+            panic!("Bypass answered the question by itself");
+        };
+        let job = jobs.get("j").unwrap();
+        let first = job.permission.clone().unwrap();
+        assert!(first.is_question() && first.rule.is_none() && first.always.is_none());
+        assert_eq!(first.title, "Answer the agent's question (1 of 2)");
+        assert_eq!(first.detail, "Which store?");
+        assert_eq!(job.step, "Waiting for your answer");
+        // Neither a mode, an allow nor someone else's words answer it.
+        jobs.set_mode("j", Mode::Bypass);
+        assert_eq!(jobs.get("j").unwrap().permission.unwrap().id, first.id);
+        assert!(matches!(
+            jobs.answer_permission("j", &first.id, Decision::Allow, None),
+            Err(PermissionRefused::Refused(_))
+        ));
+        assert!(
+            jobs.message("j", "SQLite", Source::Untrusted)
+                .unwrap()
+                .is_err()
+        );
+        assert!(matches!(
+            jobs.answer_question("j", &first.id, "  "),
+            Err(PermissionRefused::Refused(_))
+        ));
+        jobs.answer_question("j", &first.id, "sqlite").unwrap();
+        let second = jobs.get("j").unwrap().permission.unwrap();
+        assert_ne!(second.id, first.id);
+        assert_eq!(second.title, "Answer the agent's question (2 of 2)");
+        assert!(matches!(
+            jobs.answer_question("j", &first.id, "SQLite"),
+            Err(PermissionRefused::NotWaiting(_))
+        ));
+        // The owner's own words, here picking two options at once.
+        jobs.message("j", "unit, lint", Source::Owner)
+            .unwrap()
+            .unwrap();
+        let Answer::AllowWith(updated) = answered.await.unwrap() else {
+            panic!("the agent heard no answer");
+        };
+        assert_eq!(
+            updated["answers"],
+            json!({"Which store?": "SQLite", "Which checks?": "Unit, Lint"})
+        );
+        assert_eq!(updated["questions"], input["questions"]);
+        let job = jobs.get("j").unwrap();
+        assert!(job.permission.is_none());
+        assert_eq!(job.step, "You answered its question");
+        // A no declines it, the agent told to decide.
+        let Ruling::Ask(declined) = ask() else {
+            panic!("the question went through by itself");
+        };
+        let id = jobs.get("j").unwrap().permission.unwrap().id;
+        jobs.answer_permission("j", &id, Decision::Deny, None)
+            .unwrap();
+        assert_eq!(
+            declined.await.unwrap(),
+            Answer::Deny(permissions::QUESTION_DECLINED.into())
+        );
+        // A stop drops it: the agent's wait ends, and the card goes.
+        let Ruling::Ask(dropped) = ask() else {
+            panic!("the question went through by itself");
+        };
+        jobs.drop_asks("j");
+        assert!(dropped.await.is_err());
+        assert!(jobs.get("j").unwrap().permission.is_none());
+        // A call with no question to ask is refused at once.
+        let Ruling::Now(Answer::Deny(why)) =
+            jobs.rule_on("j", permissions::ASK_USER_QUESTION, &json!({}), &worktree)
+        else {
+            panic!("an empty question waited");
+        };
+        assert!(why.contains("at least one question"), "{why}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #858: every route the owner answers the agent's question by: a no with words (the Mac's
+    /// and the Watch's typed reply) is its answer, not a refusal; the answer reaches the agent
+    /// without the secrets obid knows; the brain's words (`relay`) never answer it.
+    #[tokio::test]
+    async fn the_agents_question_is_answered_by_the_owner_alone() {
+        let root = std::env::temp_dir().join(format!("obid-answer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = crate::config::Config::parse(
+            &serde_json::json!({"listen": "127.0.0.1:0", "home": root.join("home"), "owner": "o",
+                "repos": [{"repo": "o/r", "remote": "https://example.com/o/r.git"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let jobs = Jobs::open(
+            config,
+            crate::events::Events::new(),
+            Err("no sandbox".into()),
+        )
+        .unwrap();
+        let mut job = Job::new(
+            "j".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        job.status = Status::Running;
+        jobs.lock().jobs.insert("j".into(), job);
+        let worktree = root.join("worktree");
+        let input = json!({"questions": [{"question": "Which store?",
+            "options": [{"label": "SQLite"}, {"label": "Postgres"}]}]});
+        let ask = || jobs.rule_on("j", permissions::ASK_USER_QUESTION, &input, &worktree);
+        let waiting = || jobs.get("j").unwrap().permission.unwrap().id;
+
+        // The brain's words are refused, whoever it speaks for, and the question still waits.
+        let Ruling::Ask(answered) = ask() else {
+            panic!("the question went through by itself");
+        };
+        let id = waiting();
+        for source in [Source::Owner, Source::Confirmed] {
+            let Some(Err(Refused(why))) = jobs.relay("j", "SQLite", source) else {
+                panic!("the brain answered the question");
+            };
+            assert_eq!(why, QUESTION_IS_THE_OWNERS);
+        }
+        assert_eq!(waiting(), id);
+
+        // A no with the owner's words answers it with them, the secrets obid knows taken out.
+        let secret = "s3cr3t-token-858-value";
+        crate::secrets::known().learn("vault TEST_858", secret);
+        jobs.answer_permission(
+            "j",
+            &id,
+            Decision::Deny,
+            Some(&format!("Postgres, its password is {secret}")),
+        )
+        .unwrap();
+        let Answer::AllowWith(updated) = answered.await.unwrap() else {
+            panic!("a typed reply was heard as a refusal");
+        };
+        let said = updated["answers"]["Which store?"].as_str().unwrap();
+        assert!(
+            !said.contains(secret) && said.starts_with("Postgres"),
+            "{said}"
+        );
+        assert_eq!(jobs.get("j").unwrap().step, "You answered its question");
+
+        // A bare no still declines it; an option picked by name answers it.
+        let Ruling::Ask(declined) = ask() else {
+            panic!("the question went through by itself");
+        };
+        jobs.answer_permission("j", &waiting(), Decision::Deny, Some("  "))
+            .unwrap();
+        assert_eq!(
+            declined.await.unwrap(),
+            Answer::Deny(permissions::QUESTION_DECLINED.into())
+        );
+        let Ruling::Ask(picked) = ask() else {
+            panic!("the question went through by itself");
+        };
+        jobs.answer_permission("j", &waiting(), Decision::Deny, Some("sqlite"))
+            .unwrap();
+        let Answer::AllowWith(updated) = picked.await.unwrap() else {
+            panic!("the agent heard no answer");
+        };
+        assert_eq!(updated["answers"], json!({"Which store?": "SQLite"}));
         let _ = std::fs::remove_dir_all(&root);
     }
 

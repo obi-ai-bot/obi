@@ -460,7 +460,7 @@ extension InboxItem {
     /// "Failed · Mac runner notifications · waiting 3m": what kind of item, its job, how long it waited.
     nonisolated func line(now: Date = .now, words: InboxWords? = nil) -> String {
         let label = switch shownKind(words) {
-        case "question": "Question"
+        case "question", "agentQuestion": "Question"
         case "review": "Out of reviews"
         case "limit": "Out of usage"
         case "audit": "Issue audit"

@@ -2017,6 +2017,58 @@ fn message_plan(id: &str) -> String {
     .to_string()
 }
 
+/// #858: a job's agent's question is the owner's to answer: message_job refuses while it waits,
+/// and it still waits. The owner's answer reaches the agent without the vault's secrets, and none
+/// goes while the vault can't be read.
+#[test]
+fn only_the_owner_answers_a_jobs_question_and_without_vault_secrets() {
+    let folder = Folder::new("brain-question");
+    let obid = started(&folder);
+    let ask = json!({"tool": "AskUserQuestion", "input": {"questions": [{"question": "Which store?",
+        "options": [{"label": "SQLite"}, {"label": "Postgres"}]}]}});
+    let id = job_in(&obid, "Asker", &format!("ASK: {ask}"), "ask");
+    let waiting = within(30, "the job asks its question", || {
+        let job = get_job(&obid, &id);
+        job["permission"]["question"].is_object().then_some(job)
+    });
+    let permission = waiting["permission"]["id"].clone();
+    queue(&obid, &[message_plan(&id), reply("")]);
+    let answer = said(&obid, "tell the asker SQLite");
+    assert!(
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("It waits for the owner to answer its question"),
+        "{answer}"
+    );
+    let job = get_job(&obid, &id);
+    assert_eq!(job["permission"]["id"], permission, "{job}");
+    assert_eq!(job["status"], "running", "{job}");
+
+    let secret = ["vault-", "question/", "Z9k4+a=b"].concat();
+    vault_holds(&obid, &secret);
+    let post = |answer: &str| {
+        call(
+            &obid,
+            "POST",
+            &format!("/v1/jobs/{id}/permission"),
+            Some(&json!({"id": permission, "answer": answer})),
+        )
+    };
+    // A vault that can't be read passes nothing on, and the question still waits.
+    std::fs::write(obid.home.join("vault/secrets.json"), "not the vault").unwrap();
+    let refused = post("SQLite");
+    assert_eq!(refused.status, 503, "{}", refused.text);
+    vault_holds(&obid, &secret);
+    assert_eq!(get_job(&obid, &id)["permission"]["id"], permission);
+    let answered = post(&format!("Use the key {secret}"));
+    assert_eq!(answered.status, 200, "{}", answered.text);
+    let done = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body;
+    let summary = done["summary"].as_str().unwrap();
+    assert!(summary.starts_with("answer: allow answers:"), "{done}");
+    assert!(!summary.contains("Z9k4"), "{summary}");
+}
+
 /// What the fake agent of job `id` reported it heard last (`REPORT`).
 fn reported(obid: &Obid, id: &str) -> serde_json::Value {
     let text = std::fs::read_to_string(

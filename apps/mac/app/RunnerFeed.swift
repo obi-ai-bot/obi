@@ -60,7 +60,8 @@ final class RunnerFeed {
 
     /// What the brain's briefing may read of the inbox: everything but confirm items, which only the
     /// user answers (the brain can't name what it doesn't see).
-    var briefingInbox: [InboxItem] { inbox.filter { !isConfirm($0) } }
+    /// A job's agent's question (#858) is the user's alone to answer: the brain isn't told it.
+    var briefingInbox: [InboxItem] { inbox.filter { !isConfirm($0) && $0.kind != .agentQuestion } }
     /// The runner's accounts and their usage, as it last said: the brain tells them too.
     private(set) var accounts: [AccountState] = []
     /// obid's Tetrix, held once for every agent: read on connecting, then kept by its `tetrix`

@@ -211,7 +211,7 @@ impl Seen {
             || item.done.is_some()
             || item.id.starts_with("orchestrator-")
             // Already the owner's to decide: escalating would only leave a second item for it.
-            || matches!(item.kind.as_str(), "confirm" | "start" | "permission" | "plan" | "question" | "github")
+            || matches!(item.kind.as_str(), "confirm" | "start" | "permission" | "plan" | "question" | "github" | crate::sphere::inbox::QUESTION_KIND)
             // What someone said, told to the owner, and what a plug-in sent: never the brain's
             // to act on (#1124).
             || matches!(item.kind.as_str(), "watch" | "listen" | "pluginEvent")
@@ -448,7 +448,10 @@ impl Orchestration {
                 .and_then(|o| usize::try_from(o).ok()?.checked_sub(1))
                 .and_then(|o| item.options.get(o));
             let permitted = plan.answer.is_none()
-                && !matches!(item.kind.as_str(), "permission" | "plan" | "question")
+                && !matches!(
+                    item.kind.as_str(),
+                    "permission" | "plan" | "question" | crate::sphere::inbox::QUESTION_KIND
+                )
                 && picked.is_some_and(|o| INBOX_OPTIONS.contains(&o.as_str()));
             if !(belongs && permitted) {
                 return Err(escalate(

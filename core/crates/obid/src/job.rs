@@ -1359,6 +1359,7 @@ mod tests {
             rule: None,
             always: None,
             why: None,
+            question: None,
         });
         assert!(!job.stamp(t0 + 20));
         job.permission = None;

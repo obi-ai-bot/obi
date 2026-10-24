@@ -245,6 +245,10 @@ impl Briefing {
                     "the plan is quoted in {FILE}. Options: {}.",
                     item.options.join(" | ")
                 ),
+                // The agent's question and its options are its own words: none of them here.
+                crate::sphere::inbox::QUESTION_KIND => {
+                    "the job's agent asks the user a question; only the user answers it.".into()
+                }
                 // What a start item would run is the agent's (or the owner's) own words: only
                 // obid's first paragraph is here, the rest in the quoted file.
                 "start" => format!(
@@ -764,6 +768,9 @@ fn kind(kind: &str) -> &str {
     match kind {
         "permission" => "Permission",
         "plan" => "A job's plan, waiting for the user's own approval (Oby can't answer it)",
+        crate::sphere::inbox::QUESTION_KIND => {
+            "A job's question, waiting for the user's own answer (Oby can't answer it)"
+        }
         "obiRequest" => "Request from another Obi",
         "pluginEvent" => "Plug-in event",
         "confirm" => "Waiting for the user's own Confirm (Oby can't answer it)",

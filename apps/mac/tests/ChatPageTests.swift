@@ -149,6 +149,7 @@ struct ChatPageTests {
         #expect(AskKind.label("permission") == "Permission" && AskKind.label("limit") == "Out of usage")
         #expect(AskKind.label("failed") == "Failed" && AskKind.failed("failed") && AskKind.failed("merge"))
         #expect(!AskKind.failed("question") && !AskKind.failed("permission") && !AskKind.failed("review"))
+        #expect(AskKind.label("agentQuestion") == "Question" && !AskKind.failed("agentQuestion"))
         // GitHub work obid offers to start is an offer, never a failure.
         #expect(AskKind.label("github") == "Start it?" && !AskKind.failed("github"))
     }

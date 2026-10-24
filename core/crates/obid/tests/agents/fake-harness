@@ -36,7 +36,9 @@
 // call, the last as above.
 // As a job's agent: a prompt holding STALLS-ALWAYS, or any later one of that job, goes quiet for
 // two minutes (so obid's stall watch holds it), and one holding STALLS-ONCE only the first time; one
-// holding JOB-FAILS ends its turn with an error result, as an agent stopped mid-round;
+// holding JOB-FAILS ends its turn with an error result, as an agent stopped mid-round; one holding
+// JOB-ASKS-QUESTION asks AskUserQuestion ("Which store?") and ends its turn with
+// "answer: <behavior> <its updatedInput's answers>";
 // asked for its handoff note, it answers NOTE, which carries words that try to steer whoever reads
 // it; SPEND-TOKENS: <n> ends its turn saying it used n input tokens; JOB-COMMITS: <file> writes the
 // file in its worktree and commits it.
@@ -161,6 +163,12 @@ rl.on("line", (line) => {
     spawnSync("git", ["add", commits[1]]);
     spawnSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${commits[1]}`]);
     return say(`Added ${commits[1]}.`);
+  }
+  if (!conversation && prompt.includes("JOB-ASKS-QUESTION")) {
+    const questions = [{ question: "Which store?", options: [{ label: "SQLite" }, { label: "Postgres" }] }];
+    emit({ type: "control_request", request_id: "q1", request: { subtype: "can_use_tool", tool_name: "AskUserQuestion", input: { questions } } });
+    then = (answer) => say(`answer: ${answer.behavior} ${JSON.stringify(answer.updatedInput?.answers ?? null)}`);
+    return;
   }
   if (!conversation && prompt.includes("JOB-FAILS")) {
     result("it broke", true);

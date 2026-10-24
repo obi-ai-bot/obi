@@ -856,8 +856,8 @@ pub async fn publish(
 }
 
 /// `POST /v1/jobs/{id}/permission`: `{"id", "decision": "allow" | "always" | "deny", "message"}`,
-/// the owner's answer to the job's waiting permission. Returns the job, with the next waiting one
-/// or null.
+/// the owner's answer to the job's waiting permission, or `{"id", "answer"}` to the agent's
+/// question (#858). Returns the job, with the next waiting one or null.
 pub async fn permission(
     State(shared): State<Arc<Shared>>,
     Path(id): Path<String>,
@@ -868,12 +868,31 @@ pub async fn permission(
     }
     let value: Value = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "That isn't JSON."))?;
-    let shape =
-        "The body is {\"id\", \"decision\": \"allow\" | \"always\" | \"deny\", \"message\"}.";
+    let shape = "The body is {\"id\", \"decision\": \"allow\" | \"always\" | \"deny\", \"message\"}, or {\"id\", \"answer\"} for a question.";
     let permission = value
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, shape))?;
+    use crate::jobs::PermissionRefused;
+    let answered = match value.get("answer") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(answer)) if value.get("decision").is_none() => {
+            Some(shared.jobs.answer_question(&id, permission, answer))
+        }
+        Some(_) => return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, shape)),
+    };
+    if let Some(answered) = answered {
+        return match answered {
+            Ok(job) => Ok(json(StatusCode::OK, job.to_json())),
+            Err(PermissionRefused::NoJob) => Err(ApiError::new(StatusCode::NOT_FOUND, NO_JOB)),
+            Err(PermissionRefused::NotWaiting(why)) => {
+                Err(ApiError::new(StatusCode::CONFLICT, why))
+            }
+            Err(PermissionRefused::Refused(why)) => {
+                Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, why))
+            }
+        };
+    }
     let decision = value
         .get("decision")
         .and_then(Value::as_str)
@@ -884,7 +903,6 @@ pub async fn permission(
         Some(Value::String(text)) => Some(text.as_str()),
         Some(_) => return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, shape)),
     };
-    use crate::jobs::PermissionRefused;
     match shared
         .jobs
         .answer_permission(&id, permission, decision, message)

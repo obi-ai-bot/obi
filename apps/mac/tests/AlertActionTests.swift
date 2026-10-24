@@ -44,6 +44,11 @@ struct AlertActionTests {
         #expect(Alerts.alert(.permission, for: job(permission: long), conversation: nil).category.buttons.map(\.id) == ["deny", "open"])
         let plan = Permission(id: "p3", tool: "ExitPlanMode", title: "Approve the plan?", detail: "")
         #expect(Alerts.alert(.permission, for: job(permission: plan), conversation: nil).category.buttons.map(\.id) == ["deny", "open"])
+        // The agent's question (#858): no Allow, which obid refuses; a typed reply is its answer.
+        let asked = Permission(id: "p4", tool: "AskUserQuestion", title: "Answer the agent's question (1 of 1)", detail: "Which store?")
+        let question = Alerts.alert(.permission, for: job(permission: asked), conversation: nil)
+        #expect(question.category.buttons.map(\.id) == ["deny", "open"])
+        #expect(Alerts.answer(Alerts.replyButton, typed: "SQLite", info: info(question)) == .permission(job: "j", ask: "p4", .deny, message: "SQLite"))
         // The conversation's shell: the same rules.
         let shell = InboxItem(id: "shell-c1-p1", kind: .permission, job: "", title: "Run npm install",
                               text: "It installs software or reaches the network.\n\nnpm install", options: ["Allow", "Deny"], created: now)

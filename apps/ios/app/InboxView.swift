@@ -90,12 +90,14 @@ struct JobDecision: View {
     var body: some View {
         if let permission = job.permission, job.isActive {
             block {
-                AskCard(kind: "Permission", title: permission.title, detail: permission.detail, options: CardOption.permission(permission), busy: busy,
+                AskCard(kind: permission.isQuestion ? AskKind.label("agentQuestion") : "Permission", title: permission.title, detail: permission.detail,
+                        options: CardOption.permission(permission), busy: busy,
                         onChoose: { option in
                             guard let decision = RunnerPermission.Decision(rawValue: option.answer) else { return }
                             run { try await phone.answer(job, decision) }
                         })
-                OwnWords(words: $words, prompt: "No, and tell the agent why…", busy: busy) { text in run { try await phone.answer(job, .deny, message: text); words = "" } }
+                // On the agent's question (#858) obid takes a Deny with words as its answer.
+                OwnWords(words: $words, prompt: permission.isQuestion ? "Answer in your own words…" : "No, and tell the agent why…", busy: busy) { text in run { try await phone.answer(job, .deny, message: text); words = "" } }
             }
             .id(permission.id)
         } else if job.waitsForAnswer, let question = job.question {

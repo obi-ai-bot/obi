@@ -1865,7 +1865,7 @@ pub(super) fn reading(
     let key = if tool == "Read" { "file_path" } else { "path" };
     let input = json!({ key: path });
     match rule(tool, &input, bounds, &place.repos, &|| {}) {
-        Answer::Allow => Ok(taints(tool, &input, bounds, &place.repos)),
+        Answer::Allow | Answer::AllowWith(_) => Ok(taints(tool, &input, bounds, &place.repos)),
         Answer::Deny(why) => Err(why),
     }
 }

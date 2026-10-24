@@ -277,8 +277,10 @@ pub fn wanted(jobs: &[Job], inbox: &[Value]) -> Vec<(String, Alert)> {
         if let (Some(Notice::Permission), Some(permission)) = (notice(job), &job.permission) {
             let mut asks = alert(self::alert(job, Notice::Permission), true);
             // The answers its inbox item offers: Approve or Keep planning; Allow, Always allow
-            // or Deny; Allow or Deny.
-            asks.category = if permission.is_plan() {
+            // or Deny; Allow or Deny. The agent's own question's options are its own: only Open.
+            asks.category = if permission.is_question() {
+                "job"
+            } else if permission.is_plan() {
                 "plan"
             } else if permission.always.is_some() {
                 "permissionRule"
@@ -1329,6 +1331,7 @@ mod tests {
             rule: None,
             always: None,
             why: None,
+            question: None,
         }
     }
 

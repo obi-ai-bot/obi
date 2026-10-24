@@ -1294,6 +1294,54 @@ fn a_turn_starts_and_tells_at_most_ten() {
     }
 }
 
+/// #858: a job's agent's question is the owner's alone to answer: oby_tell_job is refused while
+/// it waits, and the question still waits; the owner's own words then answer it.
+#[test]
+fn oby_tell_job_never_answers_a_jobs_question() {
+    let (_folder, obid) = obid("harness-question", true);
+    let posted = call(
+        &obid,
+        "POST",
+        "/v1/jobs",
+        Some(
+            &json!({"job": {"repo": "obi-e2e/fixture-app", "kind": "research",
+            "task": "Pick a store. JOB-ASKS-QUESTION", "mode": "ask"}}),
+        ),
+    );
+    assert_eq!(posted.status, 201, "{}", posted.text);
+    let id = posted.body["id"].as_str().unwrap().to_owned();
+    let job = || call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    let waiting = within(60, "the job asks its question", || {
+        let job = job();
+        job["permission"]["question"].is_object().then_some(job)
+    });
+    let tell = format!(r#"OBY oby_tell_job {{"id": "{id}", "words": "SQLite"}}"#);
+    let told = said(&obid, json!({"said": tell, "new": true}));
+    assert!(
+        oby_said(&told).contains("refused: It waits for the owner to answer its question"),
+        "{}",
+        told.text
+    );
+    let after = job();
+    assert_eq!(
+        after["permission"]["id"], waiting["permission"]["id"],
+        "{after}"
+    );
+    // The owner's own words answer it.
+    let answered = call(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(&json!({"text": "postgres"})),
+    );
+    assert!(answered.status < 300, "{}", answered.text);
+    let done = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body;
+    assert_eq!(
+        done["summary"], r#"answer: allow {"Which store?":"Postgres"}"#,
+        "{done}"
+    );
+}
+
 /// A follow-up is a job a turn starts: it counts against the turn's ten, and a turn starts at most
 /// one follow-up of a job.
 #[test]

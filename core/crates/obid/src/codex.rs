@@ -537,7 +537,7 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
                 if let Answer::Deny(why) = &answer {
                     (self.on_event)(Event::Denied(why.clone()));
                 }
-                let action = if answer == Answer::Allow {
+                let action = if matches!(answer, Answer::Allow | Answer::AllowWith(_)) {
                     "accept"
                 } else {
                     "decline"
@@ -552,7 +552,7 @@ impl<D: Fn(&str, &Value) -> Ruling, E: FnMut(Event)> Run<D, E> {
         for (tool, input) in &calls {
             let ruling = (self.decide)(tool, input);
             match self.conn.settle(ruling).await {
-                Ok(Answer::Allow) => {}
+                Ok(Answer::Allow | Answer::AllowWith(_)) => {}
                 Ok(Answer::Deny(why)) => return self.decline(&id, params, why).await,
                 // Stopped while the owner was asked: the turn ends.
                 Err(_) => return,

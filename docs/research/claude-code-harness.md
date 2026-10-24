@@ -108,7 +108,7 @@ Each row lists one Claude Code mechanism, what each Oby brain does today, and th
 | O12 | Permission requests bubbled to the lead; denials fed back with "try a legitimate alternative or stop and explain" | `utils/swarm/permissionSync.ts`, `messages.ts:207-280` | ✅ inbox permission items, `answer_permission` with the user's words | 🟡 | | #134 |
 | O13 | Batch fan-out: 5–30 units in worktrees, each ends with `PR: <url>`, status table | `skills/bundled/batch.ts` | ✅ dispatches up to 10, epics (one job per sub-issue), the Lead with file-overlap awareness | 🟡 up to 10 | | |
 | O14 | Recurring schedules (cron with jitter and expiry) | `ScheduleCronTool` | 🟡 one-shot `start_when` | ❌ | #395 | #395 |
-| O15 | Multiple-choice questions with recommended first, multiSelect, previews | `AskUserQuestionTool` | 🟡 ≤3 options, recommended, free text | 🟡 | #391 | #391 |
+| O15 | Multiple-choice questions with recommended first, multiSelect, previews | `AskUserQuestionTool` | 🟡 ≤3 options, recommended, free text | 🟡 a job's `AskUserQuestion` reaches the owner in every mode (#858): its options, multiSelect, free text, one question after another; no previews or recommended yet | #391 | #391, #858 |
 
 ### 2.6 Persistence and observability
 
