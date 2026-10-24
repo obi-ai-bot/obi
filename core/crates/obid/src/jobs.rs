@@ -1105,8 +1105,9 @@ impl Jobs {
                 continue;
             }
             let clone = git::clone_path(&self.config.home, &job.repo);
-            remove_worktree(&clone, &self.worktree_path(&job.id)).await;
+            // Its HOME first: once the worktree is gone, so is what its runs kept there.
             let _ = std::fs::remove_dir_all(self.temp_path(&job.id));
+            remove_worktree(&clone, &self.worktree_path(&job.id)).await;
             tracing::info!("job {}: its worktree was cleaned up", job.id);
             self.update(&job.id, |j| j.worktree = None);
             removed += 1;

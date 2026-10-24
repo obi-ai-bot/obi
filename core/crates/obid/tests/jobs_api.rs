@@ -1795,9 +1795,15 @@ fn a_jobs_home_stays_until_its_worktree_is_cleaned_up() {
     // Clear done settles it, and its worktree goes, with its HOME.
     let cleared = request(&obid, "POST", "/v1/clear", None);
     assert_eq!(cleared.status, 200, "{}", cleared.text);
-    until(&obid, &id, |_| {
-        !obid.home.join("worktrees").join(&id).exists()
-    });
+    let worktree = obid.home.join("worktrees").join(&id);
+    let give_up_at = Instant::now() + Duration::from_secs(90);
+    while worktree.exists() {
+        assert!(
+            Instant::now() < give_up_at,
+            "its worktree stayed: {worktree:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert!(!home.exists(), "{home:?}");
 }
 
