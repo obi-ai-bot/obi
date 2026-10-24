@@ -15,27 +15,28 @@ Sizes: **S** under a day, **M** a few days, **L** a week or more. `file:line` re
 
 ## 1. Today, from scratch
 
-What a person does now to go from a new Mac and iPhone to a working Oby on obid, with Oby 0.3.0 and the launch build (AGENTS.md, "The launch build").
+What a person does now to go from a new Mac and iPhone to a working Oby on obid, with the next release, the launch build (AGENTS.md, "The launch build"; on `dev`). 0.3.0 predates it: it shows every page and connector, and its repositories go in `config.json`.
 
 **On the Mac**
 
 1. Install Xcode's command-line tools (for git) and at least one agent CLI (`claude`; `codex`, `cursor-agent` if wanted), each signed in with its own login (`claude auth login`, `codex login`). For a missing one, FirstLaunch still says "Not installed" or offers a Cursor install command to copy (`apps/mac/app/FirstLaunch.swift`).
-2. Download [Oby 0.3.0](https://downloads.oby.deskree.com/Oby-0.3.0.dmg) and open it. It updates itself (Sparkle, `SUFeedURL` in `apps/mac/app/Info.plist`). Oby.app carries obid (`Contents/Helpers/obid`) and GitHub's CLI (`Contents/MacOS/gh`; `apps/mac/app/Tools/bundle-obid.sh`, `bundle-gh.sh`), so nobody installs `gh`, Rust or install.sh. The app registers obid as its login item with `SMAppService` (`apps/mac/app/LoginItem.swift`, `apps/mac/app/Tools/com.deskree.oby.obid.plist`): obid starts with the app and keeps running while the window is closed. It unregisters the Swift runner (`oby-runner`) older builds registered, and moves an install.sh obid over.
-3. Nothing to edit. On its first run obid writes its own `config.json`, with the gateway on `127.0.0.1:8810` and Claude Code's default login, Codex's too when it's on the login shell's PATH (`core/crates/obid/src/app.rs`). At every start it finds each tool's own login; a fresh obid lists the ones it finds by itself (#1353), and turns `claudeKeychain` on when Claude Code's login is only in the Keychain. Not yet: a Cursor login kept in the macOS Keychain isn't found.
-4. GitHub: when `gh` is already signed in on the Mac, obid uses that login; otherwise Settings › Connectors › GitHub runs gh's own device sign-in through obid (`POST /v1/github/sign-in`). Every repository that login can push to is then usable without editing `config.json` (`GET /v1/repos`); the first job in one adds it to obid's `repos`. Connectors shows GitHub and Slack only.
-5. FirstLaunch: hello, hold fn, permissions (Accessibility, Microphone, Notifications in one go), agents and accounts, models (`apps/mac/app/FirstLaunch.swift`).
-6. Settings › Runner › "Keep my Mac available", and Energy Saver's "Wake for network access" (`apps/mac/app/Availability.swift`).
+2. Download Oby ([0.3.0](https://downloads.oby.deskree.com/Oby-0.3.0.dmg) today; the launch build with the next release) and open it. It updates itself (Sparkle, `SUFeedURL` in `apps/mac/app/Info.plist`). Oby.app carries obid (`Contents/Helpers/obid`) and GitHub's CLI (`Contents/MacOS/gh`; `apps/mac/app/Tools/bundle-obid.sh`, `bundle-gh.sh`), so nobody installs `gh`, Rust or install.sh.
+3. Turn on Settings › Runner › This Mac (obid isn't on by default yet, and first launch doesn't turn it on: `apps/mac/app/Settings.swift`). The app then registers obid as its login item with `SMAppService` (`apps/mac/app/LoginItem.swift`, `apps/mac/app/Tools/com.deskree.oby.obid.plist`): obid starts with the app and keeps running while the window is closed. It unregisters the Swift runner (`oby-runner`) older builds registered. An install.sh obid keeps running until Settings › Runner › Move into Oby….
+4. Nothing to edit. On its first run obid writes its own `config.json`, with the gateway on `127.0.0.1:8810` and Claude Code's default login, Codex's too when it's on the login shell's PATH (`core/crates/obid/src/app.rs`). At every start it finds each tool's own login; a fresh obid lists the ones it finds by itself (#1353), and turns `claudeKeychain` on when Claude Code's login is only in the Keychain. Not yet: a Cursor login kept in the macOS Keychain isn't found.
+5. GitHub: when `gh` is already signed in on the Mac, obid uses that login; otherwise Settings › Connectors › GitHub runs gh's own device sign-in through obid (`POST /v1/github/sign-in`). Every repository that login can push to is then usable without editing `config.json` (`GET /v1/repos`); the first job in one adds it to obid's `repos`. Connectors shows GitHub and Slack only.
+6. FirstLaunch: hello, hold fn, permissions (Accessibility, Microphone, Notifications in one go), agents and accounts, models (`apps/mac/app/FirstLaunch.swift`).
+7. Settings › Runner › "Keep my Mac available", and Energy Saver's "Wake for network access" (`apps/mac/app/Availability.swift`).
 
 **Reaching it from the iPhone**
 
-7. Join an Obysphere, or host your own, in Settings › Obysphere: anyone hosts one from obi-sphere's Deploy to Cloudflare button (its `docs/run-your-own.md`; the button builds obi-sphere's `main`, so it's live once its `dev` is in `main`). Deskree's Sphere relays phones for its members only. While obid is joined, every pairing invitation carries the Sphere's relay and the Mac's public key, and the iPhone's calls go through the Sphere sealed end to end, the Mac's key pinned from the QR (#1368; docs/runner-api.md, "obid only: the phone relay").
-8. In progress: the iPhone doesn't speak the relay yet (#1278), and the Mac's Pair a device still makes a QR only for a route the iPhone reaches directly (`apps/mac/app/PairingView.swift`): the gateway published on the user's tailnet (`tailscale serve --bg --https=8443 http://127.0.0.1:8810`), or Remote access, which is hidden at launch ([remote-access.md](remote-access.md)). Until both land, Tailscale is how an iPhone reaches an obid Mac.
+8. Join an Obysphere, or host your own, in Settings › Obysphere: anyone hosts one from obi-sphere's Deploy to Cloudflare button (its `docs/run-your-own.md`). Deskree's Sphere relays phones for its members only. While obid is joined, every pairing invitation carries the Sphere's relay and the Mac's public key, and the iPhone's calls go through the Sphere sealed end to end, the Mac's key pinned from the QR (#1368; docs/runner-api.md, "obid only: the phone relay").
+9. In progress: the iPhone doesn't speak the relay yet (#1278), and the Mac's Pair a device still makes a QR only for a route the iPhone reaches directly (`apps/mac/app/PairingView.swift`): the gateway published on the user's tailnet (`tailscale serve --bg --https=8443 http://127.0.0.1:8810`), or Remote access, which is hidden at launch ([remote-access.md](remote-access.md)). Until both land, Tailscale is how an iPhone reaches an obid Mac: pair over Tailscale and don't join an Obysphere, since once obid is in one, every invitation is relay-only (`core/crates/obid/src/gateway.rs`, `invite`).
 
 **On the iPhone**
 
-9. Install the app. It opens on Home and talks to the owner's own tailnet address (`apps/shared/Runner.swift:928`). Settings › Your Mac › Scan QR code. "Enter code" can't find an obid Mac: it looks for `_oby._tcp` over Bonjour (`apps/ios/app/ConnectScreen.swift:255-278`), which obid doesn't advertise (`core/crates/obid/src/gateway.rs:13-14`).
-10. Allow notifications when asked (on the first connection). obid's alerts reach the iPhone sealed, through Deskree's push relay (#1362, #1361; [remote-access.md](remote-access.md), "Pushes").
-11. 30 days later the device token expires; the iPhone says "The runner only answers its owner's Tailscale login." (`apps/shared/Runner.swift:1386`) and the person pairs again.
+10. Install the app. It opens on Home and talks to the owner's own tailnet address (`apps/shared/Runner.swift:928`). Settings › Your Mac › Scan QR code. "Enter code" can't find an obid Mac: it looks for `_oby._tcp` over Bonjour (`apps/ios/app/ConnectScreen.swift:255-278`), which obid doesn't advertise (`core/crates/obid/src/gateway.rs:13-14`).
+11. Allow notifications when asked (on the first connection). Once Deskree deploys the push relay, and from the next iPhone release (today's TestFlight build predates #1361), obid's alerts reach the iPhone sealed, through it (#1362, #1361; [remote-access.md](remote-access.md), "Pushes").
+12. 30 days later the device token expires; the iPhone says "The runner only answers its owner's Tailscale login." (`apps/shared/Runner.swift:1386`) and the person pairs again.
 
 ## 2. The design
 
@@ -109,16 +110,16 @@ Each one is one line where you are (Home, the conversation, the task), in Sangam
 
 ## 3. Remote access, by path
 
-**At launch (the owner's decision of 2026-10-23, AGENTS.md "The launch build"): the iPhone reaches the Mac through the user's own Obysphere, sealed end to end, the Mac's key pinned from the QR.** The Sphere passes sealed frames and never sees a body, a device token or a login. Anyone hosts one from obi-sphere's Deploy to Cloudflare button, with a workers.dev address or their own domain; Deskree's Sphere relays phones for its members only. Remote access (a Cloudflare Tunnel per Mac, [remote-access.md](remote-access.md)) is hidden on the Mac and the iPhone; Deskree's own Macs show it with `showEverything`.
+**At launch (the owner's decision of 2026-10-23, AGENTS.md "The launch build"): the iPhone reaches the Mac through the user's own Obysphere, sealed end to end, the Mac's key pinned from the QR.** The Sphere passes sealed frames and never sees a body, a device token or a login. Anyone hosts one from obi-sphere's Deploy to Cloudflare button, with a workers.dev address or their own domain; Deskree's Sphere relays phones for its members only. Remote access (a Cloudflare Tunnel per Mac, [remote-access.md](remote-access.md)) is hidden on the Mac and the iPhone; Deskree's own Macs show it with a full build ([release.md](release.md), "Full builds") and `showEverything`.
 
 | | At launch |
 |---|---|
 | At home and away | the same route: obid keeps a socket open to its Sphere's relay (outbound), and the iPhone opens its own to the same relay. The local network and Bonjour come back with #1282 |
 | What the user does | join or host an Obysphere (Settings › Obysphere), then scan the Mac's QR |
 | Who can read the traffic | nobody but the two devices: every request, answer and event frame is sealed between the iPhone and obid (docs/runner-api.md, "obid only: the phone relay", "The envelope (version 1)"), and obid refuses a relay-paired phone's token on its plain listener |
-| Notifications with the app closed | sealed alerts through Deskree's push relay: obid hands it a payload only the iPhone can open, and the iPhone's notification service extension opens it ([remote-access.md](remote-access.md), "Pushes"; #1356, #1362, #1361) |
+| Notifications with the app closed | once Deskree deploys the push relay, and from the next iPhone release, sealed alerts through it: obid hands it a payload only the iPhone can open, and the iPhone's notification service extension opens it ([remote-access.md](remote-access.md), "Pushes"; #1356, #1362, #1361) |
 | Wakes a sleeping Mac | no |
-| On `dev` | obid's side (#1368) and the Sphere's relay (obi-ai-bot/obi-sphere#19). In progress: the iPhone's side (#1278) and Pair a device without a direct route (section 1, step 8) |
+| On `dev` | obid's side (#1368) and the Sphere's relay (obi-ai-bot/obi-sphere#19). In progress: the iPhone's side (#1278) and Pair a device without a direct route (section 1, step 9) |
 
 The design before the launch, for later: on Just this Mac, the local network plus the user's own Tailscale or server; on Oby Cloud, Oby's relay, a Cloudflare Tunnel per installation. Both wait (section 8).
 
@@ -201,7 +202,7 @@ What exists today, what must be built, and where. Local work (obid, the Mac and 
 
 | Piece | Exists today | To build | Size |
 |---|---|---|---|
-| **The relay** | `cloud/control-plane`: Sign in with Apple on the web as the gate (`sub` only), installations registered and signed by the Mac's P-256 key (Secure Enclave when there is one), per-account limits with per-network backstops, unconnected tunnels reclaimed and a 30-day idle sweep, one Cloudflare Tunnel per installation to the gateway (docs/remote-access.md); `cloudflared` bundled and `RemoteAccess.swift` on the Mac; hidden at launch ([remote-access.md](remote-access.md)) | Deploy and run it as Deskree's; the iPhone's routes and the matching-digits pairing through it (iPhone 1c); the push relay (sealed payloads, Deskree's APNs key, the iPhone's notification service extension); the Mac's "going to sleep" notice | L |
+| **The relay** | `cloud/control-plane`: Sign in with Apple on the web as the gate (`sub` only), installations registered and signed by the Mac's P-256 key (Secure Enclave when there is one), per-account limits with per-network backstops, unconnected tunnels reclaimed and a 30-day idle sweep, one Cloudflare Tunnel per installation to the gateway (docs/remote-access.md); `cloudflared` in full builds only (#1367) and `RemoteAccess.swift` on the Mac; hidden at launch ([remote-access.md](remote-access.md)) | Deploy and run it as Deskree's; the iPhone's routes and the matching-digits pairing through it (iPhone 1c); the push relay (sealed payloads, Deskree's APNs key, the iPhone's notification service extension); the Mac's "going to sleep" notice | L |
 | **Accounts and billing** | Apple Accounts by `sub`, for remote access only (2026-10-20): no email, no profile | Sign in with Apple and email (#282); the subscription (App Store in-app purchase on the apps, or a web checkout), entitlements the apps and the relay check; Settings › Oby Cloud (plan, devices, sign out) | L |
 | **Teams** | — | An organization on the account: people, seats, roles for billing; the bridge to an Obysphere's members | M |
 | **The Obysphere** (not Oby Cloud's since 2026-10-23: anyone hosts one) | `obi-sphere`: the Obi-to-Obi protocol draft and a server outline (directory, policy, store-and-forward relay, signed audit, invitations), pre-alpha; the Deploy to Cloudflare button (obi-ai-bot/obi-sphere#20) and the phone relay (obi-ai-bot/obi-sphere#19, obid #1368), on obi-sphere's `dev`; obid's one Sphere, its card and exchanges (docs/runner-api.md, "obid only: Sphere membership" and after) | Several spheres per person; roles (admin, member, Make admin), invites (emails, link, domain), joining, leaving, deleting; Knowledge per sphere with the admin's secret held by the admin's Oby or by Oby Cloud, which runs members' lookups and returns only answers; hosted at `<name>.obysphere.com`; the apps' sphere screens (Sangam's) | L |
@@ -217,7 +218,7 @@ What exists today, what must be built, and where. Local work (obid, the Mac and 
 
 ## 7. Order of work
 
-Small pull requests into `dev`, each usable on its own: first the ones that remove a terminal step from Just this Mac, then memory. Items 19–21 (Oby Cloud) are for the future (section 8); item 22's Obysphere is anyone's to host.
+Small pull requests into `dev`, each usable on its own: first the ones that remove a terminal step from Just this Mac, then memory. Items 19 and 20 (Oby Cloud) are for the future (section 8); item 21 is on `dev` and waits for the owner's deploy; item 22's Obysphere is anyone's to host.
 
 1. **fix(ios): Connect is the first screen.** No default runner address; Settings' Runner section and Tailscale footer go; a gateway 401 says the iPhone was removed; keep `expiresAt`. (S)
 2. **fix(mac): FirstLaunch's copy.** "Menu bar", "Screen Recording isn't asked". (S)
@@ -239,7 +240,7 @@ Small pull requests into `dev`, each usable on its own: first the ones that remo
 18. **feat(obid): merging when a remembered rule says so.** (M)
 19. **feat(cloud): the relay as Deskree's service,** installations by key, the iPhone through it, matching digits. Only after 15. (L)
 20. **feat(cloud): accounts and billing,** Sign in with Apple, the subscription, Settings › Oby Cloud. (L)
-21. **feat(cloud, obid, ios): pushes through the relay.** (part of the relay's L)
+21. **feat(cloud, obid, ios): pushes through the relay.** On `dev` (#1356, #1361, #1362); waits for the owner's deploy.
 22. **feat(cloud, apps): the Obysphere,** on `obi-sphere`'s server: several spheres, roles, invites, Knowledge per sphere held by its admin. (L), with **teams** (M) for billing.
 
 ## 8. Decided

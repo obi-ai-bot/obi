@@ -19,7 +19,7 @@
 </p>
 
 > [!NOTE]
-> Oby 0.3.0 is out: [download it](https://downloads.oby.deskree.com/Oby-0.3.0.dmg) for macOS 26 or later. It updates itself. Oby is in active development.
+> Oby 0.3.0 is out: [download it](https://downloads.oby.deskree.com/Oby-0.3.0.dmg) for macOS 26 or later. It updates itself. The launch build below (GitHub and Slack, the iPhone through your Obysphere) comes with the next release.
 
 ## What it does
 
@@ -27,7 +27,7 @@
 - **Uses the plans you already have.** Claude Code, Codex and Cursor sign in through their own tools. Oby never sees your passwords and shows how much of each plan is left.
 - **Keeps the work moving.** It follows each job, nudges it when it stalls, and opens the pull request once checks pass and the secret scan is clean.
 - **Only interrupts you for decisions.** When something needs you, you get the finding, the evidence and a clear next step.
-- **Works with your team.** Everyone has their own Oby. Your team's Obysphere is a server you host yourself, free on Cloudflare from one Deploy to Cloudflare button ([obi-sphere](https://github.com/obi-ai-bot/obi-sphere), live once its `dev` reaches `main`). Obys ask each other for reviews there.
+- **Works with your team.** Everyone has their own Oby. Your team's Obysphere is a server you host yourself, free on Cloudflare from one Deploy to Cloudflare button ([obi-sphere](https://github.com/obi-ai-bot/obi-sphere)). Obys ask each other for reviews there.
 - **Reaches your Mac from your iPhone.** Through your Obysphere, sealed end to end: the Sphere passes frames it can't open. obid's side is done; the iPhone's, and the Mac's pairing screen for it, are in progress.
 - **Connects to GitHub and Slack.** It follows your pull requests and issues, and can tell a pull request's author on Slack when a review is in.
 
@@ -46,7 +46,7 @@ To build it yourself, you need macOS 26 or later and Xcode 27.
 1. Open `apps/Oby.xcodeproj`.
 2. Run the **Oby** scheme on My Mac.
 
-The Mac app runs Oby's server, `obid`, for you. To run `obid` on its own (on Linux, for example), see [docs/install.md](docs/install.md).
+The Mac app runs Oby's server, `obid`, for you once Settings › Runner › This Mac is on (it isn't on by default yet). To run `obid` on its own (on Linux, for example), see [docs/install.md](docs/install.md).
 
 ## Repository
 

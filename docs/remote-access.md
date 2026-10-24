@@ -1,7 +1,7 @@
 # Remote access: reach your Mac from anywhere (#285)
 
 > [!NOTE]
-> **Hidden at launch** (the owner's decision of 2026-10-23, AGENTS.md "The launch build"): Settings › Remote access isn't shown on the Mac or the iPhone, and the iPhone reaches the Mac through the user's own Obysphere instead, sealed end to end ([runner-api.md](runner-api.md), "obid only: the phone relay": obid's side is on `dev`, the iPhone's is in progress). Its code still builds and its tests still pass. Deskree's own Macs show it with `defaults write com.deskree.oby showEverything -bool YES` and a relaunch. [Pushes](#pushes), the sealed push relay in the same Worker, isn't hidden.
+> **Hidden at launch** (the owner's decision of 2026-10-23, AGENTS.md "The launch build"): Settings › Remote access isn't shown on the Mac or the iPhone, and the iPhone reaches the Mac through the user's own Obysphere instead, sealed end to end ([runner-api.md](runner-api.md), "obid only: the phone relay": obid's side is on `dev`, the iPhone's is in progress). Its code still builds and its tests still pass. Deskree's own Macs show it with a full build ([release.md](release.md), "Full builds": the launch build has no `cloudflared`) and `defaults write com.deskree.oby showEverything -bool YES`, then a relaunch. [Pushes](#pushes), the sealed push relay in the same Worker, isn't hidden.
 
 Outside the home network, the iPhone reaches the Mac with no port forwarding, no VPN app and no Tailscale account: an Oby control plane on Cloudflare gives each installation its own Cloudflare Tunnel, obid on the Mac runs `cloudflared` outbound as its own child (#896, so it outlives the window app), and the iPhone talks HTTPS to an opaque hostname. The pattern is OpenMausBot's `cloudflare/control-plane`.
 
