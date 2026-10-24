@@ -234,6 +234,7 @@ nonisolated final class RunnerStub: Sendable {
         var method: String
         var path: String
         var body: Data
+        var authorization: String? = nil
 
         var json: [String: Any]? { (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] }
     }
@@ -255,7 +256,8 @@ nonisolated final class RunnerStub: Sendable {
 
     fileprivate func take(_ request: URLRequest) -> (Int, Data) {
         let body = request.httpBody ?? request.httpBodyStream.map(Self.read) ?? Data()
-        let got = Request(method: request.httpMethod ?? "GET", path: request.url?.absoluteURL.path() ?? "", body: body)
+        let got = Request(method: request.httpMethod ?? "GET", path: request.url?.absoluteURL.path() ?? "", body: body,
+                          authorization: request.value(forHTTPHeaderField: "Authorization"))
         self.got.withLock { $0.append(got) }
         let (status, text) = answer(got)
         return (status, Data(text.utf8))
@@ -278,7 +280,7 @@ nonisolated final class RunnerStub: Sendable {
     private static let registered: Void = { URLProtocol.registerClass(RunnerStubProtocol.self) }()
 }
 
-private nonisolated final class RunnerStubProtocol: URLProtocol {
+nonisolated final class RunnerStubProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool {
         request.url?.host().map { host in RunnerStub.stubs.withLock { $0[host] != nil } } ?? false
     }
