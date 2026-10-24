@@ -1745,7 +1745,10 @@ mod tests {
             .split_once("\n\nWhat the user asked for:")
             .unwrap();
         // Every line stays in the quote, a lone `\r` too.
-        assert!(quote.lines().all(|l| l == ">" || l.starts_with("> ")), "{quote}");
+        assert!(
+            quote.lines().all(|l| l == ">" || l.starts_with("> ")),
+            "{quote}"
+        );
         assert_eq!(quote.lines().count(), 13);
         assert!(!quote.contains('\r'));
         // No heading, HTML, issue reference, mention, closing keyword or underline is left whole.
