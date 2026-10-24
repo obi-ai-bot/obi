@@ -803,7 +803,7 @@ struct TaskPage: View {
         switch ChatSend.typed(note) {
         case .empty: return
         // Too long: say so, and leave the words in the box to shorten.
-        case .tooLong(let problem): noteProblem = problem; return
+        case .tooLong: noteProblem = ChatSend.tooLong; return
         case .send(let words): text = words
         }
         let files = actions.attaches ? tray.paths : []

@@ -217,16 +217,17 @@ nonisolated enum ChatSend: Equatable {
 
     /// What an answer or a message to an agent may hold: one message, at most 2,000 characters.
     static let most = 2000
-    static let tooLong = "An answer can be at most 2,000 characters."
+    /// The words the iPhone's task page says too.
+    static let tooLong = "Keep your message under 2,000 characters."
 
     /// What sending typed words to an agent does: nothing while they're empty, says `tooLong`
     /// past `most` (the words stay in the box), else sends them trimmed.
-    enum Typed: Equatable { case empty, tooLong(String), send(String) }
+    enum Typed: Equatable { case empty, tooLong, send(String) }
 
     static func typed(_ value: String) -> Typed {
         let words = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if words.isEmpty { return .empty }
-        return words.count > most ? .tooLong(tooLong) : .send(words)
+        return words.count > most ? .tooLong : .send(words)
     }
 }
 

@@ -152,11 +152,12 @@ struct TaskPageTests {
         #expect(!TaskDecision.shows(job(.done), extras: RunnerJobExtras(id: "j", permission: permission)))
     }
 
-    /// The box's words for the task: past 2,000 characters it says so as the conversation does and
-    /// sends nothing (the words stay in the box); up to 2,000 they go, trimmed; empty, nothing happens.
-    @Test func aMessageOver2000CharactersSaysSoAndStays() {
+    /// What `tell()` does with the box's words goes by `ChatSend.typed`: past 2,000 characters it's
+    /// too long (nothing goes); up to 2,000 they go, trimmed; empty, nothing happens.
+    @Test func chatSendTypedFlagsOver2000Characters() {
         let long = String(repeating: "w", count: 2001)
-        #expect(ChatSend.typed(long) == .tooLong("An answer can be at most 2,000 characters."))
+        #expect(ChatSend.typed(long) == .tooLong)
+        #expect(ChatSend.tooLong == "Keep your message under 2,000 characters.")
         #expect(ChatSend.typed("  " + String(repeating: "w", count: 2000) + "\n") == .send(String(repeating: "w", count: 2000)))
         #expect(ChatSend.typed(" fix the test ") == .send("fix the test"))
         #expect(ChatSend.typed(" \n ") == .empty)
