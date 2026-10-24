@@ -798,8 +798,14 @@ struct TaskPage: View {
     }
 
     private func tell() {
-        let text = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (1...2000).contains(text.count), !busy else { return }
+        guard !busy else { return }
+        let text: String
+        switch ChatSend.typed(note) {
+        case .empty: return
+        // Too long: say so, and leave the words in the box to shorten.
+        case .tooLong: noteProblem = ChatSend.tooLong; return
+        case .send(let words): text = words
+        }
         let files = actions.attaches ? tray.paths : []
         busy = true
         Task {

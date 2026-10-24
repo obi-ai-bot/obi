@@ -252,7 +252,7 @@ struct ConversationPage: View {
         let question: (said: String, text: String)? = if case .question(let said, let question) = desk.talk { (said, question.text) } else { nil }
         let route = ChatSend.route(replying: replyTarget != nil, questionWaits: question != nil)
         // An answer goes to an agent or the brain as one message, at most 2,000 characters.
-        if route != .oby, words.count > 2000 { sendProblem = "An answer can be at most 2,000 characters."; return }
+        if route != .oby, words.count > ChatSend.most { sendProblem = ChatSend.tooLong; return }
         switch route {
         case .answer:
             if let question { desk.answer(value, said: question.said, question: question.text) }
