@@ -18,10 +18,10 @@ struct WindowTalkTests {
     /// "Thinking", then Oby's reply in writing, never "Speaking".
     @Test func thePillShowsOnlyForATalkTurnTheWindowIsNotShowing() {
         for stage in [TalkStage.listening, .thinking, .replied] {
-            #expect(TalkStage.shows(stage, reply: false, windowShowsTalk: false, windowShowsConversation: false))
-            #expect(!TalkStage.shows(stage, reply: false, windowShowsTalk: true, windowShowsConversation: false), "Home shows what you say")
+            #expect(TalkStage.shows(stage, reply: false, windowShowsTalk: false, windowShowsReply: false))
+            #expect(!TalkStage.shows(stage, reply: false, windowShowsTalk: true, windowShowsReply: false), "Home shows what you say")
         }
-        #expect(!TalkStage.shows(nil, reply: false, windowShowsTalk: false, windowShowsConversation: false))
+        #expect(!TalkStage.shows(nil, reply: false, windowShowsTalk: false, windowShowsReply: false))
         #expect(TalkStage.line(.listening, words: "", problem: nil) == "Listening")
         #expect(TalkStage.line(.listening, words: "fix the vault tests", problem: nil) == "fix the vault tests")
         #expect(TalkStage.line(.listening, words: "", problem: "Oby can't use the microphone.") == "Oby can't use the microphone.")
@@ -31,23 +31,111 @@ struct WindowTalkTests {
     }
 
     /// Home shows what you say but not Oby's reply: while a reply shows (and hands-free listens again
-    /// under it), the pill shows over Home; only the conversation page keeps it away.
-    @Test func theReplyShowsInThePillOverHome() {
+    /// under it), the pill shows unless the window shows the conversation the words went to.
+    @Test func theReplyShowsInThePillUnlessItsConversationShows() {
         for stage in [TalkStage.replied, .listening] {
-            #expect(TalkStage.shows(stage, reply: true, windowShowsTalk: true, windowShowsConversation: false), "Home")
-            #expect(!TalkStage.shows(stage, reply: true, windowShowsTalk: true, windowShowsConversation: true), "the conversation")
-            #expect(TalkStage.shows(stage, reply: true, windowShowsTalk: false, windowShowsConversation: false), "closed")
+            #expect(TalkStage.shows(stage, reply: true, windowShowsTalk: true, windowShowsReply: false), "Home, or another conversation")
+            #expect(!TalkStage.shows(stage, reply: true, windowShowsTalk: true, windowShowsReply: true), "its conversation")
+            #expect(TalkStage.shows(stage, reply: true, windowShowsTalk: false, windowShowsReply: false), "closed")
         }
     }
 
-    /// Once Oby's reply shows, hands-free words (fn + Space) have Oby listen again at once; held-key
-    /// words leave the reply showing; a key going down keeps its press; a turn under way carries on.
-    @Test func handsFreeListensAgainOnceTheReplyShows() {
-        #expect(TalkStage.afterReply(handsFree: true, keyDown: false, talking: false) == .listening)
-        #expect(TalkStage.afterReply(handsFree: false, keyDown: false, talking: false) == .replied)
-        #expect(TalkStage.afterReply(handsFree: true, keyDown: true, talking: false) == .replied, "that press is yours")
-        #expect(TalkStage.afterReply(handsFree: true, keyDown: true, talking: true) == nil)
-        #expect(TalkStage.afterReply(handsFree: false, keyDown: false, talking: true) == nil)
+    /// Only words asked hands-free (fn + Space) have their reply listen again, once: not held-key
+    /// words, even after an fn + Space with nothing said while they wait (the mic rule), nor after
+    /// a bare "never mind".
+    @Test func onlyWordsAskedHandsFreeListenAgain() {
+        var turn = TalkTurn()
+        _ = turn.heard("fix the vault tests", handsFree: true, again: false, problem: false)
+        let r1 = turn.replied("On it.", keyDown: false, talking: false)
+        #expect(r1 == .listenAgain)
+        let r2 = turn.replied("And done.", keyDown: false, talking: false)
+        #expect(r2 == .show(announce: true), "once")
+
+        // Held fn, then fn + Space while they wait, nothing said, pressed again: the reply only shows.
+        turn = TalkTurn()
+        _ = turn.heard("fix the vault tests", handsFree: false, again: false, problem: false)
+        let r3 = turn.closed()
+        #expect(!r3)
+        let r4 = turn.heard("", handsFree: true, again: false, problem: false)
+        #expect(r4, "Oby didn't catch that")
+        let r5 = turn.replied("On it.", keyDown: false, talking: false)
+        #expect(r5 == .show(announce: true))
+
+        // Hands-free words, then nothing heard or a bare "never mind": hands-free is over.
+        for ending in ["", "never mind"] {
+            turn = TalkTurn()
+            _ = turn.heard("fix the vault tests", handsFree: true, again: false, problem: false)
+            _ = turn.heard(ending, handsFree: true, again: false, problem: false)
+            let r6 = turn.replied("On it.", keyDown: false, talking: false)
+            #expect(r6 == .show(announce: true), "\(ending)")
+        }
+
+        // Escape while the words wait: nothing listens again.
+        turn = TalkTurn()
+        _ = turn.heard("fix the vault tests", handsFree: true, again: false, problem: false)
+        turn.cancelled()
+        let r7 = turn.replied("On it.", keyDown: false, talking: false)
+        #expect(r7 == .show(announce: true))
+    }
+
+    /// The reply lands while a key is going down, or while you're talking already: that press and
+    /// that turn are yours. Nothing listens again by itself, and VoiceOver stays quiet.
+    @Test func aReplyNeverTakesOverYourPress() {
+        var turn = TalkTurn()
+        _ = turn.heard("fix the vault tests", handsFree: true, again: false, problem: false)
+        let r8 = turn.replied("On it.", keyDown: true, talking: false)
+        #expect(r8 == .show(announce: false))
+        let r9 = turn.pressed()
+        #expect(!r9, "nothing to cut off")
+        _ = turn.heard("fix the vault tests", handsFree: true, again: false, problem: false)
+        let r10 = turn.replied("On it.", keyDown: true, talking: true)
+        #expect(r10 == .carryOn)
+    }
+
+    /// A blank reply ends the turn: no empty pill, nothing listens again.
+    @Test func aBlankReplyEndsTheTurn() {
+        var turn = TalkTurn()
+        _ = turn.heard("fix the vault tests", handsFree: true, again: false, problem: false)
+        let r11 = turn.replied(" \n", keyDown: false, talking: false)
+        #expect(r11 == .end)
+        #expect(!turn.relistening && !turn.announced)
+        let r12 = turn.replied("Late words.", keyDown: false, talking: false)
+        #expect(r12 == .show(announce: true), "its hands-free went with it")
+    }
+
+    /// VoiceOver reads the reply, and the next press cuts it off, whenever it comes.
+    @Test func theNextPressCutsVoiceOverOff() {
+        var turn = TalkTurn()
+        _ = turn.heard("how are the vault tests", handsFree: false, again: false, problem: false)
+        let r13 = turn.replied("They pass.", keyDown: false, talking: false)
+        #expect(r13 == .show(announce: true))
+        let r14 = turn.pressed()
+        #expect(r14)
+        let r15 = turn.pressed()
+        #expect(!r15, "once")
+    }
+
+    /// Oby listening again by itself, ended by a press with nothing said: quietly, unless something
+    /// went wrong. Your own press with nothing said still says Oby didn't catch it.
+    @Test func endingListeningAgainSaysNothing() {
+        var turn = TalkTurn()
+        _ = turn.heard("fix the vault tests", handsFree: true, again: false, problem: false)
+        let r16 = turn.replied("Which repository?", keyDown: false, talking: false)
+        #expect(r16 == .listenAgain)
+        let again = turn.closed()
+        #expect(again && !turn.relistening)
+        let r17 = turn.heard("", handsFree: true, again: again, problem: false)
+        #expect(!r17)
+        let r18 = turn.heard("", handsFree: true, again: again, problem: true)
+        #expect(r18, "the microphone failed")
+        let r19 = turn.heard("", handsFree: false, again: false, problem: false)
+        #expect(r19, "your own press")
+        // A turn of yours started meanwhile: its empty words aren't Oby's listening.
+        _ = turn.heard("fix it", handsFree: true, again: false, problem: false)
+        _ = turn.replied("Which one?", keyDown: false, talking: false)
+        turn.started()
+        let r20 = turn.closed()
+        #expect(!r20)
     }
 
     private func recording(_ key: TalkKey) -> () -> [String] {

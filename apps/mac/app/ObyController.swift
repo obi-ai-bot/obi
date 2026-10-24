@@ -27,17 +27,16 @@ final class IslandController {
     /// Every repository the user pushed to lately: names the voice listens for. Fetched when you
     /// first talk, and again each time until it works.
     private var repos: [String] = []
-    /// The last words sent were hands-free (fn + Space): once Oby's reply shows, it listens again.
-    private var handsFreeAsk = false
-    /// Oby is listening again after its reply, by itself: a press with no words ends it quietly.
-    private var relistening = false
+    /// Whether the reply listens again, VoiceOver has it, and Oby listens again by itself (`TalkTurn`).
+    private var talkTurn = TalkTurn()
     /// Takes the reply off the pill after `TalkStage.replyShows`.
     private var fading: Task<Void, Never>?
     /// Opens the Oby window (apps/mac/app/App/ChatWindow.swift), on a job's screen when one is named: the
     /// app sets it.
     var openWindow: (_ job: (id: String, local: Bool)?) -> Void = { _ in }
-    /// The window (or first launch) is up, in front, and showing what you say and Oby's answer: the
-    /// pill stays away then. The app sets it.
+    /// The window (or first launch) is up, in front, and showing what you say (Home or the
+    /// conversation): the pill stays away then, except for Oby's reply, which only the conversation
+    /// it went to shows. The app sets it.
     var windowShowsTalk: () -> Bool = { false }
     /// The window is in front on the conversation page: what you say carries on there. Anywhere
     /// else it goes to the latest conversation (#493). The app sets it.
@@ -256,26 +255,24 @@ final class IslandController {
         switch event {
         case .press:
             // The reply the pill shows goes, and VoiceOver stops reading it: you come first.
-            if model.reply != nil { Self.announce(" ") }
+            if talkTurn.pressed() { Self.announce(" ") }
             hideReply()
         case .start(let key):
-            relistening = false
+            talkTurn.started()
             listen(key: key)
         case .handsFree:
             voice.handsFree = true
         case .send:
             let key = voice.key
-            let again = relistening
-            relistening = false
-            handsFreeAsk = voice.handsFree
+            let handsFree = voice.handsFree
+            let again = talkTurn.closed()
             // The microphone closes now; the words are written down while the pill says it's thinking.
             // Until they're known, no conversation's answer is the pill's.
             feed.talking(nil)
             setTurn(.thinking)
-            voice.finish { [weak self] said in self?.heard(said, key: key, again: again) }
+            voice.finish { [weak self] said in self?.heard(said, key: key, handsFree: handsFree, again: again) }
         case .cancel:
-            relistening = false
-            handsFreeAsk = false
+            talkTurn.cancelled()
             voice.cancel()
             stopListening()
         }
@@ -290,12 +287,12 @@ final class IslandController {
     }
 
     /// Oby answered what you said: the pill shows the reply's first lines in writing, never aloud
-    /// (the owner's decision of 2026-10-23), and in hands-free mode Oby listens again for yours at once,
-    /// unless the talk key is down already: that press is yours, and it isn't taken over.
+    /// (the owner's decision of 2026-10-23), and when those words were asked hands-free Oby listens
+    /// again for yours at once, unless a talk key is down already: that press is yours (`TalkTurn`).
     private func replied(_ text: String, spoken: Bool) {
         guard spoken else { return }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            // Nothing to show: the turn ends, and nothing listens again.
+        let after = talkTurn.replied(text, keyDown: talkKey.busy, talking: model.voice.phase != .idle || model.listening)
+        if after == .end {
             if model.turn == .thinking { setTurn(nil) }
             return
         }
@@ -306,16 +303,17 @@ final class IslandController {
             guard !Task.isCancelled else { return }
             self?.hideReply()
         }
-        let stage = TalkStage.afterReply(handsFree: handsFreeAsk, keyDown: talkKey.busy,
-                                         talking: model.voice.phase != .idle || model.listening)
-        if stage == .listening, talkKey.listenAgain() {
-            relistening = true
+        switch after {
+        case .listenAgain where talkKey.listenAgain():
             listen(key: model.voice.key)
             model.voice.handsFree = true
-        } else if stage != nil {
+        case .listenAgain, .show(announce: false):
             setTurn(.replied)
-            // VoiceOver reads it out; not while a press is on its way to open the microphone.
-            if !talkKey.busy { Self.announce(text) }
+        case .show(announce: true):
+            setTurn(.replied)
+            Self.announce(text)
+        case .carryOn, .end:
+            break
         }
     }
 
@@ -342,13 +340,13 @@ final class IslandController {
         !showsConversation && !Conversation.cancels(said)
     }
 
-    /// `again`: the words came while Oby listened again by itself after its reply.
-    private func heard(_ said: String, key: TalkKey.Key, again: Bool) {
+    /// `handsFree`: said after fn + Space. `again`: while Oby listened again by itself after its reply.
+    private func heard(_ said: String, key: TalkKey.Key, handsFree: Bool, again: Bool) {
         // A bare "stop" or "never mind" ends the turn and the hands-free listening, and no job
         // with it: Desk.ask sends nothing to the brain for it, so no reply shows and nothing
-        // listens again.
+        // listens again. Nothing heard ends hands-free too.
         let cancels = Conversation.cancels(said)
-        if cancels { handsFreeAsk = false }
+        let complain = talkTurn.heard(said, handsFree: handsFree, again: again, problem: model.voice.problem != nil)
         if !said.isEmpty {
             feed.conversations.nextToLatest = Self.toLatest(said, showsConversation: windowShowsConversation())
             if !cancels { feed.talking(said) }
@@ -361,7 +359,7 @@ final class IslandController {
             let problem = model.voice.problem
             setTurn(nil)
             // A press that only ends Oby's listening again says nothing.
-            if problem != nil || !again { Self.alert(problem ?? "Oby didn't catch that", id: "talk") }
+            if complain { Self.alert(problem ?? "Oby didn't catch that", id: "talk") }
         } else if cancels {
             setTurn(nil)
         } else {
@@ -402,7 +400,7 @@ final class IslandController {
             feed.talking(nil)
         }
         if TalkStage.shows(stage, reply: model.reply != nil, windowShowsTalk: windowShowsTalk(),
-                           windowShowsConversation: windowShowsConversation()) {
+                           windowShowsReply: feed.talkShown) {
             let pill = pill ?? TalkPillPanel(model: model)
             self.pill = pill
             pill.place()

@@ -1280,9 +1280,10 @@ final class RunnerFeed {
     /// The talk key's turn shows Oby's reply now: on its way (Thinking), or in the pill (the app sets it).
     @ObservationIgnored var pillShowsTalk: () -> Bool = { false }
     /// The talk key's last words, until obid lists them, and the conversation they joined: Oby's
-    /// answer there shows in the pill, so that one answer doesn't alert.
+    /// answer there shows in the pill, so that one answer doesn't alert (`talkAnswered`: it came).
     @ObservationIgnored private var talkWords: String?
     @ObservationIgnored private var talkConversation: String?
+    @ObservationIgnored private var talkAnswered = false
     /// The answer the pill showed instead of an alert: a question that comes after it alerts with it.
     @ObservationIgnored private var pillAnswer: (conversation: String, turn: Turn, at: Date)?
 
@@ -1291,7 +1292,11 @@ final class RunnerFeed {
     func talking(_ said: String?) {
         talkWords = said?.trimmingCharacters(in: .whitespacesAndNewlines)
         talkConversation = nil
+        talkAnswered = false
     }
+
+    /// The window in front shows the conversation the talk key's words joined, where their reply shows.
+    var talkShown: Bool { talkConversation.map { windowShows(.conversation($0)) } ?? false }
 
     /// An alert for each inbox ask that waits for the owner and isn't told yet (`Alerts.alerts`). One
     /// the window shows stays untold, and alerts once the window goes (`windowLeft`).
@@ -1342,11 +1347,13 @@ final class RunnerFeed {
         guard Alerts.answers(turn, extras: extras, known: known, told: told, asked: askedAt[conversation], now: .now) else { return }
         told.insert(turn.id)
         let question = asked.removeValue(forKey: conversation).flatMap { $0.at > .now.addingTimeInterval(-60) ? ($0.said, $0.question) : nil }
+        // The talk key's turn has one answer, this one, alerted or not: later ones there are news.
+        let turnsAnswer = conversation == talkConversation && !talkAnswered
+        if turnsAnswer { talkAnswered = true }
         guard !windowShows(.conversation(conversation)) else { return }
-        // The talk key's reply shows in the pill: that one answer doesn't alert. A question with it
-        // does, for its options.
-        if question == nil, conversation == talkConversation, pillShowsTalk() {
-            talkConversation = nil
+        // The talk key's reply shows in the pill: its answer doesn't alert. A question with it does,
+        // for its options.
+        if turnsAnswer, question == nil, pillShowsTalk() {
             pillAnswer = (conversation, turn, .now)
             return
         }

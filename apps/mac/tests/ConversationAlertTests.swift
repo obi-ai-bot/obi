@@ -304,6 +304,28 @@ struct ConversationAlertTests {
         #expect(shown.list.map(\.id) == ["turn-c1", "turn-c1"], "new words are being written down: not the pill's")
     }
 
+    /// The turn's answer alerted (the pill wasn't up yet): the next answer there is news too. And the
+    /// pill knows whether the window shows the conversation the words joined.
+    @Test func anAnswerThatAlertedIsTheTurnsOne() {
+        let (feed, shown, _) = Self.following()
+        feed.conversations.take([RunnerConversation(id: "c1", title: "Vault tests")])
+        var pill = false
+        feed.pillShowsTalk = { pill }
+        var front: AlertPlace? = .conversation("c2")
+        feed.windowShows = { $0 == front }
+        feed.talking("how are the vault tests")
+        #expect(!feed.talkShown, "not listed yet")
+        feed.heard(Turn(date: .now, who: .user, text: "how are the vault tests", conversation: "c1"), TurnExtras())
+        #expect(!feed.talkShown, "another conversation in front")
+        front = .conversation("c1")
+        #expect(feed.talkShown)
+        front = nil
+        feed.heard(Turn(id: "t-\(UUID().uuidString)", date: .now, who: .oby, text: "They pass.", conversation: "c1"), TurnExtras())
+        pill = true
+        feed.heard(Turn(id: "t-\(UUID().uuidString)", date: .now, who: .oby, text: "Two were slow.", conversation: "c1"), TurnExtras())
+        #expect(shown.list.map(\.id) == ["turn-c1", "turn-c1"])
+    }
+
     /// Oby asks back about the talk key's words: the pill shows the question, and the alert still goes,
     /// with its options, whether the question comes after its turn or before it.
     @MainActor @Test func aQuestionThePillShowsStillAlerts() async throws {

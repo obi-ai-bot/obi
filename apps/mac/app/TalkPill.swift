@@ -11,18 +11,10 @@ nonisolated enum TalkStage: Equatable, Sendable {
     static let replyShows: Duration = .seconds(8)
 
     /// Whether the pill shows: a turn is under way and the window isn't showing it. Home and the
-    /// conversation page show what you say (their Listening line), but only the conversation shows
-    /// Oby's reply: while a reply shows, Home in front doesn't keep the pill away.
-    static func shows(_ stage: TalkStage?, reply: Bool, windowShowsTalk: Bool, windowShowsConversation: Bool) -> Bool {
-        stage != nil && !(reply ? windowShowsConversation : windowShowsTalk)
-    }
-
-    /// Where the turn goes once Oby's reply shows: after hands-free words (fn + Space) Oby listens
-    /// again at once, the reply still above, unless a talk key is down (that press is yours: the
-    /// reply shows and your own turn starts); while you're talking again already, that turn
-    /// carries on (nil); else the reply shows on its own.
-    static func afterReply(handsFree: Bool, keyDown: Bool, talking: Bool) -> TalkStage? {
-        talking ? nil : handsFree && !keyDown ? .listening : .replied
+    /// conversation page show what you say (their Listening line); only the conversation the words
+    /// went to shows Oby's reply, so while a reply shows that's all that keeps the pill away.
+    static func shows(_ stage: TalkStage?, reply: Bool, windowShowsTalk: Bool, windowShowsReply: Bool) -> Bool {
+        stage != nil && !(reply ? windowShowsReply : windowShowsTalk)
     }
 
     /// The pill's line under the reply: your words as you talk (or why Oby can't listen), then
@@ -33,6 +25,74 @@ nonisolated enum TalkStage: Equatable, Sendable {
         case .thinking: "Thinking"
         case .replied, nil: nil
         }
+    }
+}
+
+/// The talk key's turn as `IslandController` keeps it, which does what it says: whether Oby's reply
+/// listens again, whether VoiceOver has the reply, and whether Oby listens again by itself.
+nonisolated struct TalkTurn: Equatable, Sendable {
+    /// The words Oby is answering were asked hands-free (fn + Space): their reply listens again.
+    /// Only words that were asked set it, and their reply uses it up, so a later press never decides it.
+    private(set) var handsFreeAsk = false
+    /// Oby listens again by itself after its reply: a press with no words ends that quietly.
+    private(set) var relistening = false
+    /// VoiceOver was given the reply: the next press cuts it off.
+    private(set) var announced = false
+
+    enum AfterReply: Equatable {
+        /// Nothing to show: the turn ends, and nothing listens again.
+        case end
+        /// Oby listens again at once, the reply above.
+        case listenAgain
+        /// The reply shows on its own; VoiceOver reads it unless a key is going down.
+        case show(announce: Bool)
+        /// You're talking again already: that turn carries on, the reply above it.
+        case carryOn
+    }
+
+    /// Oby's reply came. `keyDown`: a talk key is down or a turn it started is under way, so the
+    /// press is yours and isn't taken over. `talking`: the microphone is open for your next words.
+    mutating func replied(_ text: String, keyDown: Bool, talking: Bool) -> AfterReply {
+        let handsFree = handsFreeAsk
+        handsFreeAsk = false
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .end }
+        if talking { return .carryOn }
+        if handsFree, !keyDown {
+            relistening = true
+            return .listenAgain
+        }
+        announced = !keyDown
+        return .show(announce: !keyDown)
+    }
+
+    /// A talk key went down: whether VoiceOver has to be cut off the reply.
+    mutating func pressed() -> Bool {
+        defer { announced = false }
+        return announced
+    }
+
+    /// A turn of yours started: what Oby listened for by itself is over.
+    mutating func started() { relistening = false }
+
+    /// The microphone closed to send: whether it was Oby listening again by itself.
+    mutating func closed() -> Bool {
+        defer { relistening = false }
+        return relistening
+    }
+
+    /// Escape: nothing is sent, and no reply listens again.
+    mutating func cancelled() {
+        relistening = false
+        handsFreeAsk = false
+    }
+
+    /// The words were written down. Words asked decide whether their reply listens again; a bare
+    /// "stop" or "never mind", or nothing heard, ends hands-free. True when nothing heard is worth
+    /// saying ("Oby didn't catch that"): not when the press only ended Oby's listening again by
+    /// itself, unless something went wrong (`problem`).
+    mutating func heard(_ said: String, handsFree: Bool, again: Bool, problem: Bool) -> Bool {
+        handsFreeAsk = handsFree && !said.isEmpty && !Conversation.cancels(said)
+        return said.isEmpty && (problem || !again)
     }
 }
 
