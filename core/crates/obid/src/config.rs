@@ -101,6 +101,9 @@ struct File {
     vm_image: Option<PathBuf>,
     #[serde(default)]
     vm_image_url: Option<String>,
+    /// The control plane the iPhone's pushes go through (crate::push).
+    #[serde(default)]
+    push_relay: Option<String>,
     /// The least seconds between two run_requests taken from one teammate's owner (900 when left
     /// out; 0 turns it off, for tests or an owner who wants that).
     #[serde(default)]
@@ -278,6 +281,10 @@ pub struct Config {
     pub guest_request_every: Option<i64>,
     /// `guestModelApi`: the model API a guest job's calls go to from here, when not the providers'.
     pub guest_model_api: Option<String>,
+    /// `pushRelay`: the control plane the iPhone's sealed pushes go through, as its origin
+    /// (crate::push); Deskree's, `https://oby-control.deskree.com`, when left out. An iPhone's
+    /// registration with any other is refused.
+    pub push_relay: String,
 }
 
 /// Where the plug-ins obid ships are when the configuration doesn't say: the `plugins/` folder
@@ -472,6 +479,18 @@ impl Config {
                 ));
             }
         }
+        let push_relay = match &file.push_relay {
+            None => crate::push::RELAY.to_owned(),
+            Some(url) => match crate::push::origin(url) {
+                Some(origin) => origin,
+                None => {
+                    return invalid(format!(
+                        "pushRelay is {url:?}: it must be an https:// origin, like {}.",
+                        crate::push::RELAY
+                    ));
+                }
+            },
+        };
         if let Some(every) = file.guest_request_every
             && every < 0
         {
@@ -615,6 +634,7 @@ impl Config {
             vm_image_url: file.vm_image_url,
             guest_request_every: file.guest_request_every,
             guest_model_api: file.guest_model_api,
+            push_relay,
             conversation: Conversation {
                 harness,
                 agent,
@@ -1300,6 +1320,30 @@ mod tests {
             "http://127.0.0.1:8080/vm",
         ] {
             assert!(Config::parse(&with(serde_json::json!({"vmImageUrl": ok}))).is_ok());
+        }
+        // The iPhone's pushes: Deskree's control plane unless it says another, https only.
+        let relay = |config: &str| Config::parse(config).unwrap().push_relay;
+        assert_eq!(
+            relay(&with(serde_json::json!({}))),
+            "https://oby-control.deskree.com"
+        );
+        assert_eq!(
+            relay(&with(
+                serde_json::json!({"pushRelay": "https://Push.Example.com:8443/"})
+            )),
+            "https://push.example.com:8443"
+        );
+        for bad in [
+            "http://127.0.0.1:8787",
+            "http://push.example.com",
+            "https://push.example.com/v1",
+            "https://user:pass@push.example.com",
+        ] {
+            assert!(
+                problem(&with(serde_json::json!({"pushRelay": bad})))
+                    .contains("it must be an https:// origin"),
+                "{bad}"
+            );
         }
     }
 }

@@ -341,7 +341,7 @@ pub async fn serve(
     jobs.use_routines(routines.clone());
     let github =
         github_work::Feed::open(config.clone(), jobs.clone(), link.clone(), events.clone());
-    let pushes = push::Push::open(&config.home);
+    let pushes = push::Push::open(&config.home, &config.push_relay);
     let slack = slack::Slack::open(
         &config.home,
         vault::shared().expect("the vault is installed first"),

@@ -16,6 +16,9 @@ axum.workspace = true
 # The FCM service account's RS256 JWT (crate::push): the RSA that rustls already builds.
 aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys"] }
 base64.workspace = true
+# The iPhone's sealed pushes (crate::push): HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256),
+# HKDF-SHA256, ChaCha20-Poly1305, so Deskree's relay only ever carries a sealed blob.
+hpke = { version = "0.14.1", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }
 futures-util.workspace = true
 jsonschema.workspace = true
 libc.workspace = true
