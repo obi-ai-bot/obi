@@ -10,9 +10,16 @@ nonisolated struct MacLink: Codable, Equatable, Sendable {
     /// The tunnel's hostname: oby-<opaque>.<the control plane's device domain>. Through an
     /// Obysphere, only the Mac's name.
     var hostname: String
-    /// Paired through the Mac's Obysphere (#1278): it's reached through its relay alone, never by
-    /// this hostname, and isn't restored without the relay's keychain item. Only this iPhone sets it.
-    var relayed: Bool? = nil
+    /// Paired through the Mac's Obysphere (#1278): the relay's id and the Mac's pinned key,
+    /// `<id>.<key>` (neither is secret; the relay token is, and stays in the keychain). Such a Mac is
+    /// reached through its relay alone, never by `hostname`, and isn't restored without the relay's
+    /// keychain item. Only this iPhone's relay pairing sets it.
+    var relayed: String? = nil
+
+    /// Which Mac this is, for what's kept per Mac (its queued messages, its device id, what it pushes
+    /// with): through an Obysphere its relay and pinned key, which an invitation can't copy as it can
+    /// a name; else its hostname.
+    var identity: String { relayed.map { "relay:\($0)" } ?? hostname }
 
     /// Where the tunnel answers.
     var tunnelURL: URL { URL(string: "https://\(hostname)")! }
@@ -66,6 +73,9 @@ nonisolated struct RelayLink: Codable, Equatable, Sendable {
     var token: String
     /// The Mac's X25519 public key, base64url: pinned at pairing, every session is sealed to it.
     var key: String
+
+    /// What a link paired through it keeps as `MacLink.relayed`: the relay and the pinned key.
+    var pinned: String { "\(id).\(key)" }
 
     /// The Mac's key as its 32 bytes, or nil when it isn't one.
     var macKey: Data? {
@@ -128,7 +138,7 @@ nonisolated enum RemoteRoute: Equatable, Sendable {
     /// its tunnel. With no Mac linked there's none, and the iPhone keeps talking to the runner it has.
     static func choose(lan: URL?, link: MacLink?, paired: Bool) -> RemoteRoute? {
         guard paired, let link else { return nil }
-        if link.relayed == true { return .relay }
+        if link.relayed != nil { return .relay }
         if let lan { return .home(lan) }
         return .away(link.tunnelURL)
     }

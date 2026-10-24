@@ -240,17 +240,21 @@ struct RelayTests {
         // a short name of one line.
         let relayed = String(decoding: try JSONEncoder().encode(mac.link), as: UTF8.self)
         for (hostname, name) in [("", "Studio"), ("studio/evil", "Studio"), (String(repeating: "a", count: 254), "Studio"),
+                                 ("studio:", "Studio"), ("studio:123456", "Studio"), ("studio:84a3", "Studio"), (":8443", "Studio"),
                                  ("studio", ""), ("studio", "Studio\nPay here"), ("studio", String(repeating: "n", count: 65))] {
             let link = String(decoding: try JSONEncoder().encode(["hostname": hostname, "name": name]), as: UTF8.self).dropLast()
             #expect(throws: RunnerError.self, Comment(rawValue: "\(hostname) \(name)")) {
                 try GatewayEnvelope.decode(#"{"url":"https://sphere.example","link":\#(link),"relay":\#(relayed)},"secret":"s"}"#)
             }
         }
-        #expect((try? GatewayEnvelope.decode(#"{"url":"https://sphere.example","link":{"hostname":"Wellingtons-MacBook-Pro.local","name":"Wellington's MacBook Air","relay":\#(relayed)},"secret":"s"}"#)) != nil)
+        for hostname in ["Wellingtons-MacBook-Pro.local", "studio.tail0000.ts.net:8443"] {
+            #expect((try? GatewayEnvelope.decode(#"{"url":"https://sphere.example","link":{"hostname":"\#(hostname)","name":"Wellington's MacBook Air","relay":\#(relayed)},"secret":"s"}"#)) != nil,
+                    Comment(rawValue: hostname))
+        }
         // A Mac paired through its Obysphere is reached through it alone, at home too.
         let lan = URL(string: "http://192.168.1.20:8810")!
         var paired = envelope.link
-        paired.relayed = true
+        paired.relayed = mac.link.pinned
         #expect(RemoteRoute.choose(lan: lan, link: paired, paired: true) == .relay)
         #expect(RemoteRoute.choose(lan: lan, link: envelope.link, paired: true) == .home(lan))
         #expect(RemoteRoute.relay.url.scheme == "oby-relay")
@@ -332,21 +336,30 @@ struct RelayTests {
     }
 
     /// Only a forged welcome (the Sphere with a key of its own): nothing starts, no false "key
-    /// changed", and the next request tries again on a new socket.
+    /// changed", each request tries again on a new socket, and "pair again" comes only after three
+    /// hellos in a row went unanswered.
     @Test func aForgedWelcomeAloneIsNoAnswer() async throws {
         let mac = FakeMac()
         mac.impostor = true
-        let relay = mac.relay()
-        let runner = Runner(base: RemoteRoute.relayBase, token: "t", relay: relay)
-        do {
-            _ = try await runner.send("GET", "v1/status")
-            Issue.record("a forged welcome started a session")
-        } catch let error as RunnerError {
-            #expect(error.message == PhoneRelay.unanswered.message)
+        let runner = Runner(base: RemoteRoute.relayBase, token: "t", relay: mac.relay(patience: 0.2))
+        var said: [String] = []
+        for _ in 0..<4 {
+            do {
+                _ = try await runner.send("GET", "v1/status")
+                Issue.record("a forged welcome started a session")
+            } catch let error as RunnerError { said.append(error.message) }
         }
+        #expect(said == [PhoneRelay.unanswered, PhoneRelay.unanswered, PhoneRelay.stillUnanswered, PhoneRelay.stillUnanswered].map(\.message))
+        #expect(mac.sockets.count == 4)
+        // A welcome starts the count over.
         mac.impostor = false
         _ = try await runner.send("GET", "v1/status")
-        #expect(mac.sockets.count == 2)
+        mac.impostor = true
+        mac.sockets.last?.close(1006)
+        try await Task.sleep(for: .milliseconds(100))
+        do { _ = try await runner.send("GET", "v1/status") } catch let error as RunnerError {
+            #expect(error.message == PhoneRelay.unanswered.message)
+        }
     }
 
     /// An answer that starts and then goes quiet ends, and the Mac is told to stop it; the session goes on.
@@ -402,7 +415,7 @@ struct RelayTests {
         }
         try GatewayTokenStore.save("tok-relay")
         RelayStore.remove()
-        UserDefaults.standard.set(try MacLink(name: "Studio", hostname: "studio", relayed: true).encoded(), forKey: "mac.link")
+        UserDefaults.standard.set(try MacLink(name: "Studio", hostname: "studio", relayed: "r.k").encoded(), forKey: "mac.link")
         #expect(Phone().link == nil)
         #expect(UserDefaults.standard.data(forKey: "mac.link") == nil)
         #expect(GatewayTokenStore.isMissing())
@@ -410,10 +423,40 @@ struct RelayTests {
         let mac = FakeMac()
         try GatewayTokenStore.save("tok-relay")
         try RelayStore.save(mac.link)
-        UserDefaults.standard.set(try MacLink(name: "Studio", hostname: "studio", relayed: true).encoded(), forKey: "mac.link")
+        UserDefaults.standard.set(try MacLink(name: "Studio", hostname: "studio", relayed: mac.link.pinned).encoded(), forKey: "mac.link")
         let phone = Phone()
-        #expect(phone.link?.relayed == true && phone.route == .relay)
+        #expect(phone.link?.relayed == mac.link.pinned && phone.route == .relay)
         #expect(!RelayStore.isMissing())
+    }
+
+    /// A Mac paired through its Obysphere is that Mac by its relay and pinned key, not by the name
+    /// an invitation carries: one pasted with the same hostname is another Mac, with nothing of the
+    /// first's (its queued messages, its device id, what it pushes with).
+    @Test func aRelayedMacIsKnownByItsRelayNotItsName() throws {
+        let first = FakeMac(), other = FakeMac()
+        let mine = MacLink(name: "Studio", hostname: "oby-abcdefghijklmnop.tetrix.pro", relayed: first.link.pinned)
+        let theirs = MacLink(name: "Studio", hostname: "oby-abcdefghijklmnop.tetrix.pro", relayed: other.link.pinned)
+        #expect(mine.identity != theirs.identity)
+        #expect(mine.identity != MacLink(name: "Studio", hostname: mine.hostname).identity)
+        #expect(MacLink(name: "Studio", hostname: mine.hostname).identity == mine.hostname)
+        // What's kept for one isn't the other's.
+        let savedLink = UserDefaults.standard.data(forKey: "mac.link")
+        let hadToken = GatewayTokenStore.read()
+        let hadRelay = RelayStore.read()
+        defer {
+            UserDefaults.standard.set(savedLink, forKey: "mac.link")
+            UserDefaults.standard.removeObject(forKey: "device.\(mine.identity)")
+            if let hadToken { try? GatewayTokenStore.save(hadToken) } else { GatewayTokenStore.remove() }
+            if let hadRelay { try? RelayStore.save(hadRelay) } else { RelayStore.remove() }
+        }
+        try GatewayTokenStore.save("tok-relay")
+        UserDefaults.standard.set("device-1", forKey: "device.\(mine.identity)")
+        try RelayStore.save(first.link)
+        UserDefaults.standard.set(try mine.encoded(), forKey: "mac.link")
+        #expect(Phone().deviceID == "device-1")
+        try RelayStore.save(other.link)
+        UserDefaults.standard.set(try theirs.encoded(), forKey: "mac.link")
+        #expect(Phone().deviceID == nil)
     }
 }
 
@@ -493,7 +536,7 @@ nonisolated final class FakeMac: @unchecked Sendable {
                   key: mac.publicKey.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: ""))
     }
 
-    func relay() -> PhoneRelay { PhoneRelay(link, connect: connect) }
+    func relay(patience: TimeInterval = 5) -> PhoneRelay { PhoneRelay(link, connect: connect, patience: patience) }
 
     /// Waits up to 2 seconds for what the Mac heard to satisfy `heard`.
     func until(_ heard: ([RelayFrame]) -> Bool) async throws {

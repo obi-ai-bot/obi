@@ -287,11 +287,15 @@ struct GatewayEnvelope: Decodable, Equatable {
         }
         // Through an Obysphere the hostname is only the Mac's name: the relay is the way, and its
         // key the Mac's, sealed to from the first call. A pasted one still names its Mac plainly:
-        // a hostname of letters, digits, dots and dashes, a name of one line, both short.
+        // a hostname of letters, digits, dots and dashes with a port at most (a Tailscale route's
+        // `mac.tail0000.ts.net:8443`), a name of one line, both short. Who the Mac is is its relay
+        // and key (MacLink.identity), never these.
         if let relay = envelope.relay {
-            let host = envelope.link.hostname, name = envelope.link.name
-            guard relay.isValid, (1...253).contains(host.count),
-                  host.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }),
+            let host = envelope.link.hostname.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            let name = envelope.link.name
+            guard relay.isValid, (1...253).contains(host[0].count),
+                  host[0].allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }),
+                  host.count == 1 || (1...5).contains(host[1].count) && host[1].allSatisfy({ $0.isASCII && $0.isNumber }),
                   (1...64).contains(name.count), !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
                 throw RunnerError(message: "That invitation's Obysphere isn't one Oby can reach safely, so Oby won't pair with it.")
             }

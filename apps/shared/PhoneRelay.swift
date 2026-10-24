@@ -178,9 +178,11 @@ actor PhoneRelay {
     static let unreachable = RunnerError(message: "Your Mac isn't reachable.")
     static let forgotten = RunnerError(message: "This iPhone was removed from your Mac.", status: 401)
     static let replaced = RunnerError(message: "Another connection took this iPhone's place at your Obysphere. Open Oby again to reconnect.")
-    /// No welcome: obid answers nothing to a hello it can't open, so a Mac whose key changed looks
-    /// like this, and only pairing again pins its new key.
-    static let unanswered = RunnerError(message: "Your Mac isn't answering. If this keeps happening, pair again with the code in Oby on your Mac.")
+    /// No welcome to a hello: a Mac that's busy or just restarted, or one that can't open it.
+    static let unanswered = RunnerError(message: "Your Mac isn't answering.")
+    /// Several hellos in a row unanswered: obid answers nothing to a hello it can't open, so a Mac
+    /// whose key changed looks like this, and only pairing again pins its new key.
+    static let stillUnanswered = RunnerError(message: "Your Mac still isn't answering. If this keeps happening, pair again with the code in Oby on your Mac.")
     /// The most chunks of one answer held for a reader slower than the Mac (64 KiB each at most).
     static let held = 256
 
@@ -206,6 +208,10 @@ actor PhoneRelay {
     /// 30 seconds to 5 minutes; `resume` (the person asks) opens one at once.
     private var notBefore = Date.distantPast
     private(set) var backoff: TimeInterval = 0
+    /// How long a hello waits for its welcome once it's out.
+    private let patience: TimeInterval
+    /// Hellos in a row no welcome answered.
+    private var unansweredInARow = 0
 
     private struct Answer {
         let url: URL
@@ -215,9 +221,10 @@ actor PhoneRelay {
         var heard = Date.now
     }
 
-    init(_ link: RelayLink, connect: @escaping Connect = PhoneRelay.urlSession) {
+    init(_ link: RelayLink, connect: @escaping Connect = PhoneRelay.urlSession, patience: TimeInterval = 5) {
         self.link = link
         self.connect = connect
+        self.patience = patience
     }
 
     static let urlSession: Connect = { request in
@@ -310,8 +317,11 @@ actor PhoneRelay {
             // Sent once the socket is up (URLSession gives up on an upgrade after its request's 60 seconds).
             do { try await socket.send(.data(hello.bytes)) } catch { return ended(current) }
             // No welcome within a few seconds of the hello going out: start over, on a new socket.
-            try? await Task.sleep(for: .seconds(5))
-            if current == generation, session == nil, self.hello?.bytes == hello.bytes { drop(Self.unanswered) }
+            try? await Task.sleep(for: .seconds(patience))
+            if current == generation, session == nil, self.hello?.bytes == hello.bytes {
+                unansweredInARow += 1
+                drop(unansweredInARow >= 3 ? Self.stillUnanswered : Self.unanswered)
+            }
         }
     }
 
@@ -376,6 +386,7 @@ actor PhoneRelay {
         epoch += 1
         self.hello = nil
         backoff = 0
+        unansweredInARow = 0
         for started in waiting { started.resume() }
         waiting = []
     }
