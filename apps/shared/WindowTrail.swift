@@ -33,6 +33,29 @@ nonisolated enum SettingsPage: String, CaseIterable, Hashable, Sendable {
         case .about: "About"
         }
     }
+
+    /// The pages the side panel lists: the launch build leaves out Sharing and Remote access (`Launch`),
+    /// except while they're on, so the owner can always turn them off.
+    static func shown(everything: Bool, remoteOn: Bool = false, sharingOn: Bool = false) -> [SettingsPage] {
+        allCases.filter { page in
+            switch page {
+            case .sharing: everything || sharingOn
+            case .remote: everything || remoteOn
+            default: true
+            }
+        }
+    }
+}
+
+/// The launch build (AGENTS.md, the owner's decision of 2026-10-23): Mac share, Runner share, Remote
+/// access and every connector but GitHub and Slack are hidden on the Mac and the iPhone, not deleted.
+/// `showEverything`, a default with no UI, shows them on Deskree's own Macs:
+/// `defaults write com.deskree.oby showEverything -bool YES`, then relaunch Oby. It's for Macs only:
+/// an iPhone has no way to set it, so it always shows the launch build (a debug run can pass
+/// `-showEverything YES`).
+nonisolated enum Launch {
+    static let everythingKey = "showEverything"
+    static var everything: Bool { UserDefaults.standard.bool(forKey: everythingKey) }
 }
 
 /// Where you are, as the steps that got you there: the title bar's trail. Each step opens over

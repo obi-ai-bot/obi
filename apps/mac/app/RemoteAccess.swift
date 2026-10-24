@@ -131,8 +131,8 @@ final class RemoteAccess {
     // MARK: At launch and quit
 
     /// Remote access was on: obid runs the tunnel by itself (#896). A token an older Oby kept in
-    /// this app's keychain goes to obid once, and the app's copy is deleted. With a hostname, on or
-    /// off, this Mac checks in now and once a day, so its installation isn't removed as idle.
+    /// this app's keychain goes to obid once, and the app's copy is deleted. With a hostname, on (or
+    /// off, with `showEverything`), this Mac checks in now and once a day, so its installation isn't removed as idle.
     func start() async {
         // ponytail: once the email sign-in's leftovers are gone from every Mac, drop this.
         for name in Self.oldSecrets { try? secrets.remove(name) }
@@ -161,8 +161,9 @@ final class RemoteAccess {
         }
     }
 
+    /// The launch build hides Remote access (`Launch`): a Mac with it off doesn't check in.
     private func checkInDaily() {
-        guard hostname != nil, checkIns == nil else { return }
+        guard hostname != nil, on || defaults.bool(forKey: Launch.everythingKey), checkIns == nil else { return }
         checkIns = Task { [weak self] in
             while !Task.isCancelled {
                 guard let remote = self else { return }

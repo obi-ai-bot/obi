@@ -138,16 +138,27 @@ struct RunnerSettingsView: View {
     @AppStorage(MacChecks.appleSetting) private var runAppleChecks = true
     @State private var watches: [PairedWatch] = []
     @State private var watchProblem: String?
+    /// The launch build (`Launch`) hides a remote runner and Apple Watch without iPhone.
+    @AppStorage(Launch.everythingKey) private var everything = false
+
+    /// This Mac or a remote runner, and its URL: in the launch build, only on a Mac that already
+    /// has a remote runner's address, so it can come back to This Mac. Otherwise one This Mac switch.
+    private var choosesRemote: Bool { everything || !runnerURL.isEmpty }
 
     var body: some View {
         // Sangam's words, but "the window" where his say "the island", which is gone.
         SetGroup("Runner", footer: onThisMac
                  ? (loginItem.byScript ? "Oby’s engine on this Mac was installed with install.sh. Move it into Oby and the app keeps it running and up to date, with the same settings, jobs and token."
                                        : "Oby’s engine is the app’s login item on this Mac, and Oby follows it on 127.0.0.1.")
-                 : "Oby follows the runner at this address: the window lists its jobs.",
+                 : choosesRemote ? "Oby follows the runner at this address: the window lists its jobs."
+                                 : "Turn on This Mac and Oby’s engine runs here, as the app’s login item.",
                  problem: onThisMac ? loginItem.problem : nil) {
-            SetRow("Runner") {
-                SetSegmented("Runner", selection: $onThisMac, options: [(true, "This Mac"), (false, "Remote")])
+            if choosesRemote {
+                SetRow("Runner") {
+                    SetSegmented("Runner", selection: $onThisMac, options: [(true, "This Mac"), (false, "Remote")])
+                }
+            } else {
+                SetRow("This Mac") { Toggle("This Mac", isOn: $onThisMac).toggleStyle(.set) }
             }
             if onThisMac {
                 SetRow("Login item") {
@@ -159,7 +170,7 @@ struct RunnerSettingsView: View {
                         Button("Move into Oby…") { confirmingMove = true }.buttonStyle(.set)
                     }
                 }
-            } else {
+            } else if choosesRemote {
                 SetRow("URL") { SetField("Runner URL", text: $runnerURL, prompt: "http://tetrix-lab:8790") }
             }
             SetRow("Status") {
@@ -196,15 +207,17 @@ struct RunnerSettingsView: View {
                 Toggle("Build and test agents’ work on this Mac", isOn: $runAppleChecks).toggleStyle(.set)
             }
         }
-        SetGroup("Apple Watch without iPhone", footer: "Away from your iPhone, a paired watch reaches the runner through your Cloudflare Tunnel. Pair one in Oby’s Settings on your iPhone, with Oby open on the watch: pairing asks for Face ID.",
-                 problem: watchProblem) {
-            if watches.isEmpty {
-                SetRow("None yet", quiet: true)
-            }
-            ForEach(watches) { watch in
-                SetRow(watch.name) {
-                    SetValue("Paired")
-                    Button("Remove", role: .destructive) { remove(watch) }.buttonStyle(.set)
+        if everything {
+            SetGroup("Apple Watch without iPhone", footer: "Away from your iPhone, a paired watch reaches the runner through your Cloudflare Tunnel. Pair one in Oby’s Settings on your iPhone, with Oby open on the watch: pairing asks for Face ID.",
+                     problem: watchProblem) {
+                if watches.isEmpty {
+                    SetRow("None yet", quiet: true)
+                }
+                ForEach(watches) { watch in
+                    SetRow(watch.name) {
+                        SetValue("Paired")
+                        Button("Remove", role: .destructive) { remove(watch) }.buttonStyle(.set)
+                    }
                 }
             }
         }
@@ -225,7 +238,7 @@ struct RunnerSettingsView: View {
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in loginItem.refresh() }
             // Once the runner answers, and again after it comes back.
             .task(id: feed.connection) {
-                guard feed.connection == .live, let runner = feed.runner else { return }
+                guard everything, feed.connection == .live, let runner = feed.runner else { return }
                 // A runner older than the Watch API has no list: then there's nothing to show.
                 watches = (try? await runner.watches()) ?? []
             }
@@ -730,6 +743,8 @@ struct AccountUsageRow<Buttons: View>: View {
     var payer = ""
     var lift: @MainActor @Sendable (Bool) async throws -> Void
     @ViewBuilder var buttons: Buttons
+    /// The launch build's Connectors has no Tetrix (`Launch`): then neither has this row.
+    @AppStorage(Launch.everythingKey) private var everything = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
@@ -760,7 +775,7 @@ struct AccountUsageRow<Buttons: View>: View {
                             SetAbout("Full until \(Limits.clock(until))", color: Tokens.needs)
                         }
                         // One Tetrix for every agent (Connectors): how much its jobs used it, or where to connect it.
-                        if state.signedIn {
+                        if everything, state.signedIn {
                             SetAbout(TetrixJobReport.accountLine(connected: state.tetrix == true, jobs: state.tetrixJobs, used: state.tetrixUsed, there: "in Connectors"),
                                      color: state.tetrix == true ? Tokens.muted : Tokens.needs)
                         }
@@ -789,7 +804,8 @@ struct AlertHookSheet: View {
     let repos: [String]
     /// Remote access is on, with this Mac's hostname: the alerts come through its tunnel.
     let remoteOn: Bool
-    let openRemote: () -> Void
+    /// Nil while Remote access is hidden (`Launch`).
+    let openRemote: (() -> Void)?
     let make: (_ repo: String, _ label: String) async throws -> (Runner.HookRow, String)
     /// PagerDuty's two steps: an address first, then the secret PagerDuty shows; cancelled between
     /// them, the address goes again.
@@ -863,7 +879,7 @@ struct AlertHookSheet: View {
                 HStack {
                     Spacer()
                     Button("Cancel", role: .cancel, action: done)
-                    Button("Open Remote Access", action: openRemote).keyboardShortcut(.defaultAction)
+                    if let openRemote { Button("Open Remote Access", action: openRemote).keyboardShortcut(.defaultAction) }
                 }
             } else {
                 Text("Critical and error alerts become cards in your inbox; Look into it starts an investigate job in this repository, with the alert quoted for its agent.")
@@ -1002,6 +1018,8 @@ struct ConnectorsSettingsView: View {
     @State private var showingSentryProjects = false
     /// Connect… on a monitoring tool: its obid source, while its sheet is up.
     @State private var alerting: AlertingTool?
+    /// The launch build lists only GitHub and Slack, and has no Remote access (`Launch`).
+    @AppStorage(Launch.everythingKey) private var everything = false
 
     var body: some View {
         let groups = Connectors.groups(list, query: query)
@@ -1085,7 +1103,7 @@ struct ConnectorsSettingsView: View {
         }
         .sheet(item: Binding(get: { alerting.map(IdentifiedTool.init) }, set: { alerting = $0?.tool })) { shown in
             AlertHookSheet(tool: shown.tool, repos: lists.repos, remoteOn: remote?.on == true && remote?.hostname != nil,
-                           openRemote: { alerting = nil; openSettings(.remote) },
+                           openRemote: everything ? { alerting = nil; openSettings(.remote) } : nil,
                            make: { repo, label in try await makeHook(shown.tool, repo: repo, label: label) },
                            reserve: { try await reserveHook() },
                            finish: { address, repo, secret in try await finishHook(shown.tool, address, repo: repo, secret: secret) },
@@ -1128,7 +1146,7 @@ struct ConnectorsSettingsView: View {
             slack: feed.slack, watch: feed.watch, sentry: lists.sentry, hooks: lists.hooks)
         let accounts = Connectors.accounts(mac: store.accounts, runner: runner?.accounts, local: feed.local,
                                            hasRunner: feed.runner != nil || staged)
-        return Connectors.list(accounts: accounts, runner: runner)
+        return Connectors.shown(Connectors.list(accounts: accounts, runner: runner), everything: everything)
     }
 
     private var typedURL: String { url.trimmingCharacters(in: .whitespaces) }

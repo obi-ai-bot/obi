@@ -449,15 +449,19 @@ final class RunnerFeed {
                         await gitHubRead
                         try Task.checkCancellation()
                         if let routines { self.routines = routines ?? [] }
-                        macs = (try? await runner.macs()) ?? []
-                        shares = (try? await runner.sharedWithMe())?.shares ?? []
-                        macsTask?.cancel()
-                        macsTask = Task { [weak self] in
-                            while !Task.isCancelled {
-                                try? await Task.sleep(for: .seconds(60))
-                                guard let self, let list = try? await runner.macs() else { continue }
-                                self.macs = list
-                                if let shared = try? await runner.sharedWithMe() { self.shares = shared.shares }
+                        // The launch build hides Runner share (`Launch`): with no Macs and no shares, Run on
+                        // another Mac, Shared with you and Use X's share hide themselves.
+                        if Launch.everything {
+                            macs = (try? await runner.macs()) ?? []
+                            shares = (try? await runner.sharedWithMe())?.shares ?? []
+                            macsTask?.cancel()
+                            macsTask = Task { [weak self] in
+                                while !Task.isCancelled {
+                                    try? await Task.sleep(for: .seconds(60))
+                                    guard let self, let list = try? await runner.macs() else { continue }
+                                    self.macs = list
+                                    if let shared = try? await runner.sharedWithMe() { self.shares = shared.shares }
+                                }
                             }
                         }
                         self.tetrix = tetrix

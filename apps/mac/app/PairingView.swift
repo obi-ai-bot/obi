@@ -12,6 +12,8 @@ struct PairingView: View {
     let feed: RunnerFeed
     let remote: RemoteAccess?
     @Environment(\.openSettingsPage) private var openSettings
+    /// The launch build hides Remote access (`Launch`): then nothing here offers it.
+    @AppStorage(Launch.everythingKey) private var everything = false
     @State private var invitation: GatewayInvitation?
     /// The route the invitation was made for, shown with its QR.
     @State private var invited: PairingRoute?
@@ -38,7 +40,7 @@ struct PairingView: View {
             if let (title, about) = blocker {
                 // The buttons check again once it's fixed.
                 SetRow(title, about: about) {
-                    if remote != nil, routes.isEmpty {
+                    if everything, remote != nil, routes.isEmpty {
                         Button("Allow Remote Access") { openSettings(.remote, spotlight: .remoteAccess) }
                             .buttonStyle(.set)
                     }
@@ -108,7 +110,7 @@ struct PairingView: View {
             return ("The gateway is public through Tailscale Funnel", "Turn Funnel off for it first: Oby never pairs a phone over the internet.")
         }
         guard routes.isEmpty else { return nil }
-        return ("No way to reach this Mac yet", "Turn on Remote access, or publish the gateway on your tailnet: \(PairingRoute.serveCommand(port: port))")
+        return ("No way to reach this Mac yet", "\(everything ? "Turn on Remote access, or publish" : "Publish") the gateway on your tailnet: \(PairingRoute.serveCommand(port: port))")
     }
 
     /// The one the user picked while it's still there, else the first.
@@ -128,7 +130,7 @@ struct PairingView: View {
         do {
             let name = Host.current().localizedName ?? "Mac"
             guard let route else {
-                throw RunnerError(message: "Turn on Remote access, or publish the gateway on your tailnet, before creating a pairing QR code.")
+                throw RunnerError(message: "\(everything ? "Turn on Remote access, or publish" : "Publish") the gateway on your tailnet before creating a pairing QR code.")
             }
             var request = try runnerRequest(path: "v1/pairing/invite", method: "POST")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")

@@ -88,6 +88,9 @@ struct SidebarView: View {
     let width: CGFloat
     let onNewTask: () -> Void
     @AppStorage(GroupBy.key) private var groupBy = GroupBy.type
+    @AppStorage(Launch.everythingKey) private var everything = false
+    /// This Mac is shared with the Obysphere: the launch build lists Sharing then, so it can be turned off.
+    @State private var sharingOn = false
     @State private var search = ""
     @State private var searching = false
     @FocusState private var searchFocused: Bool
@@ -152,10 +155,16 @@ struct SidebarView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if searching && !listsSettings { searchField.transition(.opacity.combined(with: .move(edge: .top))) }
                     if listsSettings {
-                        ForEach(SettingsPage.allCases, id: \.self) { page in
-                            SettingsRow(page: page, on: state.trail.top == .settings(page)) {
-                                withAnimation(Tokens.warm) { state.openSettings(page) }
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(SettingsPage.shown(everything: everything, remoteOn: model.remote?.on == true, sharingOn: sharingOn), id: \.self) { page in
+                                SettingsRow(page: page, on: state.trail.top == .settings(page)) {
+                                    withAnimation(Tokens.warm) { state.openSettings(page) }
+                                }
                             }
+                        }
+                        .task(id: model.feed.connection) {
+                            guard !everything, let runner = model.feed.runner else { return }
+                            sharingOn = (try? await runner.sharingMac())?.settings.on == true
                         }
                     } else if listsConversations {
                         ConversationsPanel(model: model, state: state, search: search)
