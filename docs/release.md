@@ -76,7 +76,7 @@ In order, it:
 
 0. **Runs the checks**, `swift test` and the Mac app's `MacTests`, one after the other (side by side, the load timed tests out on 0.3.0) through [`scripts/tested.sh`](../scripts/tested.sh), skipping each one that already passed on this Mac on the same files (see "Tests a release skips"). `--full` runs both whatever the records say. Nothing is built unless they pass.
 1. **Bumps the version**, once it has checked that the checkout is still clean and `HEAD` hasn't moved since it started. `MARKETING_VERSION` becomes `0.2.0` and `CURRENT_PROJECT_VERSION` the git commit count including the bump commit, so build numbers only grow; both in `apps/Oby.xcodeproj`, committed as `chore(release): Oby 0.2.0 (N)`.
-2. **Archives the `Oby` scheme** (Release) and exports it with Developer ID ([`apps/ExportOptions-DeveloperID.plist`](../apps/ExportOptions-DeveloperID.plist), `teamID` filled from `OBY_TEAM_ID`), on warm caches (see "Warm builds"). Then it checks that the checkout is still clean at the bump commit, the version, that the app and obid hold arm64 and x86_64 (`lipo`), every signature (`codesign --deep --strict`), and `obi-vm` (see "The guest image"), and scans the app with gitleaks before anything leaves the Mac.
+2. **Archives the `Oby` scheme** (Release) and exports it with Developer ID ([`apps/ExportOptions-DeveloperID.plist`](../apps/ExportOptions-DeveloperID.plist), `teamID` filled from `OBY_TEAM_ID`), on warm caches (see "Warm builds"). Then it checks that the checkout is still clean at the bump commit, the version, that the app and obid hold arm64 and x86_64 (`lipo`), every signature (`codesign --deep --strict`), that the launch build carries none of what it leaves out or, with `--full-build`, that a full build carries all of it, `obi-vm` included (see "Full builds" and "The guest image"), and scans the app with gitleaks before anything leaves the Mac.
 3. **Notarizes the app** (`xcrun notarytool submit --keychain-profile oby-notary --wait`), staples the ticket, validates it and checks it with `spctl`. While Apple works, it scans the commits since the last `v*` tag with gitleaks, and gathers the release notes and the published appcast.
 4. **Builds `Oby-0.2.0.dmg`** from the stapled app, checks the app in it with `codesign`, signs the DMG with the Developer ID, notarizes and staples it too, then checks the DMG (`stapler validate`, `hdiutil verify`, `spctl`), the app in it (`spctl`) and a copy of the app with a quarantine flag (`spctl`, `stapler validate`).
 5. **Signs it for Sparkle** with `sign_update` and the EdDSA key in the keychain.
@@ -90,9 +90,30 @@ If a release stops at the upload (its DMG and appcast are built, notarized and s
 
 Then push the commit and the tag: `git push origin HEAD v0.2.0`. Shipped Obys pick the update up within 6 hours; **Check for Updates…** gets it now.
 
+### Full builds
+
+The launch build (the owner's decision of 2026-10-23, [AGENTS.md, "The launch build"](../AGENTS.md)) leaves out what launch hides: `cloudflared` (Remote access), `obi-vm` (sharing this Mac) and obid's web app (`/app/` then answers 404). A full build carries them, as every build did before, for Deskree's own Macs.
+
+- **One switch, `OBY_FULL_BUILD=1`**, a build setting the Bundle cloudflared, Bundle obi-vm and Bundle obid phases read. From the command line, `xcodebuild … OBY_FULL_BUILD=1`; in Xcode, `OBY_FULL_BUILD = 1` in `apps/config/Signing.local.xcconfig`. Without it, the phases leave the three out and remove what an earlier full build left in the app. Only a full Release build needs Node (`npm ci && npm run build` in `apps/web`).
+- **`scripts/release.sh <version> --full-build`** archives with `OBY_FULL_BUILD=1` and checks that cloudflared is universal, `obi-vm` and its guest image (see "The guest image": a real release stops when the image isn't published) and the web app. Without it, the archive gets `OBY_FULL_BUILD=0` whatever `Signing.local.xcconfig` says, and the release stops if the app carries any of the three. (`--full` is the checks' flag: it runs every suite.)
+- **One appcast for both.** A full release reaches every Oby that updates, as every release did before this; a Mac with a full build that updates to a launch release loses cloudflared, `obi-vm` and the web app. Full builds have no feed of their own yet.
+- **obid is stripped** in every build (`[profile.release] strip = true` in `core/Cargo.toml`).
+
+Measured on 2026-10-23, archived like a dry run (Release, both architectures, ad hoc), the DMG a plain UDZO one with an Applications link; "before" is `e0f75565`, the commit the switch came after:
+
+| | Before | Launch build | Full build |
+| --- | --- | --- | --- |
+| Oby.app on disk | 261.3 MB | 167.4 MB | 246.6 MB |
+| Zipped (`ditto -c -k`) | 107.7 MB | 65.5 MB | 105.4 MB |
+| DMG | 118.2 MB | 73.4 MB | 116.1 MB |
+| `cloudflared` | 77.7 MB | none | 77.7 MB |
+| `obid` | 73.6 MB | 58.9 MB, stripped | 58.9 MB, stripped |
+| `obi-vm`, the web app | 0.2 MB, 1.4 MB | none | 0.2 MB, 1.4 MB |
+| `gh`, the same in all three | 79.1 MB | 79.1 MB | 79.1 MB |
+
 ### The guest image
 
-Sharing a Mac (#797) runs teammates' jobs in a VM. `obi-vm` is built into the app by the "Bundle obi-vm" build phase (`apps/mac/app/Tools/bundle-obi-vm.sh`): arm64, the virtualization entitlement, and the SHA-256s of the image [`core/obi-vm/image.json`](../core/obi-vm/image.json) pins built in. The image itself (171 MB to fetch, zstd-compressed, and 665 MB on disk, as core/obi-vm/image.json pins it: no docs or translations, only the kernel modules the guest loads, no Codex) is published once per new image, compressed, and obid fetches it when an owner turns sharing on. `release.sh` checks that `obi-vm` is arm64, has the entitlement and answers `obi-vm image` with the pinned hashes and sizes, and that the pinned image's `.zst` files are published at `https://downloads.oby.deskree.com/vm/<root.img's SHA-256>/`, each its pinned size (a dry run only warns).
+Sharing a Mac (#797) runs teammates' jobs in a VM. `obi-vm` is built into the app by the "Bundle obi-vm" build phase (`apps/mac/app/Tools/bundle-obi-vm.sh`): arm64, the virtualization entitlement, and the SHA-256s of the image [`core/obi-vm/image.json`](../core/obi-vm/image.json) pins built in. The image itself (171 MB to fetch, zstd-compressed, and 665 MB on disk, as core/obi-vm/image.json pins it: no docs or translations, only the kernel modules the guest loads, no Codex) is published once per new image, compressed, and obid fetches it when an owner turns sharing on. Only a full build has `obi-vm` (see "Full builds"). With `--full-build`, `release.sh` checks that `obi-vm` is arm64, has the entitlement and answers `obi-vm image` with the pinned hashes and sizes, and that the pinned image's `.zst` files are published at `https://downloads.oby.deskree.com/vm/<root.img's SHA-256>/`, each its pinned size (a dry run only warns).
 
 A new image (a change in `core/obi-vm/image/`):
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Ships Oby as a notarized DMG that updates itself (#282): docs/release.md has the steps around it.
 #
-#   scripts/release.sh <version> [--dry-run] [--full] [--notes <file>] [--from-upload]
+#   scripts/release.sh <version> [--dry-run] [--full] [--full-build] [--notes <file>] [--from-upload]
 #
 # Run on a Mac with Xcode 27. In order:
 #   0. runs the checks (swift test, the Mac app with MacTests), one after the other, through
@@ -30,6 +30,10 @@
 # --dry-run does everything up to the signatures with ad hoc identities, and leaves out the
 # notarization, the upload, the commit and the tag, so it runs on any Mac today. Everything lands in
 # build/release/ (gitignored).
+#
+# --full-build archives the full build (OBY_FULL_BUILD=1): cloudflared, obi-vm and obid's web app,
+# which the launch build leaves out, are in, and obi-vm's guest image is checked. Without it the
+# release checks that none of them is in the app (docs/release.md, "Full builds").
 #
 # Credentials come from the keychain (notarytool's profile, Sparkle's key, wrangler's own login,
 # or R2 keys under the service "oby-r2") or from .env.local (gitignored), and are never printed.
@@ -323,20 +327,21 @@ upload_r2() {
 }
 
 main() {
-    local version="" dry_run=false full=false notes_file="" from_upload=false
+    local version="" dry_run=false full=false full_build=false notes_file="" from_upload=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --dry-run) dry_run=true ;;
             --full) full=true ;;
+            --full-build) full_build=true ;;
             --from-upload) from_upload=true ;;
             --notes) shift; notes_file="${1:-}"; [[ -f "$notes_file" ]] || die "--notes needs a file" ;;
-            -h|--help) sed -n '2,36p' "${BASH_SOURCE[0]}"; exit 0 ;;
+            -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
             -*) die "unknown option $1" ;;
             *) [[ -z "$version" ]] || die "one version only"; version="$1" ;;
         esac
         shift
     done
-    [[ -n "$version" ]] || die "usage: scripts/release.sh <version> [--dry-run] [--full] [--notes <file>] [--from-upload]"
+    [[ -n "$version" ]] || die "usage: scripts/release.sh <version> [--dry-run] [--full] [--full-build] [--notes <file>] [--from-upload]"
     ! { $from_upload && $dry_run; } || die "--from-upload publishes: it doesn't go with --dry-run"
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "the version is X.Y.Z, like 1.2.3"
     [[ "$(uname)" == "Darwin" ]] || die "runs on a Mac with Xcode"
@@ -478,6 +483,8 @@ main() {
         MARKETING_VERSION="$version"
         CURRENT_PROJECT_VERSION="$build"
         OBY_CARGO_TARGET_DIR="$cache/cargo"
+        # Always said, so apps/config/Signing.local.xcconfig can't make a release full, or lean.
+        OBY_FULL_BUILD="$($full_build && echo 1 || echo 0)"
     )
     if $dry_run; then
         archive_args+=("${signing[@]}")
@@ -502,9 +509,21 @@ main() {
     [[ "$built" == "$version ($build)" ]] || die "the app says $built, not $version ($build)"
     check_universal "$app/Contents/MacOS/$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")"
     check_universal "$app/Contents/Helpers/obid"
-    check_obi_vm "$app/Contents/Helpers/obi-vm" "$dry_run"
+    # What the launch build leaves out (AGENTS.md, "The launch build"): in a full build, and only there.
+    local kind="the launch build" part
+    if $full_build; then
+        kind="a full build"
+        [[ -x "$app/Contents/MacOS/cloudflared" ]] || die "a full build has no Contents/MacOS/cloudflared"
+        check_universal "$app/Contents/MacOS/cloudflared"
+        check_obi_vm "$app/Contents/Helpers/obi-vm" "$dry_run"
+        [[ -f "$app/Contents/Resources/obid/web/index.html" ]] || die "a full build has no web app (Contents/Resources/obid/web)"
+    else
+        for part in Contents/MacOS/cloudflared Contents/Helpers/obi-vm Contents/Resources/obid/web; do
+            [[ ! -e "$app/$part" ]] || die "the launch build carries $part: only --full-build does"
+        done
+    fi
     codesign --verify --deep --strict "$app" || die "Oby.app doesn't verify"
-    note "Oby $built, arm64 and x86_64, feed $(plutil -extract SUFeedURL raw -o - "$app/Contents/Info.plist")"
+    note "Oby $built, $kind, arm64 and x86_64, feed $(plutil -extract SUFeedURL raw -o - "$app/Contents/Info.plist")"
 
     # The secret scan of the app before anything leaves this Mac, Apple's notary service included
     # (AGENTS.md); the commits' and the appcast's follow. If the scanner can't run, nothing is

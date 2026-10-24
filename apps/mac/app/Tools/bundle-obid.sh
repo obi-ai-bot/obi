@@ -2,10 +2,10 @@
 # Bundles obid, Oby's engine, with Oby (the owner's decision of 2026-10-18): Contents/Helpers/obid,
 # signed with the app's identity and the hardened runtime, its launch agent at
 # Contents/Library/LaunchAgents/com.deskree.oby.obid.plist (apps/mac/app/LoginItem.swift registers it),
-# and its plug-ins and web app at Contents/Resources/obid, where obid finds them from inside the
-# app (core/crates/obid/src/app.rs). Also keeps the Swift runner's old plist there, only so the app
-# can unregister it on Macs where an older Oby registered it. Run by the "Bundle obid" build phase
-# of the Oby target (apps/Oby.xcodeproj).
+# and its plug-ins (and, in a full build, its web app) at Contents/Resources/obid, where obid finds
+# them from inside the app (core/crates/obid/src/app.rs). Also keeps the Swift runner's old plist
+# there, only so the app can unregister it on Macs where an older Oby registered it. Run by the
+# "Bundle obid" build phase of the Oby target (apps/Oby.xcodeproj).
 set -euo pipefail
 
 root="$SRCROOT/.."
@@ -54,14 +54,17 @@ rm -rf "$resources/plugins" "$resources/web"
 # Only the plug-ins' files the repository tracks: nothing a checkout happens to hold (a local
 # secret, a build folder) is signed into the app.
 git -C "$root" ls-files -z -- plugins | rsync -a --from0 --files-from=- "$root/" "$resources/"
-# The web app obid serves at /app/: a release builds it, and fails if it can't; a debug build takes
-# it when it's built, and obid answers 404 there otherwise.
-if [[ "${CONFIGURATION:-Debug}" == Release ]]; then
-  env -i HOME="$HOME" PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
-    zsh -c 'cd "$1" && npm ci --silent && npm run build --silent' zsh "$root/apps/web" \
-    || { echo "error: a release of Oby needs obid's web app: npm ci && npm run build in apps/web failed" >&2; exit 1; }
+# The web app obid serves at /app/, only in a full build (OBY_FULL_BUILD=1, docs/release.md; the
+# launch build leaves it out, AGENTS.md, "The launch build"): a full release builds it, and fails
+# if it can't; a full debug build takes it when it's built. Without it obid answers 404 there.
+if [[ "${OBY_FULL_BUILD:-}" == 1 ]]; then
+  if [[ "${CONFIGURATION:-Debug}" == Release ]]; then
+    env -i HOME="$HOME" PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
+      zsh -c 'cd "$1" && npm ci --silent && npm run build --silent' zsh "$root/apps/web" \
+      || { echo "error: a full release of Oby needs obid's web app: npm ci && npm run build in apps/web failed" >&2; exit 1; }
+  fi
+  if [[ -f "$root/apps/web/dist/index.html" ]]; then cp -R "$root/apps/web/dist" "$resources/web"; fi
 fi
-if [[ -f "$root/apps/web/dist/index.html" ]]; then cp -R "$root/apps/web/dist" "$resources/web"; fi
 
 # Signed like the app: the hardened runtime for notarization, and a secure timestamp on release
 # builds (it needs the network). Xcode seals the app, with this inside, after this phase.

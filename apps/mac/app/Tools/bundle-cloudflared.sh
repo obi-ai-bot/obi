@@ -5,6 +5,11 @@
 # in the repository. Run by the "Bundle cloudflared" build phase of the Oby target (apps/Oby.xcodeproj).
 set -euo pipefail
 
+# Only a full build carries it (OBY_FULL_BUILD=1, docs/release.md): Remote access is hidden in the
+# launch build (AGENTS.md, "The launch build"). Without it, what an earlier full build left goes.
+dest="$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/cloudflared"
+if [[ "${OBY_FULL_BUILD:-}" != 1 ]]; then rm -f "$dest"; exit 0; fi
+
 VERSION=2026.10.0
 typeset -A SHA256
 SHA256[arm64]=a2f79ff7b9420aa537d74af239f376da170bbabeb529aec416002adac6a72e70
@@ -35,7 +40,6 @@ fetch() {
 fetch arm64
 fetch amd64
 
-dest="$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/cloudflared"
 mkdir -p "$(dirname "$dest")"
 rm -f "$dest"
 lipo -create -output "$dest" "$work/arm64/cloudflared" "$work/amd64/cloudflared"

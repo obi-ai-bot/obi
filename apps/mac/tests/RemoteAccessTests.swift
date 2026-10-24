@@ -5,9 +5,11 @@ import Testing
 
 /// Remote access (#285): the cloudflared bundled with Oby, and this Mac's side of turning it on.
 struct RemoteAccessTests {
-    /// cloudflared ships inside Oby.app (apps/mac/app/Tools/bundle-cloudflared.sh): the pinned release,
-    /// universal, signed with the app's identity and the hardened runtime.
-    @Test func cloudflaredIsBundledAndSigned() throws {
+    /// cloudflared ships inside a full build of Oby.app (apps/mac/app/Tools/bundle-cloudflared.sh,
+    /// OBY_FULL_BUILD=1): the pinned release, universal, signed with the app's identity and the
+    /// hardened runtime. The launch build leaves it out (docs/release.md, "Full builds").
+    @Test(.enabled(if: ObidTunnel.bundled != nil, "cloudflared is only in a full build (OBY_FULL_BUILD=1)"))
+    func cloudflaredIsBundledAndSigned() throws {
         let binary = try #require(ObidTunnel.bundled)
         #expect(binary.path.hasSuffix("/Contents/MacOS/cloudflared"))
         #expect(FileManager.default.isExecutableFile(atPath: binary.path))

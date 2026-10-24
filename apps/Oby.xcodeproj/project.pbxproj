@@ -120,6 +120,7 @@
 				Oby.entitlements,
 				Tools/bundle-cloudflared.sh,
 				Tools/bundle-gh.sh,
+				Tools/bundle-obi-vm.sh,
 				Tools/bundle-obid.sh,
 				Tools/com.deskree.oby.obid.plist,
 			);
