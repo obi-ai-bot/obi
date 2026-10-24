@@ -122,14 +122,21 @@ impl Sealer {
     }
 }
 
-/// The other direction's opening: only a counter above the last one opened.
+/// What [`Opener::open`] answers for an envelope that opens but isn't the next one: one before it
+/// is missing (the Sphere dropped it), so the session is over and the phone says hello again.
+pub const GAP: Refused = "an envelope before this one is missing: the session is over";
+
+/// The other direction's opening: exactly the next counter, every time.
 pub struct Opener {
     key: aead::LessSafeKey,
     version: u8,
-    last: Option<u64>,
+    next: u64,
 }
 
 impl Opener {
+    /// The next envelope's frame. One already opened (replayed, older) or one that doesn't open
+    /// (changed, another session's) is refused and spends nothing; one that opens with a counter
+    /// past the next is [`GAP`].
     pub fn open(&mut self, envelope: &[u8]) -> Result<Vec<u8>, Refused> {
         if envelope.len() < OVERHEAD || envelope.len() > MAX || envelope[1] != SEALED {
             return Err("that isn't a sealed envelope");
@@ -138,7 +145,7 @@ impl Opener {
             return Err("that envelope claims another version than the session's");
         }
         let counter = u64::from_be_bytes(envelope[2..10].try_into().expect("8 bytes"));
-        if self.last.is_some_and(|last| counter <= last) {
+        if counter < self.next {
             return Err("that envelope was replayed or came out of order");
         }
         let mut body = envelope[10..].to_vec();
@@ -147,7 +154,10 @@ impl Opener {
             .open_in_place(nonce(counter), aead::Aad::from(&envelope[..10]), &mut body)
             .map_err(|_| "that envelope doesn't open: changed, or not this session's")?
             .len();
-        self.last = Some(counter);
+        if counter > self.next {
+            return Err(GAP);
+        }
+        self.next = counter + 1;
         body.truncate(plain);
         Ok(body)
     }
@@ -239,7 +249,7 @@ impl MacKey {
             opener: Opener {
                 key: sealing(&phone_key),
                 version,
-                last: None,
+                next: 0,
             },
         })
     }
@@ -309,7 +319,7 @@ impl Phone {
             Opener {
                 key: sealing(&mac_key),
                 version,
-                last: None,
+                next: 0,
             },
         ))
     }
@@ -454,10 +464,10 @@ mod tests {
         let (mut session, mut sealer, _) = vector();
         let first = sealer.seal(b"first");
         let second = sealer.seal(b"second");
+        assert!(session.opener.open(&first).is_ok());
         assert!(session.opener.open(&second).is_ok());
-        // The first comes after the second: out of order, refused.
+        // Either again: replayed or older, refused.
         assert!(session.opener.open(&first).is_err());
-        // The second again: replayed.
         assert!(session.opener.open(&second).is_err());
         // A Mac's envelope sent back to it opens under neither of its keys.
         let mac_said = session.sealer.seal(b"to the phone");
@@ -467,6 +477,23 @@ mod tests {
         let phone = Phone::hello_with(&mac.public(), &bytes(32), &[VERSION]).unwrap();
         let mut again = mac.welcome(&phone.hello).unwrap();
         assert!(again.opener.open(&first).is_err());
+    }
+
+    /// Only the next envelope goes: a later one that opens proves one is missing, and nothing
+    /// was skipped silently.
+    #[test]
+    fn a_missing_envelope_ends_the_session() {
+        let (mut session, mut sealer, _) = vector();
+        let first = sealer.seal(b"first");
+        let second = sealer.seal(b"second");
+        assert_eq!(session.opener.open(&second).err(), Some(GAP));
+        // A forged one past the next doesn't open, so it proves nothing.
+        let mut forged = sealer.seal(b"third");
+        forged[30] ^= 0x01;
+        assert_ne!(session.opener.open(&forged).err(), Some(GAP));
+        // Nothing was spent: the first is still the next one.
+        assert!(session.opener.open(&first).is_ok());
+        assert!(session.opener.open(&second).is_ok());
     }
 
     #[test]

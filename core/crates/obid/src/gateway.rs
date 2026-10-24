@@ -299,8 +299,9 @@ impl Gateway {
 
     /// Redeems the open invitation with its secret or its code, once: `410` when there's none or
     /// it expired, `401` for a wrong credential (the fifth uses it up). `via` is the relay device
-    /// id a sealed request came by: it must be the invitation's own relay token's, and the device
-    /// it pairs is then bound to it; on the listener (`None`) the device is bound to no relay.
+    /// id a sealed request came by, and must be the invitation's own relay token's: an invitation
+    /// made through the Obysphere is redeemed only sealed, on that token's socket, and pairs a
+    /// device bound to it; any other only on the listener (`None`), never through a relay.
     pub fn redeem(
         &self,
         credential: &str,
@@ -318,7 +319,7 @@ impl Gateway {
             return Err((StatusCode::GONE, GONE));
         }
         let given = digest(credential);
-        let right_relay = via.is_none_or(|via| open.relay.as_deref() == Some(via));
+        let right_relay = open.relay.as_deref() == via;
         if !right_relay
             || !crate::token::same(&given, &open.secret) && !crate::token::same(&given, &open.code)
         {
@@ -475,9 +476,10 @@ pub struct InviteRequest {
     hostname: Option<String>,
 }
 
-/// `POST /v1/pairing/invite`. With an Obysphere the phone pairs through it, sealed (crate::relay):
-/// the invitation carries its relay token, registered with the Sphere first. Without one, only a
-/// `url` the phone reaches the gateway by (Remote access, the tailnet) makes an invitation.
+/// `POST /v1/pairing/invite`. With an Obysphere the phone pairs through it, sealed (crate::relay),
+/// and only so: the invitation carries its relay token, registered with the Sphere first, and no
+/// route to the listener (a `url` given is left out). Without one, only a `url` the phone reaches
+/// the gateway by (Remote access, the tailnet) makes an invitation.
 pub async fn invite(
     State(shared): State<Arc<Shared>>,
     axum::Json(request): axum::Json<InviteRequest>,
@@ -498,11 +500,11 @@ pub async fn invite(
     };
     let name = request.name.unwrap_or_else(|| shared.host.clone());
     let (url, hostname) = match (request.url, authority, &relay) {
-        (Some(url), Some(authority), _) => (url, request.hostname.unwrap_or(authority)),
-        (None, _, Some(relay)) => (
+        (_, _, Some(relay)) => (
             relay.sphere.clone(),
             request.hostname.unwrap_or_else(|| shared.host.clone()),
         ),
+        (Some(url), Some(authority), None) => (url, request.hostname.unwrap_or(authority)),
         _ => {
             return error(
                 StatusCode::CONFLICT,

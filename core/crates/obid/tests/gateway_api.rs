@@ -728,6 +728,8 @@ type Socket =
 /// A phone the test plays, as the iPhone does: its relay socket and its session's keys.
 struct TestPhone {
     ws: Socket,
+    /// The Mac's key, from the QR.
+    key: Vec<u8>,
     sealer: Sealer,
     opener: Opener,
     next: u32,
@@ -794,11 +796,28 @@ impl TestPhone {
         let (sealer, opener) = phone.welcomed(&welcome).expect("the pinned Mac answers");
         TestPhone {
             ws,
+            key,
             sealer,
             opener,
             next: 1,
             sent: Vec::new(),
         }
+    }
+
+    /// A new session on the same socket, as a phone starts over.
+    async fn hello_again(&mut self) {
+        let phone = Phone::hello(&self.key).unwrap();
+        self.ws
+            .send(Message::Binary(phone.hello.clone().into()))
+            .await
+            .unwrap();
+        let welcome = next_binary(&mut self.ws, 10)
+            .await
+            .expect("a welcome")
+            .expect("the socket stays open");
+        (self.sealer, self.opener) = phone.welcomed(&welcome).expect("the pinned Mac answers");
+        self.next = 1;
+        self.sent.clear();
     }
 
     async fn send(&mut self, frame: Frame) {
@@ -935,7 +954,7 @@ async fn relay_paired(obid: &Obid, sphere: &FakeSphere, name: &str) -> (TestPhon
 /// and forgetting the phone revokes its relay token.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn obid_seal_everything_between_a_paired_phone_and_the_gateway_end_to_end() {
-    let folder = Folder::new("gateway-relay");
+    let folder = Folder::new("gateway-phone-relay");
     let (sphere, obid) = joined(&folder).await;
     // No phone yet: no relay.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1089,7 +1108,22 @@ async fn the_relay_refuses_replayed_changed_and_foreign_envelopes() {
     }
     assert!(phone.frame(2).await.is_none(), "a replay was answered");
 
-    // A changed envelope gets nothing, and spends nothing: the next one is answered.
+    // An envelope someone else made up gets nothing, and spends nothing: the phone's next
+    // envelope is answered.
+    let mut forged = vec![1, 3];
+    forged.extend_from_slice(&(phone.sent.len() as u64).to_be_bytes());
+    forged.extend_from_slice(&[7u8; 48]);
+    phone.ws.send(Message::Binary(forged.into())).await.unwrap();
+    assert!(
+        phone.frame(2).await.is_none(),
+        "a forged envelope was answered"
+    );
+    let (status, _) = phone.call("GET", "/v1/status", Some(&token), None).await;
+    assert_eq!(status, 200, "the session goes on");
+
+    // An envelope the Sphere changed (or dropped) gets nothing, and the phone's next one shows
+    // that one is missing: obid ends the session with a sealed `reset` on stream 0, nothing in it
+    // is skipped silently, and the phone starts over with a new hello.
     let head = json!({"method": "GET", "path": "/v1/status",
                       "headers": {"authorization": format!("Bearer {token}")}});
     let mut sealed = phone
@@ -1102,8 +1136,27 @@ async fn the_relay_refuses_replayed_changed_and_foreign_envelopes() {
         "a changed envelope was answered"
     );
     phone.next += 1;
+    phone.ask("GET", "/v1/status", Some(&token), None).await;
+    let over = phone.frame(10).await.expect("the session's end");
+    assert_eq!((over.stream, over.kind), (0, Kind::Reset), "{over:?}");
+    phone.hello_again().await;
     let (status, _) = phone.call("GET", "/v1/status", Some(&token), None).await;
-    assert_eq!(status, 200, "the session goes on");
+    assert_eq!(status, 200, "a new session");
+
+    // A hello the Sphere makes up for a device it never was told of starts nothing.
+    let stranger = obi_protocol::keys::sha256(b"no phone's relay token");
+    let id = relay["id"].as_str().unwrap();
+    let mut framed = stranger.to_vec();
+    framed.extend_from_slice(&Phone::hello(&phone.key).unwrap().hello);
+    let mac = sphere.lock().relay_macs[id].1.clone();
+    mac.send(axum::extract::ws::Message::Binary(framed.into()))
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let seen = sphere.lock().relayed.clone();
+    assert!(
+        !seen.windows(32).any(|w| w == stranger),
+        "obid welcomed a device it doesn't know"
+    );
 
     // A request without a token, or with a wrong one, is the gateway's 401, sealed.
     let (status, _) = phone.call("GET", "/v1/status", None, None).await;
@@ -1135,6 +1188,38 @@ async fn the_relay_refuses_replayed_changed_and_foreign_envelopes() {
         "a hello to another key was welcomed"
     );
     drop(ws);
+
+    // An invitation made through the Obysphere is only ever redeemed sealed: never on the
+    // listener, by its secret or its code, and it offers no route there, even when asked for one.
+    let invitation = tokio::task::block_in_place(|| {
+        call(
+            &obid,
+            "POST",
+            "/v1/pairing/invite",
+            Some(&json!({"url": "https://mac.tail0000.ts.net:8443"})),
+        )
+    })
+    .body;
+    assert_eq!(invitation["url"], sphere.url.as_str(), "{invitation}");
+    for credential in [&invitation["secret"], &invitation["code"]] {
+        let unsealed = tokio::task::block_in_place(|| {
+            through(
+                &obid,
+                None,
+                "POST",
+                "/v1/pairing",
+                Some(&json!({"credential": credential, "name": "Mallory"})),
+            )
+        });
+        assert_eq!(unsealed.status, 401, "{}", unsealed.text);
+    }
+    let devices = tokio::task::block_in_place(|| call(&obid, "GET", "/v1/pairing/devices", None));
+    assert_eq!(
+        devices.body.as_array().unwrap().len(),
+        2,
+        "{}",
+        devices.text
+    );
 
     // An invitation that isn't this relay token's isn't redeemed through it.
     let invitation = relay_invitation(&obid);
