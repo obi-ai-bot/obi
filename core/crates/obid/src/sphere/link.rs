@@ -281,6 +281,8 @@ pub struct Link {
     setup: super::hosting::Setup,
     /// Sentry, when obid has it (crate::sentry): what a Sentry offer's start reads.
     sentry: std::sync::OnceLock<Arc<crate::sentry::Sentry>>,
+    /// The phone relay (crate::relay): told at once when this Obi's membership is revoked.
+    relay: std::sync::OnceLock<Arc<crate::relay::Relay>>,
 }
 
 fn api(status: StatusCode, message: impl Into<String>) -> ApiError {
@@ -510,6 +512,7 @@ impl Link {
             hosting: super::hosting::Hosting::default(),
             setup: super::hosting::Setup::from(&setup_config),
             sentry: std::sync::OnceLock::new(),
+            relay: std::sync::OnceLock::new(),
         });
         // The inbox hears of the permissions jobs wait on. Jobs tells it with none of its own
         // locks held, and never while this Link's state is locked (only `start_obi_review` is
@@ -760,6 +763,10 @@ impl Link {
     /// Sentry's offers start with what it reads then (crate::sentry::Sentry::quote).
     pub fn use_sentry(&self, sentry: Arc<crate::sentry::Sentry>) {
         let _ = self.sentry.set(sentry);
+    }
+
+    pub fn use_relay(&self, relay: Arc<crate::relay::Relay>) {
+        let _ = self.relay.set(relay);
     }
 
     /// What a read of the owner's GitHub work found (crate::github_work): a `github` item for each
@@ -1725,6 +1732,30 @@ impl Link {
         Ok(token.access_token)
     }
 
+    /// The Sphere's client while obid is a member (`joined`): the phone relay's (crate::relay).
+    pub fn relay_client(&self) -> Option<Client> {
+        let state = self.lock();
+        state.membership.as_ref().filter(|m| m.state == "joined")?;
+        state.client.clone()
+    }
+
+    /// An access token for the phone relay's calls and socket, and when it ends (Unix seconds).
+    pub async fn relay_token(&self) -> Result<(String, i64), ClientError> {
+        let token = self.token().await?;
+        let ends = self
+            .lock()
+            .token
+            .as_ref()
+            .filter(|(held, _)| *held == token)
+            .map_or(time::now() + TOKEN_MARGIN, |(_, ends)| *ends);
+        Ok((token, ends))
+    }
+
+    /// The Sphere refused a relay call: a refused token is forgotten, as for any other call.
+    pub fn relay_refused(&self, error: &ClientError) {
+        self.refused_token(error);
+    }
+
     /// What to do with a refusal of the token: forget it, so the next call exchanges a new one.
     fn refused_token(&self, error: &ClientError) {
         if matches!(error, ClientError::Refused { status: 401, .. }) {
@@ -1867,6 +1898,10 @@ impl Link {
         };
         if let Some(membership) = revoked {
             let _ = self.files.save_membership(&membership);
+            // The relay's socket stops serving phones now, not at its next check.
+            if let Some(relay) = self.relay.get() {
+                relay.wake();
+            }
         }
         Ok(())
     }

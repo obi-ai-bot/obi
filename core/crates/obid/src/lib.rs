@@ -46,6 +46,7 @@ pub mod policy;
 pub mod process;
 pub mod publish;
 pub mod push;
+pub mod relay;
 pub mod repos;
 pub mod review;
 pub mod routes;
@@ -314,6 +315,8 @@ pub async fn serve(
     let cleared = clear::Cleared::open(&config.home);
     let devices = devices::Devices::open(&config.home);
     let paired = gateway::Gateway::open(&config.home);
+    let relay = relay::Relay::open(&config.home);
+    link.use_relay(relay.clone());
     let broker_host = if cfg!(target_os = "linux") {
         format!("http://10.0.2.2:{}", bound.port())
     } else {
@@ -374,6 +377,7 @@ pub async fn serve(
         cleared,
         devices,
         gateway: paired,
+        relay,
         connections,
         jobs: jobs.clone(),
         events,
@@ -432,6 +436,8 @@ pub async fn serve(
             }
         });
     }
+    // Phones paired through the Obysphere reach the same router, sealed (crate::relay).
+    relay::spawn(shared.clone(), gateway::router(shared.clone(), app.clone()));
     // Jobs that were queued or running when obid last stopped carry on, and so does its Sphere.
     jobs.resume();
     link.start();

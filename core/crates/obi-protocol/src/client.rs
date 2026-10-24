@@ -304,6 +304,65 @@ impl Client {
         Client::expect(code, body, &[200], "wire/member")
     }
 
+    /// `PUT /v0.1/relay/{relay}` (sphere-api.md 9.2): the phone relay is this Obi's Mac's, and
+    /// answers the SHA-256 of each phone's relay token it holds, hex.
+    pub async fn put_relay(&self, token: &str, relay: &str) -> Result<Vec<String>, ClientError> {
+        let url = format!("{}/v0.1/relay/{relay}", self.base);
+        let (status, body) = self
+            .call(|| self.http.put(&url).bearer_auth(token).body(""))
+            .await?;
+        if !matches!(status, 200 | 201) {
+            return Err(Client::refused(status, &body));
+        }
+        let hex = |d: &Value| {
+            d.as_str()
+                .filter(|h| {
+                    h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                })
+                .map(str::to_owned)
+        };
+        body["devices"]
+            .as_array()
+            .filter(|_| body["relay"] == relay)
+            .and_then(|devices| devices.iter().map(hex).collect())
+            .ok_or_else(|| ClientError::Protocol("a relay is {relay, devices: [hex…]}".into()))
+    }
+
+    /// `PUT /v0.1/relay/{relay}/devices/{device}`: a phone's relay token's SHA-256, hex.
+    pub async fn put_relay_device(
+        &self,
+        token: &str,
+        relay: &str,
+        device: &str,
+    ) -> Result<(), ClientError> {
+        let url = format!("{}/v0.1/relay/{relay}/devices/{device}", self.base);
+        let (status, body) = self
+            .call(|| self.http.put(&url).bearer_auth(token).body(""))
+            .await?;
+        match status {
+            200 | 201 => Ok(()),
+            _ => Err(Client::refused(status, &body)),
+        }
+    }
+
+    /// `DELETE /v0.1/relay/{relay}/devices/{device}`: that phone's token opens nothing from now,
+    /// and its socket closes. One the relay doesn't have is gone already.
+    pub async fn delete_relay_device(
+        &self,
+        token: &str,
+        relay: &str,
+        device: &str,
+    ) -> Result<(), ClientError> {
+        let url = format!("{}/v0.1/relay/{relay}/devices/{device}", self.base);
+        let (status, body) = self
+            .call(|| self.http.delete(&url).bearer_auth(token))
+            .await?;
+        match status {
+            204 | 404 => Ok(()),
+            _ => Err(Client::refused(status, &body)),
+        }
+    }
+
     /// Replaces this Obi's card with a new one its owner signed (identity.md section 3).
     pub async fn update_card(
         &self,
