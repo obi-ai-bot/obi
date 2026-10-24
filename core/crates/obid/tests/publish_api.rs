@@ -224,7 +224,7 @@ fn a_done_job_publishes_by_itself_and_follows_its_pull_request() {
     );
     let body = kept(&folder.0, "body");
     assert!(
-        body.starts_with("The agent's summary:\n\n```\nAdded hello.txt.\n```"),
+        body.starts_with("The agent's summary:\n\n> Added hello.txt.\n\n"),
         "{body}"
     );
     assert!(
