@@ -62,6 +62,8 @@ nonisolated struct TouchIDKey: PublishingKey {
         return try await Task.detached { [context] in
             let asking = context()
             guard (try? await asking.evaluatePolicy(Self.policy, localizedReason: reason)) == true else { throw refused }
+            // The key signs with that answer or not at all: no second prompt without the runner's sentence.
+            asking.interactionNotAllowed = true
             return try sign(asking)
         }.value
     }

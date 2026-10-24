@@ -3,6 +3,7 @@
 import CryptoKit
 import Foundation
 import LocalAuthentication
+import OSLog
 import Security
 
 /// A device's approval for one publish, as the runner checks it (docs/runner-api.md).
@@ -127,8 +128,12 @@ nonisolated enum DeviceKey {
         try save(key.dataRepresentation)
         #if os(macOS)
         // The Touch ID-only key it replaces: nothing signs with it any more.
-        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "com.deskree.oby",
-                       kSecAttrAccount as String: biometryOnly] as CFDictionary)
+        let deleted = SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "com.deskree.oby",
+                                     kSecAttrAccount as String: biometryOnly] as CFDictionary)
+        if deleted != errSecSuccess && deleted != errSecItemNotFound {
+            Logger(subsystem: "com.deskree.oby", category: "device-key")
+                .error("couldn't delete the Touch ID-only publishing key: \(deleted, privacy: .public)")
+        }
         #endif
         return key
     }
