@@ -616,9 +616,9 @@ final class Phone {
     }
 
     /// One tap on a GitHub item: Oby's job on it (a review, or a fix), listed at once.
-    func startGitHubWork(_ id: String, addRepository: Bool = false) async throws {
+    func startGitHubWork(_ id: String) async throws {
         let asked = gitHubChanges
-        let job = try await runner.startGitHubWork(id, addRepository: addRepository)
+        let job = try await runner.startGitHubWork(id)
         guard gitHubChanges == asked else { return }
         if let index = jobs.firstIndex(where: { $0.id == job.id }) { jobs[index] = job } else { jobs.insert(job, at: 0) }
     }

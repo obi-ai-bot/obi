@@ -776,9 +776,10 @@ impl Feed {
         })
     }
 
-    /// `POST /v1/github/work/{id}/start`; `add`: a review request in a repository obid doesn't
-    /// know is added first (`addRepository`, the owner's tap).
-    pub async fn start(&self, id: &str, add: bool) -> Result<(Job, bool), ApiError> {
+    /// `POST /v1/github/work/{id}/start`. A review requested in a repository obid doesn't work in
+    /// waits for the owner's signed Confirm instead, as its inbox offer's Review it does (#776,
+    /// #1118): an API token alone never adds a repository.
+    pub async fn start(&self, id: &str) -> Result<(Job, bool), ApiError> {
         let (item, signed_in) = {
             let state = self.lock();
             (
@@ -798,21 +799,20 @@ impl Feed {
                 "gh isn't signed in to GitHub.",
             ));
         }
-        let started = if add && item.list == "reviews" {
-            start_adding(&self.jobs, &self.config, &item.repo, item.number).await?
-        } else {
-            start_work(
-                &self.jobs,
-                &self.config,
-                &item.list,
-                &item.repo,
-                item.number,
-            )
-            .await?
-        };
+        let offer = crate::sphere::inbox::github_item_id(&item);
+        if item.list == "reviews" && !self.knows(&item.repo) {
+            return Err(self.link.confirm_adding(&offer, &item.repo, item.number));
+        }
+        let started = start_work(
+            &self.jobs,
+            &self.config,
+            &item.list,
+            &item.repo,
+            item.number,
+        )
+        .await?;
         // A tap on the feed answers its offer too, so it doesn't stay open in the inbox.
-        self.link
-            .github_started(&crate::sphere::inbox::github_item_id(&item), &started.0.id);
+        self.link.github_started(&offer, &started.0.id);
         if started.1 {
             self.events.send("github", self.to_json());
         }
@@ -854,6 +854,19 @@ pub async fn start_work(
     repo: &str,
     number: u64,
 ) -> Result<(Job, bool), ApiError> {
+    begin(jobs, config, list, repo, number, None).await
+}
+
+/// [`start_work`], the job adding `adding` (obid's own entry for `repo`) when obid doesn't work in
+/// `repo` yet.
+async fn begin(
+    jobs: &Arc<Jobs>,
+    config: &Config,
+    list: &str,
+    repo: &str,
+    number: u64,
+    adding: Option<crate::config::Repo>,
+) -> Result<(Job, bool), ApiError> {
     let (kind, verb) = match list {
         "reviews" => ("review", "Review"),
         "assigned" => ("fix", "Fix"),
@@ -879,7 +892,7 @@ pub async fn start_work(
             ),
         ));
     }
-    if config.repos.find(repo).is_none() {
+    if config.repos.find(repo).is_none() && adding.is_none() {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             format!(
@@ -947,6 +960,7 @@ pub async fn start_work(
         issue: (list == "assigned").then_some(number),
         base,
         attachments: Some(vec![path.to_string_lossy().into_owned()]),
+        adding,
         ..NewJob::default()
     };
     let job = jobs
@@ -956,11 +970,11 @@ pub async fn start_work(
 }
 
 /// Starts Oby's review of `repo` `number` as [`start_work`] does, adding `repo` to the
-/// repositories obid works in when it isn't one yet: on the owner's own tap only (the apps'
-/// `addRepository`, or their signed Confirm of an inbox offer), never an API token alone (#1118).
-/// Its remote is obid's own, built from the checked name (never GitHub's), its default branch read
-/// with obid's own `gh`, no check. It's kept, as any of GitHub's repositories is, only once the
-/// review's job is made (crate::repos::Repos::keep): nothing that couldn't start adds it.
+/// repositories obid works in when it isn't one yet: only on the owner's signed Confirm (#776,
+/// #1118), never an API token alone. Its remote is obid's own, built from the checked name (never
+/// GitHub's), its default branch read with obid's own `gh`, no check. Only the review's job sees
+/// it ([`NewJob::adding`]), and it's kept, as any of GitHub's repositories is, once that job is
+/// made (crate::repos::Repos::keep): nothing that couldn't start adds it.
 pub async fn start_adding(
     jobs: &Arc<Jobs>,
     config: &Config,
@@ -1004,21 +1018,16 @@ pub async fn start_adding(
         .as_str()
         .filter(|b| named && crate::git::is_branch_name(b))
         .ok_or_else(|| unread("GitHub didn't name it and its default branch"))?;
-    config.repos.hold(&crate::config::Repo {
+    let adding = crate::config::Repo {
         repo: repo.into(),
         remote: format!("https://github.com/{repo}.git"),
         default_branch: branch.into(),
         check: None,
         pull_requests: None,
-    });
-    let started = start_work(jobs, config, "reviews", repo, number).await;
-    match &started {
-        Ok(_) => {
-            tracing::info!("{repo} added to the repositories obid works in, on the owner's tap")
-        }
-        Err(_) => config.repos.release(repo),
-    }
-    started
+    };
+    let started = begin(jobs, config, "reviews", repo, number, Some(adding)).await?;
+    tracing::info!("{repo} added to the repositories obid works in, on the owner's Confirm");
+    Ok(started)
 }
 
 /// Keeps `text` as `file` in a folder of its own under `home/attachments/<what>/` (0600 in 0700
@@ -1177,25 +1186,13 @@ pub async fn refresh(State(shared): State<Arc<Shared>>) -> Response {
     answer(StatusCode::OK, shared.github_work.refresh().await)
 }
 
-/// `POST /v1/github/work/{id}/start`: no body, `{}`, or `{"addRepository": true}`.
+/// `POST /v1/github/work/{id}/start`.
 pub async fn start(
     State(shared): State<Arc<Shared>>,
     UrlPath(id): UrlPath<String>,
-    body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
-    let asked: Value = if body.trim_ascii().is_empty() {
-        json!({})
-    } else {
-        serde_json::from_slice(&body).map_err(|_| {
-            ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "The body is empty, {} or {\"addRepository\": true}.",
-            )
-        })?
-    };
     crate::brain::recap::tapped(&shared);
-    let add = asked["addRepository"] == json!(true);
-    let (job, new) = shared.github_work.start(&id, add).await?;
+    let (job, new) = shared.github_work.start(&id).await?;
     let status = if new {
         StatusCode::CREATED
     } else {

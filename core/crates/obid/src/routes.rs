@@ -481,6 +481,7 @@ fn new_job(job: &Map<String, Value>) -> Result<NewJob, String> {
         rule: None,
         untrusted: false,
         split: false,
+        adding: None,
     })
 }
 

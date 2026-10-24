@@ -163,7 +163,8 @@ extension GitHubWork.Item {
 
     /// The one tap that starts Oby's job on it, or nil where Oby can't start one: a draft, an issue
     /// in a repository obid doesn't work in, and your own pull request unless its checks failed (on
-    /// a branch of the repository itself). A review in a repository obid doesn't work in adds it first.
+    /// a branch of the repository itself). A review in a repository obid doesn't work in asks for
+    /// your Confirm first, which adds it.
     var action: String? {
         guard !draft else { return nil }
         switch list {
@@ -173,7 +174,8 @@ extension GitHubWork.Item {
         }
     }
 
-    /// Whether its tap adds its repository first (`addRepository`): a review in one obid doesn't work in.
+    /// Whether its tap asks you to confirm adding its repository first (Touch ID or Face ID, in the
+    /// inbox): a review in one obid doesn't work in.
     var addsRepository: Bool { list == .reviews && !known }
 
     /// The card's label over the headline: Sangam's "Start it?" when it can start, else where it is.
@@ -201,7 +203,7 @@ extension GitHubWork.Item {
     var note: String? {
         if list == .mine { return nil }
         if draft { return "It's a draft: Oby can review it once it's ready for review." }
-        if addsRepository { return "Oby doesn't work in \(repo) yet: Review it adds it first." }
+        if addsRepository { return "Oby doesn't work in \(repo) yet: Review it asks you to confirm adding it." }
         return known ? nil : "Oby doesn't work in \(repo) yet: add it to repos in obid's configuration."
     }
 

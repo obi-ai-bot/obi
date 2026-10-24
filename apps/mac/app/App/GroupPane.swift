@@ -78,7 +78,7 @@ struct GroupPane: View {
                     GitHubToDo(kind: kind, work: feed.gitHubWork, columns: columns, connect: nil,
                                loading: gitHub && feed.gitHubWork == nil && !feed.gitHubListed && !feed.down,
                                others: offers.count + (signedOut ? 1 : 0),
-                               start: { try await feed.startGitHubWork($0.id, addRepository: $0.addsRepository) }, later: { feed.gitHubLater.insert($0.id) })
+                               start: { try await feed.startGitHubWork($0.id) }, later: { feed.gitHubLater.insert($0.id) })
                 }
                 // A routine waiting for its next run says when (Sangam's tasks.ts).
                 if tab == .running { ForEach(upcoming) { UpcomingRoutineCard(routine: $0) } }

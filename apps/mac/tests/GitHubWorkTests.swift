@@ -121,11 +121,11 @@ struct GitHubWorkTests {
         #expect(GitHubWork.Item(id: "e", list: .assigned, repo: "o/r", number: 2, title: "t", url: "").action == "Fix it")
     }
 
-    /// A review in a repository obid doesn't work in: Review it, which adds it first (#1118).
+    /// A review in a repository obid doesn't work in: Review it, which asks for your Confirm first (#1118).
     @Test func anUnknownRepositoryReviewAddsItFirst() {
         let review = GitHubWork.Item(id: "u", list: .reviews, repo: "acme/other", number: 12, title: "t", url: "", author: "Dima", known: false)
         #expect(review.action == "Review it" && review.label == "Start it?" && review.addsRepository)
-        #expect(review.note == "Oby doesn't work in acme/other yet: Review it adds it first.")
+        #expect(review.note == "Oby doesn't work in acme/other yet: Review it asks you to confirm adding it.")
         let known = GitHubWork.Item(id: "k", list: .reviews, repo: "o/r", number: 1, title: "t", url: "")
         #expect(!known.addsRepository && known.note == nil)
         let issue = GitHubWork.Item(id: "i", list: .assigned, repo: "acme/other", number: 13, title: "t", url: "", known: false)

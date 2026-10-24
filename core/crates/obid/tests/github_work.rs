@@ -263,9 +263,9 @@ fn the_feed_lists_offers_new_work_once_and_starts_it_on_a_tap() {
         "{quoted}"
     );
 
-    // A tap from the feed starts Oby's review of a pull request, and answers its offer; a
-    // repository obid doesn't work in isn't added without the owner's `addRepository`, and an id
-    // that isn't there is 404.
+    // A tap from the feed starts Oby's review of a pull request, and answers its offer; one in a
+    // repository obid doesn't work in waits for the owner's signed Confirm, and an id that isn't
+    // there is 404.
     let started = call(
         &obid,
         "POST",
@@ -299,9 +299,11 @@ fn the_feed_lists_offers_new_work_once_and_starts_it_on_a_tap() {
         &format!("/v1/github/work/{}/start", id_of(&feed, "reviews", 10)),
         None,
     );
-    assert_eq!(elsewhere.status, 409);
+    assert_eq!(elsewhere.status, 422);
     assert!(
-        elsewhere.text.contains("add it to repos"),
+        elsewhere
+            .text
+            .contains("Adding someone/else waits for your Confirm"),
         "{}",
         elsewhere.text
     );
@@ -523,9 +525,9 @@ fn a_burst_of_review_requests_is_offered_five_a_read_until_all_are() {
 }
 
 /// A review request on a repository obid doesn't work in (#1118): offered with obid's words. Only
-/// the owner's tap adds the repository: the apps' `addRepository`, or their signed Confirm of the
-/// inbox offer's Review it (an API token alone only makes the confirm item). It's added only once
-/// the review starts, its remote obid's own, and stays one of obid's after a restart.
+/// the owner's signed Confirm adds the repository: a tap on the feed or the inbox offer's Review it
+/// with obid's API token alone only makes the confirm item, and no body changes that. It's added
+/// only once the review starts, its remote obid's own, and stays one of obid's after a restart.
 #[test]
 fn reviewing_on_an_unknown_repository_adds_it_only_on_the_owners_tap() {
     const OTHER: &str = "obi-e2e/other";
@@ -588,12 +590,20 @@ fn reviewing_on_an_unknown_repository_adds_it_only_on_the_owners_tap() {
     );
     let before = config_file();
 
-    // The feed without addRepository adds nothing.
+    // A tap on the feed, or Review it in the inbox, with only obid's API token (an agent, oby-mcp,
+    // whatever body it sends): one confirm item for the offer, nothing added.
     let path = format!("/v1/github/work/{}/start", id_of(&feed, "reviews", 12));
-    let refused = call(&obid, "POST", &path, None);
-    assert_eq!(refused.status, 409, "{}", refused.text);
-
-    // Review it with only obid's API token (an agent, oby-mcp): a confirm item, nothing added.
+    for body in [None, Some(json!({"addRepository": true}))] {
+        let waits = call(&obid, "POST", &path, body.as_ref());
+        assert_eq!(waits.status, 422, "{}", waits.text);
+        assert!(
+            waits
+                .text
+                .contains("Adding obi-e2e/other waits for your Confirm"),
+            "{}",
+            waits.text
+        );
+    }
     let answer = format!("/v1/inbox/{}/answer", offer["id"].as_str().unwrap());
     for _ in 0..2 {
         let waits = call(
@@ -626,7 +636,7 @@ fn reviewing_on_an_unknown_repository_adds_it_only_on_the_owners_tap() {
     assert_eq!(
         confirms.len(),
         1,
-        "asked twice, one confirm item: {confirms:?}"
+        "asked four times, one confirm item: {confirms:?}"
     );
     assert_eq!(confirms[0]["title"], "Add obi-e2e/other and review #12");
     let confirm_id = confirms[0]["id"].as_str().unwrap().to_owned();
@@ -668,25 +678,49 @@ fn reviewing_on_an_unknown_repository_adds_it_only_on_the_owners_tap() {
         (&json!("review"), &json!(12), &json!(OTHER))
     );
 
-    // The apps' addRepository: a review that can't start adds nothing; one that starts adds it.
+    // A Confirm whose review can't start adds nothing; the next one adds it.
     names(THIRD);
     serve(&gh, &[(OTHER, 12), (THIRD, 14)], &[(OTHER, 13)], &[]);
     let feed = refresh(&obid);
     let path = format!("/v1/github/work/{}/start", id_of(&feed, "reviews", 14));
+    let confirm_of = |obid: &Obid| {
+        let inbox = call(obid, "GET", "/v1/inbox?limit=1000", None).body;
+        inbox
+            .as_array()
+            .or(inbox["items"].as_array())
+            .unwrap()
+            .iter()
+            .find(|i| i["kind"] == "confirm" && i["title"] == "Add obi-e2e/third and review #14")
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .expect("a confirm item for obi-e2e/third")
+    };
+    assert_eq!(call(&obid, "POST", &path, None).status, 422);
     std::fs::write(gh.join("view.json"), "not JSON").unwrap();
-    let failed = call(&obid, "POST", &path, Some(&json!({"addRepository": true})));
+    let failed = confirm(&obid, &confirm_of(&obid));
     assert_eq!(failed.status, 502, "{}", failed.text);
     assert!(!config_file().contains(THIRD));
     assert!(!listed(&obid).contains(&THIRD.to_owned()));
     std::fs::write(gh.join("view.json"), view.to_string()).unwrap();
-    let added = call(&obid, "POST", &path, Some(&json!({"addRepository": true})));
-    assert_eq!(added.status, 201, "{}", added.text);
-    assert_eq!(
-        (&added.body["kind"], &added.body["repo"]),
-        (&json!("review"), &json!(THIRD))
-    );
+    assert_eq!(call(&obid, "POST", &path, None).status, 422);
+    let added = confirm(&obid, &confirm_of(&obid));
+    assert_eq!(added.status, 200, "{}", added.text);
     let written: Value = serde_json::from_str(&config_file()).unwrap();
     assert_eq!(written["repos"][2]["repo"], THIRD);
+    let started = github_items(&obid, "done")
+        .into_iter()
+        .find(|i| i["github"]["number"] == 14)
+        .expect("the Confirm answers the offer");
+    let job = call(
+        &obid,
+        "GET",
+        &format!("/v1/jobs/{}", started["job"].as_str().unwrap()),
+        None,
+    )
+    .body;
+    assert_eq!(
+        (&job["kind"], &job["repo"]),
+        (&json!("review"), &json!(THIRD))
+    );
 
     // Still obid's after a restart (with the configuration obid wrote).
     drop(obid);

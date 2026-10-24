@@ -982,11 +982,7 @@ impl Link {
                     if list == "reviews" && self.config.repos.find(repo).is_none() {
                         // `answer` claimed it: it stays open for the Confirm.
                         self.lock().inbox.insert(item.id.clone(), item.clone());
-                        self.confirm_adding(&item, repo, number);
-                        return Err(api(
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            format!("Adding {repo} waits for your Confirm in the inbox."),
-                        ));
+                        return Err(self.confirm_adding(&item.id, repo, number));
                     }
                     let started = crate::github_work::start_work(
                         &self.jobs,
@@ -1014,9 +1010,11 @@ impl Link {
         Ok(item.to_json())
     }
 
-    /// The `confirm` item that adds `repo` and starts Oby's review of its pull request `number`,
-    /// from the `github` item `offer`; the one still open for that offer stands.
-    fn confirm_adding(&self, offer: &Item, repo: &str, number: u64) {
+    /// The `confirm` item that adds `repo` and starts Oby's review of its pull request `number`
+    /// (#1118), for the GitHub offer `offer` (its inbox id, whether that item was made or not); the
+    /// one still open for it stands. Answers the error a start asked for this way answers: only the
+    /// owner's signed Confirm adds a repository (#776), from the feed and the inbox alike.
+    pub fn confirm_adding(&self, offer: &str, repo: &str, number: u64) -> ApiError {
         let item = inbox::confirm_item(
             "",
             format!("Add {repo} and review #{number}"),
@@ -1025,26 +1023,32 @@ impl Link {
             ),
             inbox::Confirmed {
                 action: inbox::action::ADD_REPOSITORY.into(),
-                target: offer.id.clone(),
-                payload: Value::Null,
+                target: offer.into(),
+                payload: json!({"repo": repo, "number": number}),
             },
             time::now(),
         );
-        {
+        let added = {
             let mut state = self.lock();
             let open = state.inbox.values().any(|i| {
                 i.kind == "confirm"
                     && i.done.is_none()
                     && i.confirm.as_ref().is_some_and(|c| {
-                        c.action == inbox::action::ADD_REPOSITORY && c.target == offer.id
+                        c.action == inbox::action::ADD_REPOSITORY && c.target == offer
                     })
             });
-            if open {
-                return;
+            if !open {
+                state.inbox.insert(item.id.clone(), item.clone());
             }
-            state.inbox.insert(item.id.clone(), item.clone());
+            !open
+        };
+        if added {
+            self.save_item(&item);
         }
-        self.save_item(&item);
+        api(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Adding {repo} waits for your Confirm in the inbox."),
+        )
     }
 
     /// `POST /v1/inbox/{id}/answer` on a plug-in's offer with its start answer (`Look into it`,
@@ -3538,18 +3542,19 @@ impl Link {
                 None => Err(api(StatusCode::CONFLICT, "That job is gone.")),
             },
             inbox::action::ADD_REPOSITORY => {
-                let offer = self
+                // obid's own words of the review request (crate::github_work's typed fields).
+                let (repo, number) = (
+                    confirmed.payload["repo"].as_str().unwrap_or_default(),
+                    confirmed.payload["number"].as_u64().unwrap_or_default(),
+                );
+                if self
                     .lock()
                     .inbox
                     .get(target)
-                    .filter(|i| i.kind == "github" && i.done.is_none())
-                    .and_then(|i| i.github.as_deref().cloned())
-                    .filter(|w| w["list"] == "reviews")
-                    .ok_or_else(|| api(StatusCode::CONFLICT, "That review request is gone."))?;
-                let (repo, number) = (
-                    offer["repo"].as_str().unwrap_or_default(),
-                    offer["number"].as_u64().unwrap_or_default(),
-                );
+                    .is_some_and(|i| i.done.is_some())
+                {
+                    return Err(api(StatusCode::CONFLICT, "That review request is settled."));
+                }
                 let (job, _) =
                     crate::github_work::start_adding(&self.jobs, &self.config, repo, number)
                         .await?;
