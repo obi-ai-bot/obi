@@ -1403,6 +1403,12 @@ fn owners_only(kind: &str, answer: &str) -> Option<&'static str> {
             "Only the owner approves a job's plan or sends it back, in their inbox: Oby can't answer it.",
         );
     }
+    // A job's agent's question is the owner's to answer (#858).
+    if kind == crate::sphere::inbox::QUESTION_KIND {
+        return Some(
+            "Only the owner answers a job's question, in their inbox: Oby can't answer it.",
+        );
+    }
     // A conversation may only refuse a job's permission, and only with a bare no: words to the
     // job's agent, or anything but a plain deny, are the owner's own (N3).
     (kind == "permission" && inbox_decision(answer) != (Decision::Deny, None)).then_some(

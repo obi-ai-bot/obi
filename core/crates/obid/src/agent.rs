@@ -67,6 +67,9 @@ pub struct Launch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
     Allow,
+    /// Allowed with this input in place of the agent's: the owner's answer to `AskUserQuestion`
+    /// (#858), its input with `answers`. An adapter whose tool takes no new input allows it as is.
+    AllowWith(Value),
     Deny(String),
 }
 
@@ -216,6 +219,16 @@ pub fn user_message(text: &str) -> Value {
     json!({"type": "user", "message": {"role": "user", "content": text}})
 }
 
+/// Claude Code's answer to a `can_use_tool` prompt about `input`: an allow carries the input it
+/// runs with, the agent's own or the one obid gives (an `AskUserQuestion` with its `answers`).
+fn permission_response(answer: Answer, input: Value) -> Value {
+    match answer {
+        Answer::Allow => json!({"behavior": "allow", "updatedInput": input}),
+        Answer::AllowWith(updated) => json!({"behavior": "allow", "updatedInput": updated}),
+        Answer::Deny(why) => json!({"behavior": "deny", "message": why}),
+    }
+}
+
 /// How long the agent may take to close its output and exit by itself once its turn's `result`
 /// came: Claude Code took 0.8 to 3.1 seconds, finishing the session file the next turn's
 /// `--resume` reads. Then it's ended, as a stop ends it.
@@ -286,13 +299,10 @@ pub async fn turn_on(
                 let Ok(answer) = conn.settle(decide(tool, &input)).await else {
                     break;
                 };
-                let response = match answer {
-                    Answer::Allow => json!({"behavior": "allow", "updatedInput": input}),
-                    Answer::Deny(why) => {
-                        on_event(Event::Denied(why.clone()));
-                        json!({"behavior": "deny", "message": why})
-                    }
-                };
+                if let Answer::Deny(why) = &answer {
+                    on_event(Event::Denied(why.clone()));
+                }
+                let response = permission_response(answer, input);
                 conn.send(&json!({"type": "control_response",
                                   "response": {"subtype": "success", "request_id": id, "response": response}}))
                     .await;
@@ -623,6 +633,26 @@ mod tests {
         assert!(turn.succeeded());
         assert!(took < AFTER_RESULT + Duration::from_secs(2), "{took:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #858: the owner's answer to `AskUserQuestion` reaches Claude Code as the input it runs
+    /// with; a plain allow keeps the agent's own, a deny says why.
+    #[test]
+    fn an_answer_carries_the_input_it_runs_with() {
+        let input = json!({"questions": [{"question": "Which?", "options": [{"label": "A"}]}]});
+        let answered = json!({"questions": input["questions"], "answers": {"Which?": "A"}});
+        assert_eq!(
+            permission_response(Answer::AllowWith(answered.clone()), input.clone()),
+            json!({"behavior": "allow", "updatedInput": answered})
+        );
+        assert_eq!(
+            permission_response(Answer::Allow, input.clone()),
+            json!({"behavior": "allow", "updatedInput": input})
+        );
+        assert_eq!(
+            permission_response(Answer::Deny("no".into()), input),
+            json!({"behavior": "deny", "message": "no"})
+        );
     }
 
     #[test]

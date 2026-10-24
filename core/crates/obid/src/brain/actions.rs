@@ -879,6 +879,10 @@ fn owners_call(item: &Item, words: &str, job: Option<&Job>) -> Owners {
         "plan" => Owners::Refuse(
             "it's a job's plan: only you can approve it or send it back, in your inbox.".into(),
         ),
+        // A job's agent asked the owner a question (#858): theirs to answer.
+        crate::sphere::inbox::QUESTION_KIND => Owners::Refuse(
+            "it's a job's question for you: only you can answer it, in your inbox.".into(),
+        ),
         // A conversation's shell command runs only on the owner's own answer; saying no isn't.
         "permission"
             if super::shell::is_item(item)
@@ -1156,6 +1160,12 @@ fn answer_permission(shared: &Arc<Shared>, plan: &Plan) -> Outcome {
             "{name} waits for you to approve its plan or send it back: only you can, in your inbox."
         ));
     }
+    // Its agent's question is the owner's to answer (#858).
+    if permission.is_question() {
+        return Outcome::Done(format!(
+            "{name} waits for you to answer its question: only you can, in your inbox."
+        ));
+    }
     // Letting a secret through is the owner's alone, even once (#586); saying no isn't.
     if permission.is_secret() && decision != super::plan::Decision::Deny {
         return Outcome::Done(format!(
@@ -1344,6 +1354,7 @@ mod tests {
             rule: rule.map(Into::into),
             always: rule.map(|r| format!("Yes, and don't ask again for {r}")),
             why: None,
+            question: None,
         });
         job
     }

@@ -377,6 +377,10 @@ pub fn decide(
     if let Some(why) = fixed_denial(tool, input, worktree, mcp) {
         return Answer::Deny(why);
     }
+    // Another Obi's review never puts a question to this owner (#858).
+    if obi_review && tool == crate::permissions::ASK_USER_QUESTION {
+        return Answer::Deny(crate::permissions::NO_ONE_TO_ASK.into());
+    }
     if obi_review && !REVIEW_TOOLS.contains(&tool) {
         return Answer::Deny(format!(
             "This review only reads the change: {tool} isn't available. Report what you'd have checked with it as a finding or in your summary."
@@ -554,6 +558,16 @@ mod tests {
                 "{tool} {input}"
             );
         }
+        // Another Obi's review never asks this owner a question (#858); the owner's own job may.
+        let asks = json!({"questions": [{"question": "Which?", "options": [{"label": "A"}]}]});
+        assert_eq!(
+            decide("AskUserQuestion", &asks, &worktree, true, &[]),
+            Answer::Deny(crate::permissions::NO_ONE_TO_ASK.into())
+        );
+        assert_eq!(
+            decide("AskUserQuestion", &asks, &worktree, false, &[]),
+            Answer::Allow
+        );
         // The owner's own jobs: a file path still may not lead out through a link.
         assert!(matches!(
             decide(

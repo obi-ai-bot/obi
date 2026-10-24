@@ -455,7 +455,11 @@ impl Link {
             .map(|mut i| {
                 // A permission waited on an agent that ended with obid: its job's agent asks again
                 // when it runs, so the old item is done by itself.
-                if matches!(i.kind.as_str(), "permission" | "plan") && i.done.is_none() {
+                if matches!(
+                    i.kind.as_str(),
+                    "permission" | "plan" | inbox::QUESTION_KIND
+                ) && i.done.is_none()
+                {
                     i.done = Some(now);
                     if let Err(e) = inbox.save(&i) {
                         tracing::error!("can't keep inbox item {}: {e}", i.id);
@@ -1243,12 +1247,16 @@ impl Link {
             .strip_prefix(&format!("{}-permission-", item.job))
             .unwrap_or("")
             .to_owned();
-        let (decision, words) = crate::permissions::inbox_decision(&answer);
         use crate::jobs::PermissionRefused;
-        match self
-            .jobs
-            .answer_permission(&item.job, &permission, decision, words.as_deref())
-        {
+        // The agent's question: an option or the owner's own words are its answer (#858).
+        let answered = if item.kind == inbox::QUESTION_KIND {
+            self.jobs.answer_question(&item.job, &permission, &answer)
+        } else {
+            let (decision, words) = crate::permissions::inbox_decision(&answer);
+            self.jobs
+                .answer_permission(&item.job, &permission, decision, words.as_deref())
+        };
+        match answered {
             Ok(_) => {}
             Err(PermissionRefused::NoJob) => {
                 return Err(api(StatusCode::CONFLICT, "Its job is gone."));
@@ -4196,7 +4204,10 @@ impl Link {
             if item.done.is_some() {
                 return Err(api(StatusCode::CONFLICT, "That item is done already."));
             }
-            if matches!(item.kind.as_str(), "permission" | "plan") {
+            if matches!(
+                item.kind.as_str(),
+                "permission" | "plan" | inbox::QUESTION_KIND
+            ) {
                 drop(state);
                 return match given {
                     Given::Answer(answer) => self.answer_permission_item(item, Some(answer), None),

@@ -532,6 +532,10 @@ pub fn question_item(
     }
 }
 
+/// The kind of the item for the agent's own question (`AskUserQuestion`, #858): only the owner
+/// answers it.
+pub const QUESTION_KIND: &str = "agentQuestion";
+
 /// The `permission` item for a permission the job's agent waits on (docs/runner-api.md, "Inbox
 /// item"): its title the job's, its text the permission's, and Allow, Always allow (only with a
 /// rule to save) and Deny. Words of the owner's own are a no, and reach the agent. The agent's
@@ -543,6 +547,28 @@ pub fn permission_item(
     now: i64,
 ) -> Item {
     use crate::permissions::{ALLOW, ALWAYS_ALLOW, APPROVE, DENY, KEEP_PLANNING};
+    // The agent's question (#858): its text and options as the agent wrote them, quoted data, each
+    // option's description its `details`; the owner's own words answer it too.
+    if let Some(asking) = &permission.question {
+        let options = &asking.question.options;
+        return Item {
+            kind: QUESTION_KIND.into(),
+            text: asking.question.question.clone(),
+            options: options.iter().map(|o| o.label.clone()).collect(),
+            details: options
+                .iter()
+                .any(|o| !o.description.is_empty())
+                .then(|| options.iter().map(|o| o.description.clone()).collect()),
+            ..permission_item(
+                job,
+                &crate::permissions::Permission {
+                    question: None,
+                    ..permission.clone()
+                },
+                now,
+            )
+        };
+    }
     let (kind, options, details): (_, Vec<String>, _) = if permission.is_plan() {
         (
             "plan",
@@ -1081,5 +1107,43 @@ mod tests {
         assert_eq!(item.state(30), "open");
         item.done = Some(31);
         assert_eq!(item.state(40), "done");
+    }
+
+    /// #858: the agent's question is an `agentQuestion` item: its text the question, its options
+    /// the labels and its details their descriptions, its id the permission's.
+    #[test]
+    fn the_agents_question_is_its_own_item() {
+        use super::*;
+        use crate::permissions::{ASK_USER_QUESTION, Call, question_card};
+        let job = crate::job::Job::new(
+            "j1".into(),
+            "o/r".into(),
+            "fix".into(),
+            "Fix it".into(),
+            "claude".into(),
+            "a".into(),
+        );
+        let call = Call::new(
+            ASK_USER_QUESTION,
+            &json!({"questions": [{"question": "Which store?", "options": [
+                {"label": "SQLite", "description": "One file"}, {"label": "Postgres"}]}]}),
+        );
+        let item = permission_item(&job, &question_card(&call, "p1", 0), 5);
+        assert_eq!(item.kind, QUESTION_KIND);
+        assert_eq!(item.id, permission_item_id("j1", "p1"));
+        assert_eq!(item.text, "Which store?");
+        assert_eq!(item.options, ["SQLite", "Postgres"]);
+        assert_eq!(
+            item.details,
+            Some(vec!["One file".to_owned(), String::new()])
+        );
+        let plain = Call::new(
+            ASK_USER_QUESTION,
+            &json!({"questions": [{"question": "Go?", "options": [{"label": "Yes"}]}]}),
+        );
+        assert_eq!(
+            permission_item(&job, &question_card(&plain, "p2", 0), 5).details,
+            None
+        );
     }
 }
