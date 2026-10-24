@@ -151,6 +151,22 @@ fn subject(item: &Item) -> Option<(String, String)> {
     Some((text(&p["kind"])?, on))
 }
 
+/// Everything an outside item is about: its [`subject`], and for failed checks on the owner's own
+/// pull request its head commit too, which a plug-in's `check.failed` may name instead. Only the
+/// first makes the item itself a duplicate: two pull requests on one commit are two things.
+fn subjects(item: &Item) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = subject(item).into_iter().collect();
+    if let Some(work) = item
+        .github
+        .as_deref()
+        .filter(|w| item.kind == "github" && w["list"] == "mine")
+        && let (Some(repo), Some(head)) = (work["repo"].as_str(), work["head"].as_str())
+    {
+        found.push(("check.failed".into(), format!("{repo}@{head}")));
+    }
+    found
+}
+
 /// Whether an item offers to start something (`Review it`, `Fix it`, `Look into it`), not only to
 /// be dismissed.
 fn offers(item: &Item) -> bool {
@@ -170,7 +186,7 @@ impl<'a> Sorts<'a> {
     pub fn of(kept: &'a Kept, inbox: impl Iterator<Item = &'a Item>, now: i64) -> Sorts<'a> {
         let mut first: HashMap<(String, String), (bool, u64, &str)> = HashMap::new();
         for item in inbox.filter(|i| i.done.is_none()) {
-            if let Some(about) = subject(item) {
+            for about in subjects(item) {
                 let key = (!offers(item), item.arrival_order(), item.id.as_str());
                 let best = first.entry(about).or_insert(key);
                 if key < *best {
@@ -789,10 +805,28 @@ mod tests {
         let check = event("check.failed", json!({"pr": 12}), "github-actions");
         let other = event("pull_request.review_requested", json!({"pr": 13}), "sangam");
         assert_eq!(sorted(&kept, &[&plugin, &check, &other], 0), [NEEDS_YOU; 3]);
-        // The feed's Fix CI on that pull request stands for the plug-in's red check.
+        // The feed's Fix CI on that pull request stands for the plug-in's red check, whether the
+        // plug-in names the pull request or only its head commit.
         let mut fix = work("mine", 12, "wellington", "Fix CI");
         fix.arrived = Some(6);
+        fix.github.as_mut().unwrap()["head"] = json!("a".repeat(40));
         assert_eq!(sorted(&kept, &[&check, &fix], 0), [IGNORE, NEEDS_YOU]);
+        let on_head = event(
+            "check.failed",
+            json!({"headSha": "a".repeat(40)}),
+            "github-actions",
+        );
+        assert_eq!(sorted(&kept, &[&on_head, &fix], 0), [IGNORE, NEEDS_YOU]);
+        let other_head = event(
+            "check.failed",
+            json!({"headSha": "b".repeat(40)}),
+            "github-actions",
+        );
+        assert_eq!(sorted(&kept, &[&other_head, &fix], 0), [NEEDS_YOU; 2]);
+        // Two pull requests on one commit are two things.
+        let mut twin = work("mine", 13, "wellington", "Fix CI");
+        twin.github.as_mut().unwrap()["head"] = json!("a".repeat(40));
+        assert_eq!(sorted(&kept, &[&fix, &twin], 0), [NEEDS_YOU; 2]);
         let alert = |id: &str, severity: &str, at: u64| {
             let mut alert = event(
                 "alert.fired",

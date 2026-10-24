@@ -369,13 +369,20 @@ pub fn offered_for(item: &Item) -> bool {
     item.list != "mine" || (red(item) && item.head.is_some())
 }
 
+/// Whether an item's offer, once made, still stands: one of the owner's own pull requests' until
+/// its head moves or its checks pass (a re-run's pending checks keep it), any other until it
+/// leaves the feed.
+pub fn stands(item: &Item) -> bool {
+    item.list != "mine" || (item.head.is_some() && item.checks.as_deref() != Some("SUCCESS"))
+}
+
 /// What one read offers in the inbox, the newest first and at most [`OFFERS_PER_READ`], and the
 /// offers left waiting for the next reads (their inbox ids, at most [`MOST`]): of `now`'s items,
 /// those whose offer is new since `before` and those `waiting` from earlier reads, while they're
 /// still in the feed. Every review request is offered; an assigned issue only on a repository obid
 /// `knows`; one of the owner's own pull requests once per head whose checks failed, unless it's a
-/// draft, a fork's, on a repository obid doesn't know, one an obid job opened (that job follows
-/// it), or a fix job is on it already.
+/// draft, a fork's, on a repository obid doesn't know, or one an obid job opened (that job follows
+/// it). None while a job it would start is queued or running already.
 pub fn offers(
     before: &Lists,
     now: &Lists,
@@ -404,6 +411,7 @@ pub fn offers(
             let id = github_item_id(i);
             waiting.contains(&id) || !(had.contains(&id) || red_unread(i))
         })
+        .filter(|i| active_job(jobs, &i.list, &i.repo, i.number).is_none())
         .filter(|i| match i.list.as_str() {
             "reviews" => true,
             "assigned" => knows(&i.repo),
@@ -412,7 +420,6 @@ pub fn offers(
                     && i.fork == Some(false)
                     && knows(&i.repo)
                     && opened_by(jobs, &i.url).is_none()
-                    && active_job(jobs, &i.list, &i.repo, i.number).is_none()
             }
         })
         .collect();
@@ -598,6 +605,7 @@ impl Feed {
         let jobs = self.jobs.list(1000);
         let mut offered = Vec::new();
         let mut live = None;
+        let mut read = false;
         {
             let mut state = self.lock();
             let now = time::now();
@@ -648,7 +656,7 @@ impl Feed {
                         live = Some(
                             lists
                                 .all()
-                                .filter(|i| offered_for(i))
+                                .filter(|i| stands(i))
                                 .map(crate::sphere::inbox::github_item_id)
                                 .collect::<HashSet<_>>(),
                         );
@@ -681,11 +689,15 @@ impl Feed {
                         lists,
                         waiting,
                     };
-                    self.keep(&state.kept);
+                    read = true;
                 }
             }
         }
         self.link.github_work(&offered, live.as_ref());
+        // Kept only once the inbox has this read's offers: a stop in between loses none of them.
+        if read {
+            self.keep(&self.lock().kept);
+        }
         let shown = self.to_json();
         let first = !std::mem::replace(&mut self.lock().read, true);
         if !first && self.shown() != before {
@@ -786,17 +798,18 @@ impl Feed {
                 "gh isn't signed in to GitHub.",
             ));
         }
-        if add && item.list == "reviews" {
-            add_repository(&self.config, &item.repo).await?;
-        }
-        let started = start_work(
-            &self.jobs,
-            &self.config,
-            &item.list,
-            &item.repo,
-            item.number,
-        )
-        .await?;
+        let started = if add && item.list == "reviews" {
+            start_adding(&self.jobs, &self.config, &item.repo, item.number).await?
+        } else {
+            start_work(
+                &self.jobs,
+                &self.config,
+                &item.list,
+                &item.repo,
+                item.number,
+            )
+            .await?
+        };
         // A tap on the feed answers its offer too, so it doesn't stay open in the inbox.
         self.link
             .github_started(&crate::sphere::inbox::github_item_id(&item), &started.0.id);
@@ -942,13 +955,20 @@ pub async fn start_work(
     Ok((job, true))
 }
 
-/// Adds `repo` to the repositories obid works in, on the owner's tap on a review requested there
-/// (#1118): its remote obid's own, built from the checked name (never GitHub's), its default branch
-/// read with obid's own `gh`, no check. Kept in the configuration's `repos` as a job's first run in
-/// one of GitHub's repositories keeps it (crate::repos). Nothing for one obid works in already.
-pub async fn add_repository(config: &Config, repo: &str) -> Result<(), ApiError> {
+/// Starts Oby's review of `repo` `number` as [`start_work`] does, adding `repo` to the
+/// repositories obid works in when it isn't one yet: on the owner's own tap only (the apps'
+/// `addRepository`, or their signed Confirm of an inbox offer), never an API token alone (#1118).
+/// Its remote is obid's own, built from the checked name (never GitHub's), its default branch read
+/// with obid's own `gh`, no check. It's kept, as any of GitHub's repositories is, only once the
+/// review's job is made (crate::repos::Repos::keep): nothing that couldn't start adds it.
+pub async fn start_adding(
+    jobs: &Arc<Jobs>,
+    config: &Config,
+    repo: &str,
+    number: u64,
+) -> Result<(Job, bool), ApiError> {
     if config.repos.find(repo).is_some() {
-        return Ok(());
+        return start_work(jobs, config, "reviews", repo, number).await;
     }
     if !crate::github::is_repo(repo) {
         return Err(ApiError::new(
@@ -984,18 +1004,21 @@ pub async fn add_repository(config: &Config, repo: &str) -> Result<(), ApiError>
         .as_str()
         .filter(|b| named && crate::git::is_branch_name(b))
         .ok_or_else(|| unread("GitHub didn't name it and its default branch"))?;
-    let added = crate::config::Repo {
+    config.repos.hold(&crate::config::Repo {
         repo: repo.into(),
         remote: format!("https://github.com/{repo}.git"),
         default_branch: branch.into(),
         check: None,
         pull_requests: None,
-    };
-    if let Err(why) = config.repos.keep(&added) {
-        tracing::warn!("{why}");
+    });
+    let started = start_work(jobs, config, "reviews", repo, number).await;
+    match &started {
+        Ok(_) => {
+            tracing::info!("{repo} added to the repositories obid works in, on the owner's tap")
+        }
+        Err(_) => config.repos.release(repo),
     }
-    tracing::info!("{repo} added to the repositories obid works in, on the owner's tap");
-    Ok(())
+    started
 }
 
 /// Keeps `text` as `file` in a folder of its own under `home/attachments/<what>/` (0600 in 0700
@@ -1449,7 +1472,7 @@ mod tests {
         let live = |pr: Value| {
             let now = lists(vec![], vec![], vec![pr]);
             now.all()
-                .filter(|i| offered_for(i))
+                .filter(|i| stands(i))
                 .map(crate::sphere::inbox::github_item_id)
                 .collect::<Vec<_>>()
         };
@@ -1458,6 +1481,39 @@ mod tests {
         assert_eq!(red.len(), 1);
         assert!(live(mine(812, &a, "SUCCESS")).is_empty(), "green");
         assert_ne!(live(mine(812, &b, "FAILURE")), red, "the head moved");
+        assert_eq!(live(mine(812, &a, "PENDING")), red, "a re-run keeps it");
+    }
+
+    #[test]
+    fn work_already_under_way_isnt_offered() {
+        let now = lists(
+            vec![node(OBI, 12, "2026-10-18T08:00:00Z")],
+            vec![node(OBI, 7, "2026-10-18T08:00:00Z")],
+            vec![],
+        );
+        let job = |kind: &str| {
+            Job::new(
+                "j".into(),
+                OBI.into(),
+                kind.into(),
+                "t".into(),
+                "claude".into(),
+                "a".into(),
+            )
+        };
+        let mut review = job("review");
+        review.pr = Some(12);
+        let mut fix = job("fix");
+        fix.issue = Some(7);
+        assert_eq!(
+            numbers(&offers(&Lists::default(), &now, &[], knows, &[]).0).len(),
+            2
+        );
+        assert!(
+            offers(&Lists::default(), &now, &[], knows, &[review, fix])
+                .0
+                .is_empty()
+        );
     }
 
     #[test]

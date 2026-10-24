@@ -131,6 +131,24 @@ impl Repos {
         }
     }
 
+    /// Makes `repo` findable as one of GitHub's, not listed or written yet, for one start on the
+    /// owner's tap (crate::github_work::start_adding): the job's first run keeps it as any of
+    /// GitHub's is ([`Repos::keep`]), and [`Repos::release`] lets go of it when nothing started.
+    pub fn hold(&self, repo: &Repo) {
+        let mut state = self.write();
+        if !state.github.iter().any(|g| same(&g.repo, &repo.repo)) {
+            state.github.push(repo.clone());
+        }
+    }
+
+    /// Lets go of a repository [`Repos::hold`] made findable, unless it's listed by now.
+    pub fn release(&self, name: &str) {
+        let mut state = self.write();
+        if !state.listed.iter().any(|r| same(&r.repo, name)) {
+            state.github.retain(|g| !same(&g.repo, name));
+        }
+    }
+
     /// Keeps GitHub's list only while it's `user`'s, the gh account signed in now: with none, or
     /// another, it's dropped at once, so no job starts in (or adds) a repository of an account gh
     /// no longer uses. True when it was dropped.

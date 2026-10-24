@@ -522,20 +522,22 @@ fn a_burst_of_review_requests_is_offered_five_a_read_until_all_are() {
     assert!(github_items(&obid, "done").is_empty(), "none twice");
 }
 
-/// A review request on a repository obid doesn't work in (#1118): offered with obid's words, and
-/// Review it adds the repository only with the owner's `addRepository`, its remote obid's own; it
-/// stays one of obid's after a restart.
+/// A review request on a repository obid doesn't work in (#1118): offered with obid's words. Only
+/// the owner's tap adds the repository: the apps' `addRepository`, or their signed Confirm of the
+/// inbox offer's Review it (an API token alone only makes the confirm item). It's added only once
+/// the review starts, its remote obid's own, and stays one of obid's after a restart.
 #[test]
 fn reviewing_on_an_unknown_repository_adds_it_only_on_the_owners_tap() {
     const OTHER: &str = "obi-e2e/other";
+    const THIRD: &str = "obi-e2e/third";
     let folder = Folder::new("github-work-add");
     let remote = fixture(&folder.0.join("fixture"));
-    // obid clones it from GitHub: here git finds the fixture there.
+    // obid clones them from GitHub: here git finds the fixture there.
     std::fs::create_dir_all(folder.0.join("env-home")).unwrap();
     std::fs::write(
         folder.0.join("env-home/.gitconfig"),
         format!(
-            "[url \"file://{}\"]\n\tinsteadOf = https://github.com/{OTHER}.git\n",
+            "[url \"file://{}\"]\n\tinsteadOf = https://github.com/{OTHER}.git\n\tinsteadOf = https://github.com/{THIRD}.git\n",
             remote.display()
         ),
     )
@@ -544,16 +546,25 @@ fn reviewing_on_an_unknown_repository_adds_it_only_on_the_owners_tap() {
     let obid = start(&folder.0, &config, Some(&agents()));
     let gh = folder.0.join("env-home/github");
     std::fs::create_dir_all(&gh).unwrap();
-    std::fs::write(
-        gh.join("view.json"),
-        json!({"title": "t", "body": "b", "author": {"login": "sangam"}, "labels": [], "comments": []}).to_string(),
-    )
-    .unwrap();
-    std::fs::write(
-        gh.join("repo.json"),
-        json!({"nameWithOwner": OTHER, "defaultBranchRef": {"name": "main"}}).to_string(),
-    )
-    .unwrap();
+    let view = json!({"title": "t", "body": "b", "author": {"login": "sangam"}, "labels": [], "comments": []});
+    std::fs::write(gh.join("view.json"), view.to_string()).unwrap();
+    let names = |repo: &str| {
+        std::fs::write(
+            gh.join("repo.json"),
+            json!({"nameWithOwner": repo, "defaultBranchRef": {"name": "main"}}).to_string(),
+        )
+        .unwrap()
+    };
+    let config_file = || std::fs::read_to_string(folder.0.join("config.json")).unwrap();
+    let listed = |obid: &Obid| {
+        call(obid, "GET", "/v1/repos", None).body["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["repo"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    names(OTHER);
     serve(&gh, &[], &[], &[]);
     refresh(&obid);
     serve(&gh, &[(OTHER, 12)], &[(OTHER, 13)], &[]);
@@ -565,7 +576,7 @@ fn reviewing_on_an_unknown_repository_adds_it_only_on_the_owners_tap() {
         1,
         "an issue there stays in the feed: {items:?}"
     );
-    let offer = &items[0];
+    let offer = items[0].clone();
     assert_eq!(offer["title"], "Review requested: other #12");
     assert_eq!(
         offer["text"],
@@ -575,29 +586,63 @@ fn reviewing_on_an_unknown_repository_adds_it_only_on_the_owners_tap() {
         (&offer["github"]["known"], &offer["triage"]),
         (&json!(false), &json!("needs_you"))
     );
+    let before = config_file();
 
-    // Without the owner's addRepository, nothing is added.
+    // The feed without addRepository adds nothing.
     let path = format!("/v1/github/work/{}/start", id_of(&feed, "reviews", 12));
-    let before = std::fs::read_to_string(folder.0.join("config.json")).unwrap();
     let refused = call(&obid, "POST", &path, None);
     assert_eq!(refused.status, 409, "{}", refused.text);
-    assert_eq!(
-        std::fs::read_to_string(folder.0.join("config.json")).unwrap(),
-        before
-    );
 
-    let started = call(&obid, "POST", &path, Some(&json!({"addRepository": true})));
-    assert_eq!(started.status, 201, "{}", started.text);
+    // Review it with only obid's API token (an agent, oby-mcp): a confirm item, nothing added.
+    let answer = format!("/v1/inbox/{}/answer", offer["id"].as_str().unwrap());
+    for _ in 0..2 {
+        let waits = call(
+            &obid,
+            "POST",
+            &answer,
+            Some(&json!({"answer": "Review it"})),
+        );
+        assert_eq!(waits.status, 422, "{}", waits.text);
+        assert!(
+            waits
+                .text
+                .contains("Adding obi-e2e/other waits for your Confirm"),
+            "{}",
+            waits.text
+        );
+    }
+    assert_eq!(config_file(), before);
+    assert!(!listed(&obid).contains(&OTHER.to_owned()));
+    assert_eq!(github_items(&obid, "open").len(), 1, "the offer stays open");
+    let inbox = call(&obid, "GET", "/v1/inbox?limit=1000", None).body;
+    let confirms: Vec<Value> = inbox
+        .as_array()
+        .or(inbox["items"].as_array())
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "confirm")
+        .cloned()
+        .collect();
     assert_eq!(
-        (
-            &started.body["kind"],
-            &started.body["pr"],
-            &started.body["repo"]
-        ),
-        (&json!("review"), &json!(12), &json!(OTHER))
+        confirms.len(),
+        1,
+        "asked twice, one confirm item: {confirms:?}"
     );
-    let written: Value =
-        serde_json::from_slice(&std::fs::read(folder.0.join("config.json")).unwrap()).unwrap();
+    assert_eq!(confirms[0]["title"], "Add obi-e2e/other and review #12");
+    let confirm_id = confirms[0]["id"].as_str().unwrap().to_owned();
+    let unsigned = call(
+        &obid,
+        "POST",
+        &format!("/v1/inbox/{confirm_id}/answer"),
+        Some(&json!({"answer": "Confirm"})),
+    );
+    assert_eq!(unsigned.status, 403, "{}", unsigned.text);
+    assert_eq!(config_file(), before);
+
+    // The owner's signed Confirm adds it and starts the review.
+    let confirmed = confirm(&obid, &confirm_id);
+    assert_eq!(confirmed.status, 200, "{}", confirmed.text);
+    let written: Value = serde_json::from_str(&config_file()).unwrap();
     assert_eq!(
         written["repos"][0], config["repos"][0],
         "the rest as it was"
@@ -606,17 +651,49 @@ fn reviewing_on_an_unknown_repository_adds_it_only_on_the_owners_tap() {
         written["repos"][1],
         json!({"repo": OTHER, "remote": format!("https://github.com/{OTHER}.git"), "defaultBranch": "main"})
     );
-    let answered = github_items(&obid, "done")
+    let started = github_items(&obid, "done")
         .into_iter()
         .find(|i| i["github"]["number"] == 12)
-        .expect("the tap answers the offer");
-    assert_eq!(answered["job"], started.body["id"]);
+        .expect("the Confirm answers the offer");
+    assert_eq!(started["answer"], "Review it");
+    let job = call(
+        &obid,
+        "GET",
+        &format!("/v1/jobs/{}", started["job"].as_str().unwrap()),
+        None,
+    )
+    .body;
+    assert_eq!(
+        (&job["kind"], &job["pr"], &job["repo"]),
+        (&json!("review"), &json!(12), &json!(OTHER))
+    );
 
-    // Still one of obid's after a restart (with the configuration obid wrote).
+    // The apps' addRepository: a review that can't start adds nothing; one that starts adds it.
+    names(THIRD);
+    serve(&gh, &[(OTHER, 12), (THIRD, 14)], &[(OTHER, 13)], &[]);
+    let feed = refresh(&obid);
+    let path = format!("/v1/github/work/{}/start", id_of(&feed, "reviews", 14));
+    std::fs::write(gh.join("view.json"), "not JSON").unwrap();
+    let failed = call(&obid, "POST", &path, Some(&json!({"addRepository": true})));
+    assert_eq!(failed.status, 502, "{}", failed.text);
+    assert!(!config_file().contains(THIRD));
+    assert!(!listed(&obid).contains(&THIRD.to_owned()));
+    std::fs::write(gh.join("view.json"), view.to_string()).unwrap();
+    let added = call(&obid, "POST", &path, Some(&json!({"addRepository": true})));
+    assert_eq!(added.status, 201, "{}", added.text);
+    assert_eq!(
+        (&added.body["kind"], &added.body["repo"]),
+        (&json!("review"), &json!(THIRD))
+    );
+    let written: Value = serde_json::from_str(&config_file()).unwrap();
+    assert_eq!(written["repos"][2]["repo"], THIRD);
+
+    // Still obid's after a restart (with the configuration obid wrote).
     drop(obid);
     let obid = start(&folder.0, &written, Some(&agents()));
     let feed = refresh(&obid);
     assert_eq!(feed["reviews"][0]["known"], true, "{feed}");
+    assert_eq!(feed["reviews"][1]["known"], true, "{feed}");
     assert_eq!(feed["assigned"][0]["known"], true, "{feed}");
 }
 
@@ -700,6 +777,23 @@ fn red_ci_on_your_own_pull_request_offers_fix_ci_once_per_head() {
         settled.iter().all(|i| i["answer"].is_null()),
         "settled by themselves"
     );
+
+    // A re-run's pending checks keep #5's offer, and its second failure on the same head is the
+    // same offer, never a second.
+    serve_mine(vec![
+        mine(5, &a, "PENDING"),
+        mine(6, &a, "SUCCESS"),
+        mine(7, &b, "FAILURE"),
+    ]);
+    refresh(&obid);
+    serve_mine(vec![
+        mine(5, &a, "FAILURE"),
+        mine(6, &a, "SUCCESS"),
+        mine(7, &b, "FAILURE"),
+    ]);
+    refresh(&obid);
+    assert_eq!(github_items(&obid, "open").len(), 2);
+    assert_eq!(github_items(&obid, "done").len(), 2);
 
     // Fix CI, and a tap on the feed meanwhile: one fix job, on the pull request's branch.
     std::fs::write(gh.join("slow"), "").unwrap();
