@@ -44,6 +44,7 @@ enum UnpairedLine {
         switch notice {
         case .removed: "Your Mac removed this iPhone. Pair again from Settings › Runner › Pair a device."
         case .expired: "Pairing ended after 30 days. Pair again from Settings › Runner › Pair a device."
+        case .keyChanged: "Your Mac's key changed, so Oby won't talk to it. Pair again from Settings › Runner › Pair a device."
         default: "Let's connect to your Mac. On it, open Settings › Runner › Pair a device."
         }
     }

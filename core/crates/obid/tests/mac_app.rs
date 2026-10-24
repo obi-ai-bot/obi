@@ -1,6 +1,6 @@
 //! The existing Mac app against obid: tests/mac-app/main.swift is built with the app's own client
 //! code (apps/shared/Runner.swift and what it needs: apps/shared/Harness.swift, apps/shared/Decisions.swift, apps/shared/JobPage.swift, apps/shared/JobList.swift,
-//! apps/shared/Elapsed.swift, apps/shared/DeviceKey.swift, apps/shared/GitHubWorkModel.swift and Engine/, compiled as the Oby target compiles
+//! apps/shared/Elapsed.swift, apps/shared/DeviceKey.swift, apps/shared/GitHubWorkModel.swift, apps/shared/PhoneRelay.swift and Engine/, compiled as the Oby target compiles
 //! them) and follows a running obid as apps/mac/app/RunnerFeed.swift follows the runner on this Mac
 //! (Settings › Runner › This Mac, #283): the token through `LocalRunner.token(home:fallback:)`, `GET
 //! /v1/events`, then status, the jobs, the inbox (open and done), the conversation and a job by
@@ -39,6 +39,8 @@ const APP_SOURCES: &[&str] = &[
     "apps/shared/GitHubWorkModel.swift",
     "apps/shared/SlackStatus.swift",
     "apps/shared/SentryStatus.swift",
+    "apps/shared/PhoneRelay.swift",
+    "apps/shared/RemoteRoute.swift",
 ];
 
 /// What Package.swift and the Xcode project compile Oby's Swift with.

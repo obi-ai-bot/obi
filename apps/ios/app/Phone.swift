@@ -233,13 +233,26 @@ final class Phone {
             } else {
                 UserDefaults.standard.removeObject(forKey: "mac.link")
                 GatewayTokenStore.remove()
+                RelayStore.remove()
+                relay = nil
                 pairedUntil = nil
             }
             restoreQueuedMessages(for: offlineQueueTarget)
-            if loop != nil { finder.find(named: link?.name) { [weak self] url in self?.lan = url } }
+            if loop != nil { finder.find(named: bonjourName) { [weak self] url in self?.lan = url } }
             reroute()
         }
     }
+    /// The Mac's Obysphere relay (#1278), when this iPhone paired through it: then every request
+    /// goes sealed through it, never to a gateway. Its token and the Mac's pinned key are in the
+    /// keychain (RelayStore); a new key comes only with pairing again.
+    private(set) var relay: PhoneRelay? {
+        didSet { if oldValue !== relay { Task { [oldValue] in await oldValue?.hangUp() } } }
+    }
+    /// The welcome didn't open with the Mac's pinned key (PhoneRelay.KeyChanged): pair again.
+    private(set) var keyChanged = false
+    /// The name Bonjour looks for: none for a Mac reached through its Obysphere, whose gateway
+    /// refuses this iPhone's token.
+    private var bonjourName: String? { relay == nil ? link?.name : nil }
     /// The gateway's address on the local network while Bonjour sees the linked Mac (MacFinder);
     /// nil away from home.
     private(set) var lan: URL? {
@@ -248,7 +261,7 @@ final class Phone {
     /// The way to the Mac now: home or away. Nil with no Mac linked: then the runner at `runnerURL`.
     /// A hostname only chooses a route; the gateway still requires the paired device token. An
     /// old hand-entered link without that token must not send requests to a gateway that will 401.
-    var route: RemoteRoute? { RemoteRoute.choose(lan: lan, link: link, paired: GatewayTokenStore.read() != nil) }
+    var route: RemoteRoute? { RemoteRoute.choose(lan: lan, link: link, paired: GatewayTokenStore.read() != nil, relayed: relay != nil) }
     /// Where the calls go: the linked Mac by its route, else the runner.
     var base: URL {
         #if DEBUG
@@ -291,7 +304,8 @@ final class Phone {
                 await syncing?.value
                 await JobsActivity.sync(jobs)
             }
-            JobWaiter.shared.wait(for: jobs, runner: base)
+            // A plain HTTP download: never for a Mac reached sealed, through its Obysphere.
+            if relay == nil { JobWaiter.shared.wait(for: jobs, runner: base) }
         }
     }
     /// The jobs whose pages are open (TaskPage): a new list keeps them, even older than its 50.
@@ -320,7 +334,7 @@ final class Phone {
 
     /// Why the Mac can't be reached, the same line on every screen, or nil.
     var notice: ReachNotice? {
-        ReachNotice.of(connection, online: online, status: refusal, paired: link != nil, lastSeen: lastSeen, expires: pairedUntil)
+        ReachNotice.of(connection, online: online, status: refusal, paired: link != nil, lastSeen: lastSeen, expires: pairedUntil, keyChanged: keyChanged)
     }
     /// When this iPhone's pairing ends (the gateway's 30 days), from the answer that paired it.
     private(set) var pairedUntil = UserDefaults.standard.object(forKey: "gateway.expiresAt") as? Date {
@@ -336,7 +350,7 @@ final class Phone {
     /// Connect instead of Home: no Mac and no runner yet, or the Mac stopped taking this iPhone.
     var needsPairing: Bool { Self.needsPairing(linked: link != nil, runner: runnerURL, notice: notice) }
     static func needsPairing(linked: Bool, runner: URL?, notice: ReachNotice?) -> Bool {
-        (!linked && runner == nil) || notice == .removed || notice == .expired
+        (!linked && runner == nil) || notice == .removed || notice == .expired || notice == .keyChanged
     }
     /// This iPhone has a network path (NWPathMonitor).
     private(set) var online = true
@@ -355,7 +369,13 @@ final class Phone {
         if Self.offline, !UserDefaults.standard.bool(forKey: "ObySampleUnpaired") { runnerURL = Runner.nowhere }
         #endif
         if let data = UserDefaults.standard.data(forKey: "mac.link"), GatewayTokenStore.read() != nil {
-            link = try? MacLink.paired(data)
+            // A Mac paired through its Obysphere: its hostname is its name, not a route.
+            if let kept = RelayStore.read() {
+                relay = PhoneRelay(kept)
+                link = try? JSONDecoder().decode(MacLink.self, from: data)
+            } else {
+                link = try? MacLink.paired(data)
+            }
         } else {
             // A link saved before gateway pairing cannot authenticate the Mac. Require pairing
             // again instead of restoring a link that sends requests the gateway will reject.
@@ -456,7 +476,8 @@ final class Phone {
     var runner: Runner {
         // Paired with a Mac, a 401 means the pairing ended: say which, never the Tailscale line.
         let refused = link.map { _ in (pairedUntil.map { $0 <= .now } ?? false) ? ReachNotice.expired : ReachNotice.removed }
-        return Runner(base: base, token: GatewayTokenStore.read(), refused: refused.map { "\($0.title). \($0.detail)" })
+        return Runner(base: base, token: GatewayTokenStore.read(), refused: refused.map { "\($0.title). \($0.detail)" },
+                      relay: base == RemoteRoute.relayBase ? relay : nil)
     }
 
     /// Pairs with a Mac's gateway (#284): the invitation's QR secret or its six-digit code buys this
@@ -467,9 +488,30 @@ final class Phone {
         guard let link = link ?? answer.link else {
             throw RunnerError(message: "The Mac didn't say how to reach it away from home. Pair with its QR code instead.")
         }
+        RelayStore.remove()
+        relay = nil
         pairedUntil = answer.expiresAt
         refusal = nil
         self.link = link
+    }
+
+    /// Pairs through the Mac's Obysphere (#1278): the QR code's secret, sealed to the Mac's key from
+    /// the same code, buys the device token, and the relay with that key is kept in the keychain.
+    /// Only a new QR code from the Mac pins another key.
+    func pairRelay(_ link: RelayLink, credential: String, mac: MacLink) async throws {
+        let relay = PhoneRelay(link)
+        let answer = try await GatewayPairing.redeem(at: RemoteRoute.relayBase, credential: credential, name: UIDevice.current.name) {
+            try await relay.data(for: $0)
+        }
+        do { try RelayStore.save(link) } catch {
+            GatewayTokenStore.remove()
+            throw error
+        }
+        self.relay = relay
+        keyChanged = false
+        pairedUntil = answer.expiresAt
+        refusal = nil
+        self.link = mac
     }
     var active: [Job] { jobs.filter(\.isActive) }
     var signedIn: [Account] { accounts.filter(\.signedIn) }
@@ -483,7 +525,9 @@ final class Phone {
     /// The app is in front: looks for the linked Mac on the local network, and follows the runner
     /// (or the Mac) from there.
     func start() {
-        finder.find(named: link?.name) { [weak self] url in self?.lan = url }
+        finder.find(named: bonjourName) { [weak self] url in self?.lan = url }
+        // Opening the app is the person asking: the relay may open again at once.
+        Task { [relay] in await relay?.resume() }
         if path == nil {
             let monitor = NWPathMonitor()
             monitor.pathUpdateHandler = { [weak self] update in
@@ -502,6 +546,7 @@ final class Phone {
         path?.cancel()
         path = nil
         unfollow()
+        Task { [relay] in await relay?.hangUp() }
     }
 
     /// The way to the Mac changed (home to away, or back, or just paired): followed anew, keeping
@@ -537,6 +582,7 @@ final class Phone {
                 } catch {
                     if Task.isCancelled { return }
                     refusal = Self.refusal(after: error, was: refusal)
+                    keyChanged = error is PhoneRelay.KeyChanged
                     connection = .offline(error.localizedDescription)
                 }
                 try? await Task.sleep(for: .seconds(wait))
@@ -568,6 +614,7 @@ final class Phone {
         await Notifications.clear(Set(jobs.filter { !$0.needsYou && !$0.waitsForAnswer }.map(\.id)))
         connection = .live
         refusal = nil
+        keyChanged = false
         lastSeen = .now
         UserDefaults.standard.set(lastSeen, forKey: "runner.lastSeen")
         // Jobs dispatched from the Mac or the runner API notify too, so ask on connecting.
@@ -1133,9 +1180,8 @@ enum GatewayPairing {
 /// This iPhone's device token for the linked Mac's gateway, in the keychain only.
 enum GatewayTokenStore {
     private static let service = "com.deskree.oby.gateway"
-    private static let account = "device-token"
 
-    static func read() -> String? {
+    static func read(account: String = "device-token") -> String? {
         var result: AnyObject?
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service, kSecAttrAccount as String: account,
@@ -1145,7 +1191,7 @@ enum GatewayTokenStore {
         return String(data: data, encoding: .utf8)
     }
 
-    static func save(_ token: String) throws {
+    static func save(_ token: String, account: String = "device-token") throws {
         let data = Data(token.utf8)
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service, kSecAttrAccount as String: account]
@@ -1165,9 +1211,24 @@ enum GatewayTokenStore {
         }
     }
 
-    static func remove() {
+    static func remove(account: String = "device-token") {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service, kSecAttrAccount as String: account]
         SecItemDelete(query as CFDictionary)
     }
+}
+
+/// The Mac's Obysphere relay this iPhone paired through (RelayLink): beside the device token, in
+/// the keychain only and on this device only (no backup or iCloud copy carries it), so its token and
+/// the Mac's pinned key never reach the defaults. Pairing again replaces it; unpairing deletes it.
+enum RelayStore {
+    static func read() -> RelayLink? {
+        GatewayTokenStore.read(account: "relay").flatMap { try? JSONDecoder().decode(RelayLink.self, from: Data($0.utf8)) }
+    }
+
+    static func save(_ link: RelayLink) throws {
+        try GatewayTokenStore.save(String(decoding: try JSONEncoder().encode(link), as: UTF8.self), account: "relay")
+    }
+
+    static func remove() { GatewayTokenStore.remove(account: "relay") }
 }

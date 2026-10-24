@@ -1046,16 +1046,26 @@ nonisolated struct Runner: Sendable {
     /// What a 401 means here: an iPhone paired with a Mac says its pairing ended (docs/oby-ux.md
     /// row 34); nil says the generic line.
     var refused: String?
+    /// An iPhone paired through the Mac's Obysphere (#1278) sends every request sealed through it,
+    /// never over HTTP.
+    var relay: PhoneRelay?
 
-    init(base: URL, token: String? = nil, refused: String? = nil) {
+    init(base: URL, token: String? = nil, refused: String? = nil, relay: PhoneRelay? = nil) {
         self.base = base
         self.token = token
         self.refused = refused
+        self.relay = relay
     }
 
     /// Nowhere: what a request goes to with no Mac paired and no runner set (port 9, discard),
     /// so a fresh iPhone talks to nobody (docs/oby-ux.md row 33).
     static let nowhere = URL(string: "http://127.0.0.1:9")!
+
+    /// `request`'s answer, through the relay when there is one.
+    private func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        if let relay { return try await relay.data(for: request) }
+        return try await URLSession.shared.data(for: request)
+    }
 
     /// `request` with the token, when there is one.
     private func signed(_ request: URLRequest) -> URLRequest {
@@ -1515,7 +1525,7 @@ nonisolated struct Runner: Sendable {
     func bundle(_ id: String) async throws -> Data {
         var request = URLRequest(url: base.appending(path: "v1/checks/\(id)/bundle"))
         request.timeoutInterval = 120
-        let (data, response) = try await URLSession.shared.data(for: signed(request))
+        let (data, response) = try await fetch(signed(request))
         try Self.check(response, data, refused: refused)
         return data
     }
@@ -1543,7 +1553,7 @@ nonisolated struct Runner: Sendable {
         var request = URLRequest(url: URL(string: "v1/connections/\(name)", relativeTo: base.appending(path: "/"))!)
         request.httpMethod = "DELETE"
         request.timeoutInterval = 45
-        let (data, response) = try await URLSession.shared.data(for: signed(request))
+        let (data, response) = try await fetch(signed(request))
         struct Ask: Decodable { var action: String }
         if (response as? HTTPURLResponse)?.statusCode == 403, let ask = try? JSONDecoder().decode(Ask.self, from: data) { return ask.action }
         try Self.check(response, data, refused: refused)
@@ -1641,17 +1651,25 @@ nonisolated struct Runner: Sendable {
                     var request = URLRequest(url: base.appending(path: "v1/events"))
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     request.timeoutInterval = 60
-                    let (bytes, response) = try await URLSession.shared.bytes(for: signed(request))
-                    try Self.check(response, nil, refused: refused)
-                    // The runner answers once it follows this connection: from here, every change arrives.
-                    stream.yield(.connected)
                     var parser = EventParser()
                     var line = Data()
                     // Split on newlines only: summaries may hold U+2028, which `lines` would break at.
-                    for try await byte in bytes {
-                        guard byte == 0x0A else { line.append(byte); continue }
+                    func feed(_ byte: UInt8) {
+                        guard byte == 0x0A else { line.append(byte); return }
                         if let event = parser.feed(String(decoding: line, as: UTF8.self)) { stream.yield(event) }
                         line.removeAll(keepingCapacity: true)
+                    }
+                    if let relay {
+                        let (response, body) = try await relay.send(signed(request))
+                        try Self.check(response, nil, refused: refused)
+                        stream.yield(.connected)
+                        for try await chunk in body { chunk.forEach(feed) }
+                    } else {
+                        let (bytes, response) = try await URLSession.shared.bytes(for: signed(request))
+                        try Self.check(response, nil, refused: refused)
+                        // The runner answers once it follows this connection: from here, every change arrives.
+                        stream.yield(.connected)
+                        for try await byte in bytes { feed(byte) }
                     }
                     stream.finish()
                 } catch {
@@ -1710,7 +1728,7 @@ nonisolated struct Runner: Sendable {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await URLSession.shared.data(for: signed(request))
+        let (data, response) = try await fetch(signed(request))
         try Self.check(response, data, refused: refused)
         return data
     }
@@ -1797,7 +1815,7 @@ nonisolated struct Runner: Sendable {
             .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(["/"])) ?? $0 }
         var request = URLRequest(url: URL(string: "v1/artifacts/" + segments.joined(separator: "/"), relativeTo: base.appending(path: "/"))!)
         request.timeoutInterval = 45
-        let (data, response) = try await URLSession.shared.data(for: signed(request))
+        let (data, response) = try await fetch(signed(request))
         guard let http = response as? HTTPURLResponse else { throw RunnerError(message: "The runner's answer wasn't HTTP.") }
         return (data, http)
     }
