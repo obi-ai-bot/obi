@@ -436,13 +436,72 @@ const CLOSING: [&str; 9] = [
     "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
 ];
 
+/// The byte ranges of `line`'s inline code: from a run of backticks (one a backslash escapes
+/// starts a character later) to the next run of as many. A run with no match is only backticks.
+fn code_spans(line: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = line.as_bytes();
+    let mut runs: Vec<(usize, usize, bool)> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i] == b'`' {
+            i += 1;
+        }
+        let slashes = bytes[..start]
+            .iter()
+            .rev()
+            .take_while(|&&b| b == b'\\')
+            .count();
+        runs.push((start, i - start, slashes % 2 == 1));
+    }
+    let mut spans = Vec::new();
+    let mut r = 0;
+    while r < runs.len() {
+        let (start, len, escaped) = runs[r];
+        let (start, len) = if escaped {
+            (start + 1, len - 1)
+        } else {
+            (start, len)
+        };
+        match runs[r + 1..]
+            .iter()
+            .position(|&(_, l, _)| len > 0 && l == len)
+        {
+            Some(j) => {
+                let (end, l, _) = runs[r + 1 + j];
+                spans.push(start..end + l);
+                r += j + 2;
+            }
+            None => r += 1,
+        }
+    }
+    spans
+}
+
+/// A line that opens or closes a fenced code block: its fence character and length, and whether
+/// anything follows the fence. Only a fence at the line's start counts: one indented could sit in
+/// a list item, which a less indented line ends, and so the code with it.
+fn fence(line: &str) -> Option<(char, usize, bool)> {
+    let c = line.chars().next().filter(|&c| c == '`' || c == '~')?;
+    let len = line.chars().take_while(|&n| n == c).count();
+    let rest = &line[len..];
+    (len >= 3 && !(c == '`' && rest.contains('`'))).then(|| (c, len, !rest.trim().is_empty()))
+}
+
 /// One line of the agent's words, rendered as the Markdown it wrote but unable to act: an invisible
 /// break after every `<` (no HTML, so no `</blockquote>`), after a `#` that would start a heading or
-/// reference an issue, after an `@` that would mention someone, inside a closing keyword, and inside
-/// a line of `-`, `=`, `*` or `_` that would underline a heading. Code reads the same.
+/// reference an issue, after an `@` that would mention someone, after every `[` and `]` (no link,
+/// image, footnote, task box or `[!NOTE]` alert), inside a closing keyword, and inside a line of
+/// `-`, `=`, `*` or `_` that would underline a heading. Inline code is left as it is: nothing acts
+/// in it, and it reads the same.
 fn defused(line: &str) -> String {
-    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let word = |c: char| c.is_alphanumeric();
     let rule = !line.trim().is_empty() && line.chars().all(|c| "=-*_ \t".contains(c));
+    let code = code_spans(line);
     let mut out = String::with_capacity(line.len() + 8);
     let mut chars = line.char_indices().peekable();
     let mut prev: Option<char> = None;
@@ -451,7 +510,8 @@ fn defused(line: &str) -> String {
         out.push(c);
         let next = chars.peek().map(|&(_, n)| n);
         let split = match c {
-            '<' => true,
+            _ if code.iter().any(|span| span.contains(&i)) => false,
+            '<' | '[' | ']' => true,
             '@' => next.is_some_and(|n| n.is_ascii_alphanumeric()),
             '#' => next.is_none_or(|n| n.is_ascii_digit() || n.is_whitespace() || n == '#'),
             _ if rule => !c.is_whitespace() && !std::mem::replace(&mut ruled, true),
@@ -470,17 +530,55 @@ fn defused(line: &str) -> String {
 }
 
 /// The agent's words as a Markdown blockquote: every line, whatever ends it (`\r` ends a line in
-/// Markdown too), starts with `>`, so none of it leaves the quote.
+/// Markdown too), starts with `>`, so none of it leaves the quote. A fenced code block's lines are
+/// left as they are: they are code, which the quote's end closes if the agent didn't.
 fn quoted(text: &str) -> String {
+    let mut open: Option<(char, usize)> = None;
     text.replace("\r\n", "\n")
         .replace('\r', "\n")
         .split('\n')
-        .map(|line| match defused(line) {
-            line if line.is_empty() => ">".to_owned(),
-            line => format!("> {line}"),
+        .map(|line| {
+            let line = match (open, fence(line)) {
+                (None, Some((c, len, _))) => {
+                    open = Some((c, len));
+                    line.to_owned()
+                }
+                (Some((c, len)), Some((n, l, false))) if n == c && l >= len => {
+                    open = None;
+                    line.to_owned()
+                }
+                (Some(_), _) => line.to_owned(),
+                (None, None) => defused(line),
+            };
+            if line.is_empty() {
+                ">".to_owned()
+            } else {
+                format!("> {line}")
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// What the secret scan reads before anything goes out, named as its findings name them: the
+/// branch, the pull request's title and description, and the summaries as the agent wrote them
+/// too, since the description's copy has invisible breaks in it (`quoted`) that a rule could read
+/// past.
+fn scanned_texts(job: &Job, title: &str, description: &str) -> Vec<(String, String)> {
+    let mut texts = vec![
+        ("branch name".to_owned(), job.branch.clone()),
+        ("pull request title".to_owned(), title.to_owned()),
+        (
+            "pull request description".to_owned(),
+            description.to_owned(),
+        ),
+    ];
+    texts.extend(
+        summaries(job)
+            .into_iter()
+            .map(|summary| ("agent's summary".to_owned(), summary.clone())),
+    );
+    texts
 }
 
 /// Every round's summary, or the job's one summary.
@@ -874,18 +972,7 @@ pub async fn publish(
         _ => false,
     };
     let description = body(job, closes);
-    let mut texts = vec![
-        ("branch name".to_owned(), job.branch.clone()),
-        ("pull request title".to_owned(), title.clone()),
-        ("pull request description".to_owned(), description.clone()),
-    ];
-    // The summaries as the agent wrote them too: the description's copy has invisible breaks in
-    // it (`quoted`) that a rule could read past.
-    texts.extend(
-        summaries(job)
-            .into_iter()
-            .map(|summary| ("agent's summary".to_owned(), summary.clone())),
-    );
+    let texts = scanned_texts(job, &title, &description);
     let mut said: Vec<Found> = match scan::scan(&texts, &target.scratch).await {
         Verdict::Clean => Vec::new(),
         Verdict::Found(found) => found.into_iter().map(|f| Found::of(f, None)).collect(),
@@ -1719,7 +1806,7 @@ mod tests {
         let text = body(&job, false);
         assert!(
             text.starts_with(
-                "The agent's summary:\n\n> Stopped **the leak**.\n>\n> - `a<\u{200B}b>` in `x.rs`\n> ```rust\n> #[test]\n> ```\n\nWhat the user asked for:"
+                "The agent's summary:\n\n> Stopped **the leak**.\n>\n> - `a<b>` in `x.rs`\n> ```rust\n> #[test]\n> ```\n\nWhat the user asked for:"
             ),
             "{text}"
         );
@@ -1765,6 +1852,76 @@ mod tests {
         assert!(rest.ends_with("Oby never merges it: a person does."));
         // Words that only contain a keyword stay whole.
         assert_eq!(defused("prefix fixture closest"), "prefix fixture closest");
+        // A keyword in emphasis is still a word.
+        assert_eq!(
+            defused("_Fixes_ https://github.com/o/r/issues/4"),
+            "_F\u{200B}ixes_ https://github.com/o/r/issues/4"
+        );
+    }
+
+    /// Links, images, footnotes, task boxes and alerts don't render: each `[` and `]` is broken.
+    #[test]
+    fn nothing_in_brackets_renders() {
+        for (line, live) in [
+            ("[!IMPORTANT]", "[!"),
+            ("![badge](https://x/b.svg)", "]("),
+            ("- [x] done", "[x]"),
+            ("see [here](https://x) and [ref][1]", "]["),
+            ("[1]: https://x", "]:"),
+            ("a note[^1]", "[^"),
+        ] {
+            let out = defused(line);
+            assert!(!out.contains(live), "{live:?} in {out:?}");
+            assert_eq!(out.replace('\u{200B}', ""), line);
+        }
+    }
+
+    /// Inline code and fenced code blocks read exactly as the agent wrote them, while what's
+    /// around them is still broken.
+    #[test]
+    fn code_gets_no_invisible_characters() {
+        assert_eq!(
+            defused("run `a[0] <b> @x #1` then [x]"),
+            "run `a[0] <b> @x #1` then [\u{200B}x]\u{200B}"
+        );
+        assert_eq!(
+            defused("``a ` [b]`` [c]"),
+            "``a ` [b]`` [\u{200B}c]\u{200B}"
+        );
+        // A backtick without its match, or an escaped one, opens no code.
+        assert_eq!(defused("one ` [a]"), "one ` [\u{200B}a]\u{200B}");
+        assert_eq!(defused("\\`[a]`"), "\\`[\u{200B}a]\u{200B}`");
+        let text = quoted(
+            "Done:\n```rust\nlet v = [x[0], y];\n# fn f() {}\n~~~\n```\n@me [x]\n~~~~\n<b>\n~~~~",
+        );
+        assert_eq!(
+            text,
+            "> Done:\n> ```rust\n> let v = [x[0], y];\n> # fn f() {}\n> ~~~\n> ```\n> @\u{200B}me [\u{200B}x]\u{200B}\n> ~~~~\n> <b>\n> ~~~~"
+        );
+        // An indented fence could be in a list item a later line ends: those lines are broken.
+        assert_eq!(quoted("- a\n  ```\n<b>"), "> - a\n>   ```\n> <\u{200B}b>");
+    }
+
+    /// The summaries are scanned as the agent wrote them: a vault secret holding `@x` or `#1`,
+    /// which the description's quote breaks with an invisible character, still blocks publishing.
+    #[test]
+    fn a_secret_the_quote_breaks_is_still_found_in_the_summary() {
+        for secret in ["Vq7mZ@xk9Lp3wRt2", "Vq7mZ#1k9Lp3wRt2"] {
+            let name = "vault publish-summary-test";
+            crate::secrets::known().learn(name, secret);
+            let mut job = job();
+            job.summary = format!("Rotated it: {secret}");
+            let description = body(&job, false);
+            assert!(!description.contains(secret));
+            let found = scan::built_in(&scanned_texts(&job, "A title", &description));
+            crate::secrets::known().forget(name);
+            assert!(
+                found
+                    .iter()
+                    .any(|f| f.name == "agent's summary" && f.rule == "vault secret"),
+                "{found:?}"
+            );
+        }
     }
 
     /// A job without a check says it had none, and the footer doesn't claim a check passed.
