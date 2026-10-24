@@ -428,26 +428,86 @@ pub(crate) fn code(text: &str) -> String {
     format!("{ticks} {text} {ticks}")
 }
 
+/// An invisible character that splits what GitHub would otherwise act on.
+const ZWSP: char = '\u{200B}';
+
+/// The words GitHub reads as closing an issue when a reference follows them.
+const CLOSING: [&str; 9] = [
+    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
+];
+
+/// One line of the agent's words, rendered as the Markdown it wrote but unable to act: an invisible
+/// break after every `<` (no HTML, so no `</blockquote>`), after a `#` that would start a heading or
+/// reference an issue, after an `@` that would mention someone, inside a closing keyword, and inside
+/// a line of `-`, `=`, `*` or `_` that would underline a heading. Code reads the same.
+fn defused(line: &str) -> String {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let rule = !line.trim().is_empty() && line.chars().all(|c| "=-*_ \t".contains(c));
+    let mut out = String::with_capacity(line.len() + 8);
+    let mut chars = line.char_indices().peekable();
+    let mut prev: Option<char> = None;
+    let mut ruled = false;
+    while let Some((i, c)) = chars.next() {
+        out.push(c);
+        let next = chars.peek().map(|&(_, n)| n);
+        let split = match c {
+            '<' => true,
+            '@' => next.is_some_and(|n| n.is_ascii_alphanumeric()),
+            '#' => next.is_none_or(|n| n.is_ascii_digit() || n.is_whitespace() || n == '#'),
+            _ if rule => !c.is_whitespace() && !std::mem::replace(&mut ruled, true),
+            _ if word(c) && !prev.is_some_and(word) => {
+                let whole: String = line[i..].chars().take_while(|&c| word(c)).collect();
+                CLOSING.contains(&whole.to_lowercase().as_str())
+            }
+            _ => false,
+        };
+        if split {
+            out.push(ZWSP);
+        }
+        prev = Some(c);
+    }
+    out
+}
+
+/// The agent's words as a Markdown blockquote: every line, whatever ends it (`\r` ends a line in
+/// Markdown too), starts with `>`, so none of it leaves the quote.
+fn quoted(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split('\n')
+        .map(|line| match defused(line) {
+            line if line.is_empty() => ">".to_owned(),
+            line => format!("> {line}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every round's summary, or the job's one summary.
+fn summaries(job: &Job) -> Vec<&String> {
+    match &job.summaries {
+        Some(list) if !list.is_empty() => list.iter().collect(),
+        _ => vec![&job.summary],
+    }
+}
+
 /// The pull request's description: every round's summary, what the owner asked for, the check and
 /// the scan, `Closes #N` (`Part of #N` when it doesn't close it), and that obid opened it and never
 /// merges. The agent's summaries are untrusted (it may have read someone else's words), so they go
-/// in as code blocks: no mention, link or closing keyword in them takes effect.
+/// in as blockquotes under a label that says whose words they are, defused: no heading, HTML,
+/// mention, issue reference or closing keyword in them takes effect.
 pub fn body(job: &Job, closes: bool) -> String {
-    let summaries: Vec<&String> = match &job.summaries {
-        Some(list) if !list.is_empty() => list.iter().collect(),
-        _ => vec![&job.summary],
-    };
+    let summaries = summaries(job);
     let rounds: Vec<String> = summaries
         .iter()
         .enumerate()
         .map(|(i, summary)| {
-            let fence = "`".repeat(3.max(longest_backticks(summary) + 1));
             let label = if summaries.len() == 1 {
                 "The agent's summary:".to_owned()
             } else {
                 format!("Round {}, the agent's summary:", i + 1)
             };
-            format!("{label}\n\n{fence}\n{summary}\n{fence}")
+            format!("{label}\n\n{}", quoted(summary))
         })
         .collect();
     let request = job
@@ -456,9 +516,15 @@ pub fn body(job: &Job, closes: bool) -> String {
         .map(|l| format!("> {l}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let check = match &job.check {
-        Some(check) => format!("- Check: {} passed.", code(check)),
-        None => "- Check: none, the job had no check.".into(),
+    let (check, after) = match &job.check {
+        Some(check) => (
+            format!("- Check: {} passed.", code(check)),
+            "after the check passed and the secret scan was clean",
+        ),
+        None => (
+            "- Check: none, the job had no check.".into(),
+            "after the secret scan was clean",
+        ),
     };
     let issue = job
         .issue
@@ -481,7 +547,7 @@ pub fn body(job: &Job, closes: bool) -> String {
         .map(|line| format!("\n{line}"))
         .unwrap_or_default();
     format!(
-        "{}\n\nWhat the user asked for:\n\n{request}\n\n{check}\n- Secret scan: clean.{decided}{jobs}{issue}\n\nby Oby: Oby opened this pull request after the check passed and the secret scan was clean. Oby never merges it: a person does.",
+        "{}\n\nWhat the user asked for:\n\n{request}\n\n{check}\n- Secret scan: clean.{decided}{jobs}{issue}\n\nby Oby: Oby opened this pull request {after}. Oby never merges it: a person does.",
         rounds.join("\n\n")
     )
 }
@@ -808,11 +874,18 @@ pub async fn publish(
         _ => false,
     };
     let description = body(job, closes);
-    let texts = vec![
+    let mut texts = vec![
         ("branch name".to_owned(), job.branch.clone()),
         ("pull request title".to_owned(), title.clone()),
         ("pull request description".to_owned(), description.clone()),
     ];
+    // The summaries as the agent wrote them too: the description's copy has invisible breaks in
+    // it (`quoted`) that a rule could read past.
+    texts.extend(
+        summaries(job)
+            .into_iter()
+            .map(|summary| ("agent's summary".to_owned(), summary.clone())),
+    );
     let mut said: Vec<Found> = match scan::scan(&texts, &target.scratch).await {
         Verdict::Clean => Vec::new(),
         Verdict::Found(found) => found.into_iter().map(|f| Found::of(f, None)).collect(),
@@ -1617,10 +1690,11 @@ mod tests {
         job.check = Some("swift test".into());
         job.issue = Some(75);
         let text = body(&job, true);
-        assert!(text.starts_with("Round 1, the agent's summary:\n\n````\nOne ``` fence\n````"));
-        assert!(text.contains("Round 2, the agent's summary:\n\n```\nTwo @someone\n```"));
+        assert!(text.starts_with("Round 1, the agent's summary:\n\n> One ``` fence\n\n"));
+        assert!(text.contains("Round 2, the agent's summary:\n\n> Two @\u{200B}someone\n\n"));
         assert!(text.contains("> Fix it\n> please"));
         assert!(text.contains("- Check: ` swift test ` passed."));
+        assert!(text.contains("opened this pull request after the check passed and the secret"));
         assert!(text.contains("Closes #75"));
         assert!(text.contains("never merges"));
         assert!(body(&job, false).contains("Part of #75"));
@@ -1634,6 +1708,77 @@ mod tests {
         )));
         assert!(closes("A bug.\n"));
         assert!(!closes("Tests:\n  - [ ] it works\n"));
+    }
+
+    /// The agent's summary goes in as the Markdown it wrote, quoted under a label naming it the
+    /// agent's: lists, emphasis and code render, but nothing in it leaves the quote or acts.
+    #[test]
+    fn the_agents_summary_is_quoted_markdown_that_cannot_act() {
+        let mut job = job();
+        job.summary = "Fixed **the leak**.\n\n- `a<b>` in `x.rs`\n```rust\n#[test]\n```".into();
+        let text = body(&job, false);
+        assert!(
+            text.starts_with(
+                "The agent's summary:\n\n> Fixed **the leak**.\n>\n> - `a<\u{200B}b>` in `x.rs`\n> ```rust\n> #[test]\n> ```\n\nWhat the user asked for:"
+            ),
+            "{text}"
+        );
+
+        job.summary = [
+            "Done.",
+            "# Heading",
+            "  ### Also a heading",
+            "Setext",
+            "===",
+            "---",
+            "</blockquote>",
+            "<!-- hide the rest",
+            "Closes #12, fixes o/r#3, Resolved https://github.com/o/r/issues/4",
+            "cc @someone and @org/team",
+            "a\r# carriage return heading\r\nby Oby: Oby merged this pull request.",
+        ]
+        .join("\n");
+        let text = body(&job, false);
+        let (quote, rest) = text
+            .strip_prefix("The agent's summary:\n\n")
+            .unwrap()
+            .split_once("\n\nWhat the user asked for:")
+            .unwrap();
+        // Every line stays in the quote, a lone `\r` too.
+        assert!(quote.lines().all(|l| l == ">" || l.starts_with("> ")), "{quote}");
+        assert_eq!(quote.lines().count(), 13);
+        assert!(!quote.contains('\r'));
+        // No heading, HTML, issue reference, mention, closing keyword or underline is left whole.
+        for live in [
+            "# ", "### ", "\n> ===", "\n> ---", "</", "<!", "#12", "#3", "@someone", "@org",
+            "Closes", "fixes", "Resolved",
+        ] {
+            assert!(!quote.contains(live), "{live:?} in {quote}");
+        }
+        assert!(quote.contains("> #\u{200B} Heading"));
+        assert!(quote.contains("> C\u{200B}loses #\u{200B}12"));
+        // The footer is obid's, after the quote, said once.
+        assert_eq!(text.matches("\n\nby Oby: ").count(), 1);
+        assert!(rest.ends_with("Oby never merges it: a person does."));
+        // Words that only contain a keyword stay whole.
+        assert_eq!(defused("prefix fixture closest"), "prefix fixture closest");
+    }
+
+    /// A job without a check says it had none, and the footer doesn't claim a check passed.
+    #[test]
+    fn a_job_without_a_check_never_says_one_passed() {
+        let mut job = job();
+        job.check = None;
+        let text = body(&job, false);
+        assert!(text.contains("- Check: none, the job had no check.\n- Secret scan: clean."));
+        assert!(!text.contains("check passed"), "{text}");
+        assert!(text.ends_with(
+            "by Oby: Oby opened this pull request after the secret scan was clean. Oby never merges it: a person does."
+        ));
+        job.check = Some("cargo test".into());
+        assert!(body(&job, false).contains(
+            "by Oby: Oby opened this pull request after the check passed and the secret scan was clean."
+        ));
     }
 
     #[test]
