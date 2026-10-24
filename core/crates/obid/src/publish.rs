@@ -1715,11 +1715,11 @@ mod tests {
     #[test]
     fn the_agents_summary_is_quoted_markdown_that_cannot_act() {
         let mut job = job();
-        job.summary = "Fixed **the leak**.\n\n- `a<b>` in `x.rs`\n```rust\n#[test]\n```".into();
+        job.summary = "Stopped **the leak**.\n\n- `a<b>` in `x.rs`\n```rust\n#[test]\n```".into();
         let text = body(&job, false);
         assert!(
             text.starts_with(
-                "The agent's summary:\n\n> Fixed **the leak**.\n>\n> - `a<\u{200B}b>` in `x.rs`\n> ```rust\n> #[test]\n> ```\n\nWhat the user asked for:"
+                "The agent's summary:\n\n> Stopped **the leak**.\n>\n> - `a<\u{200B}b>` in `x.rs`\n> ```rust\n> #[test]\n> ```\n\nWhat the user asked for:"
             ),
             "{text}"
         );
