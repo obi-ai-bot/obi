@@ -593,7 +593,7 @@ fn summaries(job: &Job) -> Vec<&String> {
 /// the scan, `Closes #N` (`Part of #N` when it doesn't close it), and that obid opened it and never
 /// merges. The agent's summaries are untrusted (it may have read someone else's words), so they go
 /// in as blockquotes under a label that says whose words they are, defused: no heading, HTML,
-/// mention, issue reference or closing keyword in them takes effect.
+/// link, image, alert, task box, mention, issue reference or closing keyword in them takes effect.
 pub fn body(job: &Job, closes: bool) -> String {
     let summaries = summaries(job);
     let rounds: Vec<String> = summaries
