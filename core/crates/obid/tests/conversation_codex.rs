@@ -304,7 +304,7 @@ fn a_command_ends_a_codex_turn() {
     let jobs = call(&obid, "GET", "/v1/jobs", None);
     assert_eq!(jobs.body.as_array().map_or(0, Vec::len), 0, "{}", jobs.text);
     // Its thread is never picked up again, but the taint stays (finding 5): work the next turn
-    // plans waits for the owner's Start.
+    // plans publishes only when the owner does.
     let kept: Value = serde_json::from_slice(
         &std::fs::read(
             obid.home
@@ -320,14 +320,22 @@ fn a_command_ends_a_codex_turn() {
         json!({"said": r#"OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#,
                "conversation": conversation}),
     );
-    assert_eq!(next.body["jobs"], json!([]), "{}", next.text);
-    assert_eq!(
-        inbox(&obid).iter().filter(|i| i["kind"] == "start").count(),
-        1,
-        "{}",
-        next.text
-    );
+    assert_untrusted(&obid, &next);
     assert!(turns(&obid)[1]["resumed"].is_null());
+}
+
+/// The one job `answer` started after its turn read something untrusted: started at once, and
+/// marked so it publishes only when the owner does (the owner's decision of 2026-10-23).
+fn assert_untrusted(obid: &Obid, answer: &Answer) {
+    let cards = answer.body["jobs"].as_array().unwrap();
+    assert_eq!(cards.len(), 1, "{}", answer.text);
+    let id = cards[0]["id"].as_str().unwrap();
+    let job = call(obid, "GET", &format!("/v1/jobs/{id}"), None).body;
+    assert_eq!(job["untrusted"], true, "{job}");
+    assert_eq!(
+        inbox(obid).iter().filter(|i| i["kind"] == "start").count(),
+        0
+    );
 }
 
 /// However a command, a hook or another server's tool shows up (a helper's thread, output with no
@@ -447,28 +455,17 @@ fn codex_login_copies_have_no_refresh_token() {
     assert_eq!(turns(&obid).len(), 1);
 }
 
-/// Work planned after Codex searched the web waits for the owner's Start, as on Claude Code.
+/// Work planned after Codex searched the web starts, and publishes only when the owner does, as
+/// on Claude Code.
 #[test]
-fn work_codex_plans_after_the_web_waits_for_the_owners_start() {
+fn work_codex_plans_after_the_web_publishes_only_by_hand() {
     let (_folder, obid) = obid("codex-conv-web", true);
     let answer = said(
         &obid,
         json!({"said": r#"WEB OBY oby_dispatch {"repo": "obi-e2e/fixture-app", "task": "Add a greeting", "kind": "build"}"#,
                "new": true}),
     );
-    assert_eq!(answer.body["jobs"], json!([]), "{}", answer.text);
-    assert!(
-        answer.body["text"]
-            .as_str()
-            .unwrap()
-            .contains("waiting in your inbox"),
-        "{}",
-        answer.text
-    );
-    assert_eq!(
-        inbox(&obid).iter().filter(|i| i["kind"] == "start").count(),
-        1
-    );
+    assert_untrusted(&obid, &answer);
 }
 
 /// Later turns resume the conversation's own thread, also after obid restarts.

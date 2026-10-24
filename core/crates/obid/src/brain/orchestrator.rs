@@ -115,6 +115,12 @@ impl Seen {
         let Some(id) = job["id"].as_str() else {
             return vec![];
         };
+        // One waiting for its usage reset is tried again by obid itself then, and a retry now hits
+        // the same limit: not even kept as seen, so how it is once the wait is over (a retry
+        // refused, still interrupted) is news.
+        if !job["resumesAt"].is_null() {
+            return vec![];
+        }
         let now = Snapshot::of(job);
         let before = self.jobs.insert(id.to_owned(), now.clone());
         // A stalled job a conversation started is that conversation's to supervise
@@ -912,6 +918,31 @@ mod tests {
         assert_eq!(Seen::default().job(&stalled).len(), 1);
         stalled["conversation"] = serde_json::json!("c1");
         assert!(Seen::default().job(&stalled).is_empty());
+    }
+
+    /// A job waiting for its usage reset is tried again by obid itself then: no event, so the
+    /// orchestrator never retries it into the same limit. Once the wait is over and it still
+    /// needs someone (a retry refused, or one that failed again), it is one.
+    #[test]
+    fn a_job_waiting_for_its_reset_is_no_event() {
+        let mut seen = Seen::default();
+        let mut job = serde_json::json!({"id": "j1", "status": "running", "title": "Limited", "limit": null, "reviewError": null, "dismissed": null, "resumesAt": null});
+        assert!(seen.job(&job).is_empty());
+        job["status"] = serde_json::json!("interrupted");
+        job["resumesAt"] = serde_json::json!("2026-10-23T12:00:00Z");
+        assert!(seen.job(&job).is_empty());
+        // The retry after the reset was refused: still interrupted, the wait over.
+        job["resumesAt"] = serde_json::Value::Null;
+        assert_eq!(seen.job(&job).len(), 1);
+        // Tried again and failed again.
+        let mut again = Seen::default();
+        job["resumesAt"] = serde_json::json!("2026-10-23T12:00:00Z");
+        assert!(again.job(&job).is_empty());
+        job["status"] = serde_json::json!("running");
+        job["resumesAt"] = serde_json::Value::Null;
+        assert!(again.job(&job).is_empty());
+        job["status"] = serde_json::json!("interrupted");
+        assert_eq!(again.job(&job).len(), 1);
     }
 
     /// Every published job says obid doesn't run Oby's review yet (#525): that's no event, or

@@ -1580,6 +1580,233 @@ fn a_failure_the_task_asked_for_ends_the_rounds() {
     );
 }
 
+/// The prompts the stand-in agent got in the job's worktree (`KEEP PROMPTS`), oldest first.
+fn prompts(obid: &Obid, id: &str) -> Vec<String> {
+    let log = obid
+        .home
+        .join("worktrees")
+        .join(id)
+        .join(".obi/prompts.log");
+    std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .split("<<<end of prompt>>>\n")
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// #958: a fix, build or test with a check gets 3 rounds when nobody named a number, however it
+/// started; a number given is kept, 1 included; a review, or a job with no check, keeps 1.
+#[test]
+fn a_fix_with_a_check_gets_three_rounds_unless_told() {
+    let folder = Folder::new("rounds-default");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let rounds = |job: Value| {
+        let answer = post_job(&obid, job);
+        assert_eq!(answer.status, 201, "{}", answer.text);
+        answer.body["rounds"].clone()
+    };
+    let job = |kind: &str, check: Option<&str>, rounds: Option<u32>| {
+        let mut job = json!({"repo": "obi-e2e/fixture-app", "kind": kind, "task": "Nothing to do"});
+        if let Some(check) = check {
+            job["check"] = json!(check);
+        }
+        if let Some(rounds) = rounds {
+            job["rounds"] = json!(rounds);
+        }
+        job
+    };
+    for kind in ["fix", "build", "test"] {
+        assert_eq!(rounds(job(kind, Some("true"), None)), 3, "{kind}");
+    }
+    assert_eq!(rounds(job("fix", Some("true"), Some(1))), 1);
+    assert_eq!(rounds(job("fix", Some("true"), Some(5))), 5);
+    assert_eq!(rounds(job("fix", None, None)), 1);
+    assert_eq!(rounds(job("review", Some("true"), None)), 1);
+    assert_eq!(rounds(job("investigate", Some("true"), None)), 1);
+}
+
+/// A check that keeps failing, with no rounds named: the agent is told it has 3 rounds and that
+/// the check runs offline, hears the check's output in rounds 2 and 3, and the job stops at its
+/// limit after round 3, nothing pushed. One more round (Try again's words) picks the session up
+/// with the check's output in front of them, as the orchestrator's retry does.
+#[test]
+fn a_failing_check_is_heard_every_round_and_on_one_more_round() {
+    let folder = Folder::new("rounds-heard");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bin = fake_gh(&folder.0);
+    let obid = start_with(&folder.0, &config(&folder.0, &remote), Some(&bin));
+    let check = "echo CHECK-SAID-7e1; false";
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "KEEP PROMPTS COMMIT: a.txt", "check": check}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "interrupted", "{job}");
+    assert_eq!(
+        (&job["round"], &job["rounds"]),
+        (&json!(3), &json!(3)),
+        "{job}"
+    );
+    assert_eq!(job["nextStep"], "One more round", "{job}");
+    assert_eq!(
+        job["limit"],
+        format!("`{check}` still fails after 3 round(s)")
+    );
+    assert_eq!(job["pushed"], Value::Null, "{job}");
+    let said = prompts(&obid, &id);
+    assert_eq!(said.len(), 3, "{said:?}");
+    assert!(
+        said[0].contains("You have 3 rounds: if the check fails, obid sends you its output."),
+        "{}",
+        said[0]
+    );
+    assert!(
+        said[0].contains("with no network: fetch what it needs"),
+        "{}",
+        said[0]
+    );
+    for round in &said[1..] {
+        assert!(
+            round.starts_with(&format!("`{check}` failed after your last round.")),
+            "{round}"
+        );
+        assert!(round.contains("CHECK-SAID-7e1"), "{round}");
+    }
+
+    let more = request(
+        &obid,
+        "POST",
+        &format!("/v1/jobs/{id}/messages"),
+        Some(
+            &json!({"text": "Try again, picking up where you left off. Finish with a short summary as asked."})
+                .to_string(),
+        ),
+    );
+    assert_eq!(more.status, 200, "{}", more.text);
+    until(&obid, &id, |j| j["round"] == 4);
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "interrupted", "{job}");
+    assert_eq!(job["rounds"], 4, "{job}");
+    let said = prompts(&obid, &id);
+    assert_eq!(said.len(), 4, "{said:?}");
+    let resumed = &said[3];
+    assert!(
+        resumed.starts_with(&format!(
+            "`{check}` failed after your last round. Its output, from the end:"
+        )),
+        "{resumed}"
+    );
+    assert!(resumed.contains("CHECK-SAID-7e1"), "{resumed}");
+    // Quoted in a fence of its own, which only obid can close.
+    let open = resumed.find("\n<<<quoted-").expect(resumed);
+    assert!(resumed[open..].contains("CHECK-SAID-7e1"), "{resumed}");
+    assert!(
+        resumed.trim_end().ends_with(
+            "Try again, picking up where you left off. Finish with a short summary as asked."
+        ),
+        "{resumed}"
+    );
+}
+
+/// A fix whose check fails once, with no rounds named, is fixed in its second round and
+/// publishes: Needs you never hears of it.
+#[test]
+fn a_fix_that_fails_once_is_fixed_in_its_second_round() {
+    let folder = Folder::new("rounds-second");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bin = fake_gh(&folder.0);
+    let obid = start_with(&folder.0, &config(&folder.0, &remote), Some(&bin));
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "COMMIT: a.txt", "check": "test -e .obi/ran || { mkdir -p .obi; touch .obi/ran; false; }"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["round"], 2, "{job}");
+    assert_eq!(job["commits"], 1, "{job}");
+    assert!(job["published"].is_string(), "{job}");
+    assert_eq!(job["publishError"], Value::Null, "{job}");
+}
+
+/// Work the agent left uncommitted, none committed: obid tells it once to commit it, and what it
+/// commits publishes. Its summary stays the work's.
+#[test]
+fn uncommitted_work_gets_one_commit_turn() {
+    let folder = Folder::new("commit-turn");
+    let remote = fixture(&folder.0.join("fixture"));
+    let bin = fake_gh(&folder.0);
+    let obid = start_with(&folder.0, &config(&folder.0, &remote), Some(&bin));
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "fix", "task": "DRAFT: draft.txt COMMIT WHEN TOLD"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    assert_eq!(job["commits"], 1, "{job}");
+    assert_eq!(job["reason"], Value::Null, "{job}");
+    assert!(job["published"].is_string(), "{job}");
+    assert_eq!(job["summary"], "Nothing to do.", "{job}");
+    assert_eq!(
+        job["summaries"],
+        json!(["Nothing to do.", "Committed the draft."]),
+        "{job}"
+    );
+    let branch = format!("oby/fix-{id}");
+    assert_eq!(
+        git(&remote, &["show", &format!("{branch}:draft.txt")]),
+        "draft"
+    );
+}
+
+/// The job's temporary HOME, with the package caches its agent filled, stays between its runs
+/// for the offline check, and goes with its worktree; the MCP config's broker token never stays.
+#[test]
+fn a_jobs_home_stays_until_its_worktree_is_cleaned_up() {
+    let folder = Folder::new("home-kept");
+    let remote = fixture(&folder.0.join("fixture"));
+    let obid = start(&folder.0, &config(&folder.0, &remote));
+    let id = post_job(
+        &obid,
+        json!({"repo": "obi-e2e/fixture-app", "kind": "investigate", "task": "Nothing to do"}),
+    )
+    .body["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let job = wait(&obid, &id);
+    assert_eq!(job["status"], "done", "{job}");
+    let home = obid.home.join("tmp").join(&id);
+    assert!(home.is_dir(), "{home:?}");
+    assert!(!home.join("obi-mcp.json").exists());
+    // Clear done settles it, and its worktree goes, with its HOME.
+    let cleared = request(&obid, "POST", "/v1/clear", None);
+    assert_eq!(cleared.status, 200, "{}", cleared.text);
+    let worktree = obid.home.join("worktrees").join(&id);
+    let give_up_at = Instant::now() + Duration::from_secs(90);
+    while worktree.exists() {
+        assert!(
+            Instant::now() < give_up_at,
+            "its worktree stayed: {worktree:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!home.exists(), "{home:?}");
+}
+
 /// obid answers the agent's permission prompts: publishing, leaving the worktree and a background
 /// subagent are refused, the rest of a bypass job's work is allowed (a background command too); and none of obid's own secrets reach the agent.
 #[test]

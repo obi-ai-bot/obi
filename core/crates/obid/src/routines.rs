@@ -278,7 +278,8 @@ impl Routine {
             account: Some(self.account.clone()),
             mode: self.mode.clone(),
             check: self.check.clone(),
-            rounds: Some(self.rounds),
+            // 1, a routine's default, is obid's own default: fix rounds with a check (#958).
+            rounds: (self.rounds > 1).then_some(self.rounds),
             conversation: self.conversation.clone(),
             routine: Some(RoutineMark {
                 id: self.id.clone(),

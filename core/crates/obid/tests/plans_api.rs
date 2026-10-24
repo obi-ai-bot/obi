@@ -2295,10 +2295,10 @@ fn telling_a_finished_job_something_starts_a_follow_up() {
 }
 
 /// A turn that looked something up (a lookup reads the web, GitHub or a repository: data, never
-/// the owner's words) only proposes the follow-up of a job that ended: a `start` item for the
-/// owner's Start, as research's dispatches are (#374). Nothing starts until they say Start.
+/// the owner's words) starts the follow-up of a job that ended, marked so it publishes only when
+/// the owner does (the owner's decision of 2026-10-23, replacing #374's Start item).
 #[test]
-fn a_follow_up_after_research_waits_for_the_owners_start() {
+fn a_follow_up_after_research_publishes_only_by_hand() {
     let folder = Folder::new("brain-follow-up-research");
     let obid = started(&folder);
     let job = job_that(&obid, "Vault secrets", "Nothing", None, "done");
@@ -2322,36 +2322,76 @@ fn a_follow_up_after_research_waits_for_the_owners_start() {
         answer["text"]
             .as_str()
             .unwrap()
-            .contains("waits for your Start"),
+            .contains("started a follow-up"),
         "{answer}"
     );
+    assert!(items_of(&obid, "start").is_empty());
+    let next = answer["jobs"][0]["id"].as_str().expect("its card");
+    let next = get_job(&obid, next);
+    assert_eq!(next["followUpOf"], json!(id));
+    assert_eq!(next["untrusted"], true, "{next}");
+    assert_eq!(
+        next["request"],
+        "look at the files, then tell the vault job to add a test"
+    );
+}
+
+/// A turn that looked something up can't carry a job past its safety limit either: its follow-up
+/// would start the counters again, so it waits for the owner's Confirm, and nothing starts.
+#[test]
+fn research_cant_carry_a_job_past_its_safety_limit() {
+    let folder = Folder::new("brain-research-safety");
+    let mut spent = ended(
+        "b0d6e7a1",
+        "Spent it all",
+        obid::job::Status::Interrupted,
+        0,
+        None,
+    );
+    spent.stalled = Some(obid::job::Stalled {
+        why: "budget".into(),
+        text: "the job used 1000 tokens".into(),
+        at: obi_protocol::time::now(),
+        round: 1,
+        branch: spent.branch.clone(),
+        commit: None,
+        commits: 0,
+        session: true,
+        note: String::new(),
+        note_by: "obid".into(),
+    });
+    spent.limit = Some("the job used 1000 tokens".into());
+    let obid = started_with(&folder, &[spent]);
+    queue(
+        &obid,
+        &[
+            research(vec![lookup(
+                "list_files",
+                json!({"repo": "obi-e2e/fixture-app"}),
+            )]),
+            message_plan("b0d6e7a1"),
+            reply(""),
+        ],
+    );
+    let answer = said(&obid, "look at the files, then tell the spent job to go on");
     assert!(
-        answer["jobs"].as_array().is_none_or(Vec::is_empty),
+        answer["text"]
+            .as_str()
+            .unwrap()
+            .contains("waits for your Confirm in the inbox"),
         "{answer}"
     );
+    let confirms = items_of(&obid, "confirm");
+    assert_eq!(confirms.len(), 1, "{confirms:?}");
+    assert_eq!(confirms[0]["title"], "Start a follow-up of Spent it all");
     assert_eq!(
         call(&obid, "GET", "/v1/jobs", None)
             .body
             .as_array()
             .unwrap()
             .len(),
-        1
-    );
-    let starts = items_of(&obid, "start");
-    assert_eq!(starts.len(), 1, "{starts:?}");
-    let item = starts[0]["id"].as_str().unwrap();
-    let started = call(
-        &obid,
-        "POST",
-        &format!("/v1/inbox/{item}/answer"),
-        Some(&json!({"answer": "Start"})),
-    );
-    assert_eq!(started.status, 200, "{}", started.text);
-    let next = get_job(&obid, started.body["job"].as_str().unwrap());
-    assert_eq!(next["followUpOf"], json!(id));
-    assert_eq!(
-        next["request"],
-        "look at the files, then tell the vault job to add a test"
+        1,
+        "nothing started"
     );
 }
 
@@ -2861,10 +2901,11 @@ fn where_is_answers_with_paths_and_no_job() {
     );
 }
 
-/// ResearchToolsTests.researchThenDispatchWaitsForStart: work the brain wants after looking things
-/// up waits in the inbox for the user's Start.
+/// ResearchToolsTests.researchThenDispatchWaitsForStart, as the owner decided on 2026-10-23: work
+/// the brain wants after looking things up starts at once, by these words, and publishes only when
+/// the owner does.
 #[test]
-fn research_then_dispatch_waits_for_start() {
+fn research_then_dispatch_starts_but_publishes_only_by_hand() {
     let folder = Folder::new("brain-research-start");
     let obid = started(&folder);
     let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
@@ -2881,40 +2922,19 @@ fn research_then_dispatch_waits_for_start() {
         ],
     );
     let answer = said(&obid, "Compare the docs and code, then fix it");
-    assert_eq!(
-        answer["text"],
-        "I looked into it first. A draft is waiting in your inbox; tap Start when you're ready."
-    );
-    assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
-    let inbox = call(&obid, "GET", "/v1/inbox", None).body;
-    let starts: Vec<&serde_json::Value> = inbox
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|i| i["kind"] == "start")
-        .collect();
-    assert_eq!(starts.len(), 1, "{inbox}");
     assert!(
-        starts[0]["text"]
+        answer["text"]
             .as_str()
             .unwrap()
-            .contains("looked into it first")
+            .ends_with(" I read something I didn't write first, so it publishes only when you do."),
+        "{answer}"
     );
-    assert_eq!(starts[0]["options"], json!(["Start", "Cancel"]));
-    let id = starts[0]["id"].as_str().unwrap();
-    let started = call(
-        &obid,
-        "POST",
-        &format!("/v1/inbox/{id}/answer"),
-        Some(&json!({"answer": "Start"})),
-    );
-    assert_eq!(started.status, 200, "{}", started.text);
+    assert!(items_of(&obid, "start").is_empty());
     let jobs = call(&obid, "GET", "/v1/jobs", None).body;
     assert_eq!(jobs.as_array().unwrap().len(), 1);
     assert_eq!(jobs[0]["title"], "Greeting fix");
-    assert_eq!(started.body["job"], jobs[0]["id"]);
-    // Started by the Start, not by the words: no turn of the conversation started it.
-    assert!(jobs[0]["turn"].is_null(), "{jobs}");
+    assert_eq!(jobs[0]["untrusted"], true, "{jobs}");
+    assert_eq!(answer["jobs"][0]["id"], jobs[0]["id"]);
 }
 
 /// A dispatch after research, with what the turn found (#540).
@@ -2951,7 +2971,7 @@ fn a_brief_carries_what_the_turn_found_quoted() {
         answer["text"]
             .as_str()
             .unwrap()
-            .contains("A draft is waiting"),
+            .ends_with("so it publishes only when you do."),
         "{answer}"
     );
     let calls = calls(&obid);
@@ -2963,24 +2983,7 @@ fn a_brief_carries_what_the_turn_found_quoted() {
         "{}",
         read(calls[2].join("input"))
     );
-    let inbox = call(&obid, "GET", "/v1/inbox", None).body;
-    let item = inbox
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|i| i["kind"] == "start")
-        .unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let started = call(
-        &obid,
-        "POST",
-        &format!("/v1/inbox/{item}/answer"),
-        Some(&json!({"answer": "Start"})),
-    );
-    assert_eq!(started.status, 200, "{}", started.text);
-    let id = started.body["job"].as_str().unwrap().to_owned();
+    let id = answer["jobs"][0]["id"].as_str().unwrap().to_owned();
     let job = call(&obid, "GET", &format!("/v1/jobs/{id}/wait"), None).body;
     assert_eq!(job["status"], "done", "{job}");
     let report: serde_json::Value = serde_json::from_str(
@@ -3693,10 +3696,10 @@ async fn accepting_another_obis_request_waits_for_the_owners_confirm() {
     });
 }
 
-/// Starting the work the brain proposed is the owner's call: the brain's Start starts nothing;
-/// a confirm item waits, and the owner's Confirm starts it (review on #552).
+/// Work the brain plans after looking things up never runs in Bypass, whatever the plan says: it
+/// starts in Sandbox mode, and only the owner publishes it (the owner's decision of 2026-10-23).
 #[test]
-fn the_brain_cant_press_start_on_its_own_proposal() {
+fn research_never_starts_a_bypass_job() {
     let folder = Folder::new("brain-inbox-start");
     let obid = started(&folder);
     let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
@@ -3713,55 +3716,13 @@ fn the_brain_cant_press_start_on_its_own_proposal() {
         ],
     );
     said(&obid, "look into the greeting and fix it");
-    let start = items_of(&obid, "start").pop().unwrap();
-    let start_id = start["id"].as_str().unwrap().to_owned();
-    queue(&obid, &[answer_item(&start_id, Some(1), None), reply("")]);
-    let answer = said(&obid, "thanks");
-    assert!(
-        answer["text"]
-            .as_str()
-            .unwrap()
-            .contains("confirm it in your inbox"),
-        "{answer}"
-    );
-    assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
-    assert_eq!(items_of(&obid, "start").len(), 1);
-    let confirm = items_of(&obid, "confirm").pop().unwrap();
-    assert_eq!(
-        confirm["title"],
-        "Start fix fixture-app (Injected fix) in Bypass mode, on auto · auto, check node --test"
-    );
-    assert!(
-        start["text"]
-            .as_str()
-            .unwrap()
-            .contains("Start fix fixture-app (Injected fix) in Bypass mode, on auto · auto, check node --test?"),
-        "{start}"
-    );
-    assert_eq!(
-        confirm["confirm"],
-        json!({"action": "start", "target": start_id, "payload": null})
-    );
-    // The owner's own Confirm starts it, through the proposal: once, however many come at once.
-    let confirm_id = confirm["id"].as_str().unwrap();
-    // The test device is registered before the taps race.
-    let _ = confirm_approval(&obid, confirm_id);
-    let statuses: Vec<u16> = std::thread::scope(|scope| {
-        let tries: Vec<_> = (0..8)
-            .map(|_| scope.spawn(|| owner_answers(&obid, confirm_id, "Confirm").status))
-            .collect();
-        tries.into_iter().map(|t| t.join().unwrap()).collect()
-    });
-    assert_eq!(
-        statuses.iter().filter(|s| **s == 200).count(),
-        1,
-        "{statuses:?}"
-    );
-    assert!(items_of(&obid, "confirm").is_empty());
     let jobs = call(&obid, "GET", "/v1/jobs", None).body;
-    assert_eq!(jobs.as_array().unwrap().len(), 1);
+    assert_eq!(jobs.as_array().unwrap().len(), 1, "{jobs}");
     assert_eq!(jobs[0]["title"], "Injected fix");
+    assert_eq!(jobs[0]["mode"], "sandbox", "{jobs}");
+    assert_eq!(jobs[0]["untrusted"], true, "{jobs}");
     assert!(items_of(&obid, "start").is_empty());
+    assert!(items_of(&obid, "confirm").is_empty());
 }
 
 /// The brain is never offered a confirm item, and never answers one.
@@ -3797,81 +3758,6 @@ fn the_brain_never_answers_a_confirm_item() {
     );
     assert_eq!(get_job(&obid, &id)["mode"], "ask");
     assert_eq!(items_of(&obid, "confirm").len(), 1);
-}
-
-/// Cancel on a proposal is one-off: done in the turn, nothing to confirm (review on #552).
-#[test]
-fn cancel_on_a_proposal_is_done_in_the_turn() {
-    let folder = Folder::new("brain-inbox-cancel");
-    let obid = started(&folder);
-    let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
-        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Greeting fix",
-         "task": "Fix it", "rounds": 1}]});
-    queue(
-        &obid,
-        &[
-            research(vec![lookup(
-                "list_files",
-                json!({"repo": "obi-e2e/fixture-app"}),
-            )]),
-            dispatch.to_string(),
-        ],
-    );
-    said(&obid, "look into the greeting and fix it");
-    let start = items_of(&obid, "start").pop().unwrap();
-    let start_id = start["id"].as_str().unwrap().to_owned();
-    queue(&obid, &[answer_item(&start_id, Some(2), None), reply("")]);
-    assert_eq!(
-        said(&obid, "never mind that fix")["text"],
-        "Answered Greeting fix's item: Cancel."
-    );
-    assert!(items_of(&obid, "start").is_empty());
-    assert!(items_of(&obid, "confirm").is_empty());
-    assert_eq!(call(&obid, "GET", "/v1/jobs", None).body, json!([]));
-}
-
-/// Two owners' Starts on one proposal at once start one job (review on #552).
-#[test]
-fn concurrent_starts_on_a_proposal_start_one_job() {
-    let folder = Folder::new("brain-start-race");
-    let obid = started(&folder);
-    let dispatch = json!({"action": "dispatch", "reply": "", "question": null, "jobs": [], "dispatches": [
-        {"agent": "auto", "account": "auto", "repo": "obi-e2e/fixture-app", "kind": "fix", "title": "Greeting fix",
-         "task": "Fix it", "rounds": 1}]});
-    queue(
-        &obid,
-        &[
-            research(vec![lookup(
-                "list_files",
-                json!({"repo": "obi-e2e/fixture-app"}),
-            )]),
-            dispatch.to_string(),
-        ],
-    );
-    said(&obid, "look into the greeting and fix it");
-    let start_id = items_of(&obid, "start").pop().unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let statuses: Vec<u16> = std::thread::scope(|scope| {
-        let tries: Vec<_> = (0..8)
-            .map(|_| scope.spawn(|| owner_answers(&obid, &start_id, "Start").status))
-            .collect();
-        tries.into_iter().map(|t| t.join().unwrap()).collect()
-    });
-    assert_eq!(
-        statuses.iter().filter(|s| **s == 200).count(),
-        1,
-        "{statuses:?}"
-    );
-    assert_eq!(
-        call(&obid, "GET", "/v1/jobs", None)
-            .body
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
 }
 
 // A repository's own instructions (#543).
@@ -4660,76 +4546,6 @@ fn the_same_words_sent_again_with_their_id_are_kept_once() {
         calls(&obid).len(),
         2,
         "only the new conversation's words ran"
-    );
-}
-
-/// A follow-up's proposal closes by itself once that work merged after it was proposed: the
-/// reason above the owner's words, no options, nothing started.
-#[test]
-fn a_follow_ups_proposal_closes_once_its_work_merged() {
-    let folder = Folder::new("brain-proposal-merged");
-    let mut done = ended(
-        "a7e4a6e1",
-        "Average helper empty lists",
-        obid::job::Status::Done,
-        1,
-        None,
-    );
-    // Its pull request merged an hour from now: after any proposal made in this test.
-    let later = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-        + 3600;
-    done.published = Some("https://github.com/obi-e2e/fixture-app/pull/9".into());
-    done.pull_request = Some(obid::github::PullRequest {
-        state: "MERGED".into(),
-        review_decision: None,
-        base: "main".into(),
-        merged_at: Some(later),
-        checked_at: later,
-        head: None,
-    });
-    let obid = started_with(&folder, &[done]);
-    queue(
-        &obid,
-        &[
-            research(vec![lookup(
-                "list_files",
-                json!({"repo": "obi-e2e/fixture-app"}),
-            )]),
-            message_plan("a7e4a6e1"),
-            reply(""),
-        ],
-    );
-    said(&obid, "and skip the Watch target there");
-    let done_items = call(&obid, "GET", "/v1/inbox?state=done", None).body;
-    let closed = done_items
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|i| i["kind"] == "start")
-        .unwrap_or_else(|| {
-            panic!(
-                "{done_items} / {}",
-                call(&obid, "GET", "/v1/inbox", None).text
-            )
-        });
-    let text = closed["text"].as_str().unwrap();
-    assert!(
-        text.starts_with(
-            "Closed by Oby: Average helper empty lists's work merged after this was proposed.\n\nOby looked into it first."
-        ) && text.contains("Your words:\nand skip the Watch target there"),
-        "{closed}"
-    );
-    assert_eq!(closed["options"], json!([]));
-    assert_eq!(
-        call(&obid, "GET", "/v1/jobs", None)
-            .body
-            .as_array()
-            .unwrap()
-            .len(),
-        1
     );
 }
 

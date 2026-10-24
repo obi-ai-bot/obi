@@ -38,7 +38,8 @@
 // two minutes (so obid's stall watch holds it), and one holding STALLS-ONCE only the first time; one
 // holding JOB-FAILS ends its turn with an error result, as an agent stopped mid-round;
 // asked for its handoff note, it answers NOTE, which carries words that try to steer whoever reads
-// it; SPEND-TOKENS: <n> ends its turn saying it used n input tokens.
+// it; SPEND-TOKENS: <n> ends its turn saying it used n input tokens; JOB-COMMITS: <file> writes the
+// file in its worktree and commits it.
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -153,6 +154,13 @@ rl.on("line", (line) => {
     writeFileSync(once, "");
     setTimeout(() => say("woke"), 120000);
     return;
+  }
+  const commits = prompt.match(/JOB-COMMITS: (\S+)/);
+  if (!conversation && commits) {
+    writeFileSync(commits[1], "hello\n");
+    spawnSync("git", ["add", commits[1]]);
+    spawnSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", `Add ${commits[1]}`]);
+    return say(`Added ${commits[1]}.`);
   }
   if (!conversation && prompt.includes("JOB-FAILS")) {
     result("it broke", true);

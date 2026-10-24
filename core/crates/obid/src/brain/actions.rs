@@ -75,7 +75,8 @@ pub struct Asked<'a> {
 /// A plan that answers rather than acts: a reply, a question, or jobs it starts (#269). `live` is
 /// asked right before the jobs start: the issues' files take network time, and a turn cancelled
 /// meanwhile starts nothing.
-/// After research (`researched`), the jobs a plan names wait for the user's Start instead.
+/// After research (`researched`), the jobs a plan names run in Sandbox mode at most and publish
+/// only when the user does (the owner's decision of 2026-10-23).
 pub async fn answer(
     shared: &Arc<Shared>,
     planned: &Planned,
@@ -154,7 +155,8 @@ async fn dispatch(
             issue: d.issue.map(|issue| issue as u64),
             account: Some(d.account.clone()),
             agent: Some(d.agent.clone()),
-            rounds: Some(d.rounds as u32),
+            // The plan's 1 is "no number named": obid's own default (Jobs::create, #958).
+            rounds: (d.rounds > 1).then_some(d.rounds as u32),
             check: kept_check(
                 d.check.as_deref(),
                 shared
@@ -174,27 +176,17 @@ async fn dispatch(
             brief: d.brief(),
             ..NewJob::default()
         };
-        // Work found by research waits in the inbox for the user's Start (#374).
-        if researched {
-            let title = d
-                .title
-                .clone()
-                .unwrap_or_else(|| super::briefing::line(&d.task, 60));
-            // obid's own words for the job it keeps: mode, tool, account and check (N1); then the
-            // task it planned, under its own line, so the owner sees what would run before they
-            // Start (the task is the agent's own words in a conversation; N9). The card shows it
-            // as written: the brain reads an item's text only quoted (briefing.rs).
-            let text = format!(
-                "Oby looked into it first. Start {}?\n\nThe task Oby planned:\n{}",
-                describe(&new),
-                crate::secrets::known().redact(d.task.trim()),
-            );
-            shared.link.propose(&new, title, text, asked.conversation);
-            continue;
-        }
+        // Work planned after the turn read something untrusted starts now, in Sandbox mode at
+        // most, and publishes only when the owner does (the owner's decision of 2026-10-23,
+        // replacing #374's Start item), as a standing rule's job.
+        let new = NewJob {
+            untrusted: researched,
+            ..new
+        };
         // A job that would never ask the owner anything widens trust: only their own Confirm
-        // starts it (the owner's decision of 2026-10-16; review on #551).
-        if new.mode.as_deref() == Some("bypass") {
+        // starts it (the owner's decision of 2026-10-16; review on #551). An untrusted one never
+        // runs in Bypass (Jobs::create).
+        if new.mode.as_deref() == Some("bypass") && !new.untrusted {
             let what = describe(&new);
             confirm(
                 shared,
@@ -232,16 +224,14 @@ async fn dispatch(
             }
         }
     }
-    if researched {
-        return Talk::reply(
-            "I looked into it first. A draft is waiting in your inbox; tap Start when you're ready.",
-        );
-    }
     let mut text = match (started.is_empty(), plan.reply.is_empty()) {
         (true, _) => String::new(),
         (false, true) => started_line(shared, &started),
         (false, false) => plan.reply.clone(),
     };
+    if researched && !started.is_empty() {
+        text = format!("{text} {UNTRUSTED_LINE}").trim_start().to_owned();
+    }
     if !waiting.is_empty() {
         let line = format!(
             "Starting {} in Bypass mode waits for your OK: confirm it in your inbox.",
@@ -421,6 +411,10 @@ fn place(shared: &Shared, job: &Job) -> String {
         account_name(shared, &job.account)
     )
 }
+
+/// What the turn says of the jobs it started after reading something untrusted.
+const UNTRUSTED_LINE: &str =
+    "I read something I didn't write first, so it publishes only when you do.";
 
 /// What a job hears when the user tries it again (`Inbox.tryAgainMessage`).
 pub const TRY_AGAIN: &str =
@@ -637,8 +631,9 @@ fn dismiss(shared: &Arc<Shared>, job: &Job, theirs: bool) -> (String, bool) {
 /// message_job (#542): the user's own words reach the job's agent, with the secrets obid knows
 /// taken out, never the brain's restatement of them. A running job hears them at its next turn;
 /// one that ended gets a follow-up that starts with them (Sangam's design, the owner's decision of
-/// 2026-10-18), and stays as it ended. After research the follow-up waits for the owner's Start;
-/// an event turn's words never start one.
+/// 2026-10-18), and stays as it ended. After something untrusted was read the follow-up publishes
+/// only when the owner does (the owner's decision of 2026-10-23); an event turn's words never start
+/// one.
 fn message_job(
     shared: &Arc<Shared>,
     plan: &Plan,
@@ -666,23 +661,22 @@ fn message_job(
         {
             return already_on_it(shared, &job, &next, &words, source);
         }
-        // Past its safety limit, a follow-up would start its counters again: the owner confirms.
-        if source.owners() && crate::jobs::past_safety(&job) {
+        // Past its safety limit, a follow-up would start its counters again: the owner confirms,
+        // whoever's words they are.
+        if source != Source::Event && crate::jobs::past_safety(&job) {
             return Outcome::Done(shared.jobs.confirm_past_safety(&job, &words).0);
         }
         let new = crate::jobs::follow_up(&job, &words);
         return match source {
-            Source::Owner | Source::Confirmed => follow_up(
+            Source::Owner | Source::Confirmed | Source::Untrusted => follow_up(
                 shared,
                 &job,
                 NewJob {
                     turn: started_by(&job, conversation, turn),
+                    untrusted: source == Source::Untrusted,
                     ..new
                 },
             ),
-            Source::Untrusted => {
-                Outcome::Done(propose_follow_up(shared, &job, &new, None, conversation))
-            }
             Source::Event => Outcome::Failed(format!(
                 "Couldn't tell {name}: it ended, so that starts a follow-up, which only your own words start."
             )),
@@ -768,37 +762,6 @@ pub(super) fn already_on_it(
         )),
         None => Outcome::Failed("That job isn't here any more.".into()),
     }
-}
-
-/// Proposes `new`, the follow-up of `job`, after the turn read something untrusted: a `start` item
-/// for the owner's Start (#374), in obid's own words, then what the follow-up would hear as the
-/// owner reads it: their own words (`request`), and what the conversation's agent adds (`added`).
-/// The quoting fences are the agent's (its task keeps them), never the card's: the brain reads an
-/// item's text only quoted ([`super::briefing`]).
-pub(super) fn propose_follow_up(
-    shared: &Arc<Shared>,
-    job: &Job,
-    new: &NewJob,
-    added: Option<&str>,
-    conversation: &str,
-) -> String {
-    let name = job.short_title();
-    let mut text = format!(
-        "Oby looked into it first. Start {}, a follow-up of {name}?\n\nYour words:\n{}",
-        describe(new),
-        new.request.as_deref().unwrap_or(&new.task).trim(),
-    );
-    if let Some(added) = added.map(str::trim).filter(|a| !a.is_empty()) {
-        text.push_str(&format!("\n\nWhat Oby adds for its agent:\n{added}"));
-    }
-    let title = new
-        .title
-        .clone()
-        .unwrap_or_else(|| format!("Follow-up of {name}"));
-    shared.link.propose(new, title, text, conversation);
-    format!(
-        "{name} is finished, and this turn looked something up, so its follow-up waits for your Start in your inbox."
-    )
 }
 
 /// answer_inbox: an item of the inbox, with one of its options or the user's own words

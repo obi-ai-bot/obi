@@ -252,7 +252,8 @@ pub struct Dispatch {
     pub task: String,
     #[serde(default)]
     pub inputs: Vec<String>,
-    /// How many rounds the agent may take: 1 unless the user asked to keep going until done.
+    /// How many rounds the agent may take: 1 unless the user asked to keep going until done. 1 is
+    /// obid's own default: 3 for a fix, build or test with a check (#958), else 1.
     #[serde(default = "one")]
     pub rounds: i64,
     /// A one-line command that must succeed for the work to count as done.

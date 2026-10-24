@@ -183,6 +183,9 @@ pub enum Failure {
     Refused(String),
     /// The push went out, then the pull request failed: why, worded to follow "Pushed, but " (#627).
     PullRequest(String),
+    /// The remote didn't answer as asked (a fetch, a look at the branch, a push): nothing went
+    /// out, and a later try may go through.
+    Remote(String),
     /// Anything else, as one line a person can read.
     Failed(String),
 }
@@ -199,10 +202,42 @@ impl Failure {
             Failure::Busy => "obid is publishing it already.".into(),
             Failure::Refused(why) => why.clone(),
             Failure::PullRequest(why) => format!("{PUSHED_BUT}{why}"),
-            Failure::Failed(why) => why.clone(),
+            Failure::Remote(why) | Failure::Failed(why) => why.clone(),
         }
     }
+
+    /// Whether publishing again later may go through: the remote or GitHub didn't answer (the
+    /// network, an outage, a rate limit), never a refusal, a finding, a scan that can't run or a
+    /// login that's missing.
+    // ponytail: words of git's and gh's own messages; a typed error once gh gives one.
+    pub fn may_pass_later(&self) -> bool {
+        let (Failure::Remote(why) | Failure::PullRequest(why)) = self else {
+            return false;
+        };
+        let why = why.to_lowercase();
+        PASSING.iter().any(|w| why.contains(w))
+    }
 }
+
+/// What git and gh say of a failure a later try may not have.
+const PASSING: [&str; 16] = [
+    "could not resolve host",
+    "connection reset",
+    "connection refused",
+    "connection timed out",
+    "operation timed out",
+    "timeout",
+    "the remote end hung up",
+    "early eof",
+    "error connecting to",
+    "temporarily unavailable",
+    "rate limit",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+];
 
 /// How a `publishError` starts when the push went out and only the pull request failed.
 pub const PUSHED_BUT: &str = "Pushed, but ";
@@ -663,7 +698,7 @@ pub async fn publish(
             fetched = git::git(clone, &fetch).await;
         }
         fetched.map_err(|e| {
-            Failure::Failed(format!(
+            Failure::Remote(format!(
                 "Not published: couldn't fetch {base}: {}",
                 git_said(&e, &target.remote)
             ))
@@ -1310,7 +1345,7 @@ async fn remote_head(job: &Job, target: &Target) -> Result<Option<String>, Failu
     ]);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let listed = git::git(&target.clone, &args).await.map_err(|e| {
-        Failure::Failed(format!(
+        Failure::Remote(format!(
             "Couldn't read {} on the remote: {}",
             job.branch,
             git_said(&e, &target.remote)
@@ -1391,7 +1426,7 @@ async fn push(head: &str, job: &Job, target: &Target, lease: Option<&str>) -> Re
                 job.branch
             ))
         } else {
-            Failure::Failed(format!(
+            Failure::Remote(format!(
                 "Couldn't push {}: {}",
                 job.branch,
                 git_said(&e, &target.remote)
@@ -1404,6 +1439,30 @@ async fn push(head: &str, job: &Job, target: &Target, lease: Option<&str>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only what the network, an outage or a rate limit did is tried again: never a refusal, a
+    /// login that's missing, a scan or a push someone else's commit turned down.
+    #[test]
+    fn only_a_failure_that_may_pass_is_tried_again() {
+        for passing in [
+            Failure::Remote("Couldn't push oby/fix-1: fatal: unable to access 'the remote': Could not resolve host: github.com".into()),
+            Failure::Remote("Not published: couldn't fetch main: fatal: the remote end hung up unexpectedly".into()),
+            Failure::PullRequest("couldn't open the pull request: HTTP 502: Bad Gateway (https://api.github.com/graphql)".into()),
+            Failure::PullRequest("couldn't look for the open pull request: API rate limit exceeded".into()),
+        ] {
+            assert!(passing.may_pass_later(), "{passing:?}");
+        }
+        for staying in [
+            Failure::PullRequest("couldn't look for the open pull request: To get started with GitHub CLI, please run:  gh auth login".into()),
+            Failure::PullRequest("couldn't open the pull request: GitHub's CLI (gh) isn't installed.".into()),
+            Failure::Remote("Couldn't push oby/fix-1: ! [rejected] (non-fast-forward)".into()),
+            Failure::Failed("Not published: the secret scan couldn't run (timeout)".into()),
+            Failure::Refused("The job changed since it was approved. Approve it again.".into()),
+            Failure::Busy,
+        ] {
+            assert!(!staying.may_pass_later(), "{staying:?}");
+        }
+    }
 
     /// A clone or fetch of an https remote resets git's own helpers before gh's, as a push does, so
     /// no other helper (Apple git's system-wide osxkeychain) is asked to `store` gh's token; nothing

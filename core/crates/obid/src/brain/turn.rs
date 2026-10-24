@@ -452,7 +452,7 @@ pub fn settle(outcome: &Outcome) -> (State, Option<End>) {
 }
 
 /// Why a turn whose plan answered ended: a question, the jobs it started, or a reply.
-fn answered_end(plan: &Plan, talk: &Talk, researched: bool, control: &Control) -> End {
+fn answered_end(plan: &Plan, talk: &Talk, control: &Control) -> End {
     if control.cancelled() {
         return End::Cancelled;
     }
@@ -465,8 +465,8 @@ fn answered_end(plan: &Plan, talk: &Talk, researched: bool, control: &Control) -
                 .filter_map(|job| job["id"].as_str().map(str::to_owned))
                 .collect(),
         ),
-        // Jobs research found wait in the inbox; others that didn't start say why.
-        _ if plan.action == Action::Dispatch && !researched => End::CouldNot,
+        // Jobs that didn't start say why (research's start too, marked untrusted).
+        _ if plan.action == Action::Dispatch => End::CouldNot,
         _ => End::Answered,
     }
 }
@@ -1118,7 +1118,7 @@ async fn run_with(
                 let end = if planned.by == "rules" {
                     End::BrainFailed
                 } else {
-                    answered_end(plan, &talk, researched, control)
+                    answered_end(plan, &talk, control)
                 };
                 break 'step (end, after(&done, talk));
             }
@@ -1418,27 +1418,13 @@ mod tests {
             jobs: vec![json!({"id": "ab12cd34"}), json!({"id": "ef56ab78"})],
         };
         assert_eq!(
-            answered_end(&dispatch, &started, false, &control),
+            answered_end(&dispatch, &started, &control),
             End::StartedJobs(vec!["ab12cd34".into(), "ef56ab78".into()])
         );
         let refused = Talk::reply("Whatever it says.");
-        assert_eq!(
-            answered_end(&dispatch, &refused, false, &control),
-            End::CouldNot
-        );
-        // After research the jobs wait in the inbox for a Start.
-        assert_eq!(
-            answered_end(&dispatch, &refused, true, &control),
-            End::Answered
-        );
-        assert_eq!(
-            answered_end(&reply, &refused, false, &control),
-            End::Answered
-        );
-        assert_eq!(
-            answered_end(&reply, &Talk::None, false, &control),
-            End::Answered
-        );
+        assert_eq!(answered_end(&dispatch, &refused, &control), End::CouldNot);
+        assert_eq!(answered_end(&reply, &refused, &control), End::Answered);
+        assert_eq!(answered_end(&reply, &Talk::None, &control), End::Answered);
         let question = Talk::Question {
             said: "x".into(),
             question: super::super::plan::Question {
@@ -1449,22 +1435,13 @@ mod tests {
                 plan: None,
             },
         };
-        assert_eq!(
-            answered_end(&reply, &question, false, &control),
-            End::AskedUser
-        );
+        assert_eq!(answered_end(&reply, &question, &control), End::AskedUser);
         let turns = Turns::default();
         let stopped = turns.begin("t2", "c2");
         turns.stop(None);
-        assert_eq!(
-            answered_end(&dispatch, &Talk::None, false, &stopped),
-            End::Stopped
-        );
+        assert_eq!(answered_end(&dispatch, &Talk::None, &stopped), End::Stopped);
         turns.cancel(None);
-        assert_eq!(
-            answered_end(&dispatch, &started, false, &stopped),
-            End::Cancelled
-        );
+        assert_eq!(answered_end(&dispatch, &started, &stopped), End::Cancelled);
     }
 
     /// #539: what the user named is handled when the turn acted on it or the reply mentions it;
