@@ -991,6 +991,10 @@ final class RunnerFeed {
         if !gone.isEmpty { withdraw(gone) }
     }
 
+    // ponytail: Swift 6.4 (swiftlang-6.4.0.34.1) crashes in SIL CopyPropagation compiling this
+    // function optimized, so Release archives fail; Debug never runs the pass. Remove this once a
+    // newer Xcode archives without it.
+    @_optimize(none)
     private func noticeChanges() {
         let (changes, now) = Self.notices(jobs, after: notified ?? [:], routines: Set(extras.filter { $0.value.routine != nil }.keys))
         var kept = now
