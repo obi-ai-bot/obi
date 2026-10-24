@@ -102,13 +102,18 @@ final class TalkKey {
         }
     }
 
-    /// Oby spoke its reply in hands-free mode and listens again for yours: the next press of
-    /// either key sends, as after fn + Space, and Escape cancels.
-    func listenAgain() {
-        wait?.cancel()
-        held = nil
+    /// A talk key is down, or a turn it started is under way: the microphone is the user's now.
+    var busy: Bool { held != nil || talking }
+
+    /// Oby's reply showed in hands-free mode and it listens again for yours: the next press of
+    /// either key sends, as after fn + Space, and Escape cancels. Never while a key is down or a
+    /// turn is under way: that press is the user's own, and its release must still close the
+    /// microphone. False then, and nothing changes.
+    func listenAgain() -> Bool {
+        guard !busy else { return false }
         talking = true
         handsFree = true
+        return true
     }
 
     private func press(_ key: Key) {

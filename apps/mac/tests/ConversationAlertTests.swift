@@ -285,6 +285,51 @@ struct ConversationAlertTests {
         #expect(shown.list.map(\.id) == ["turn-c2", "turn-c1"], "the pill is gone")
     }
 
+    /// The pill silences the turn's one answer, not a stretch of time: a second answer there alerts,
+    /// and once new words are on their way (`talking(nil)` at the next send) the old conversation's do.
+    @Test func thePillSilencesOneAnswerOnly() {
+        let (feed, shown, _) = Self.following()
+        feed.conversations.take([RunnerConversation(id: "c1", title: "Vault tests")])
+        feed.pillShowsTalk = { true }
+        feed.talking("how are the vault tests")
+        feed.heard(Turn(date: .now, who: .user, text: "how are the vault tests", conversation: "c1"), TurnExtras())
+        feed.heard(Turn(id: "t-\(UUID().uuidString)", date: .now, who: .oby, text: "They pass on dev.", conversation: "c1"), TurnExtras())
+        #expect(shown.list.isEmpty)
+        feed.heard(Turn(id: "t-\(UUID().uuidString)", date: .now, who: .oby, text: "Started a job on the slow ones.", conversation: "c1"), TurnExtras())
+        #expect(shown.list.map(\.id) == ["turn-c1"], "a second answer isn't the pill's")
+        feed.talking("and the deploy")
+        feed.heard(Turn(date: .now, who: .user, text: "and the deploy", conversation: "c1"), TurnExtras())
+        feed.talking(nil)
+        feed.heard(Turn(id: "t-\(UUID().uuidString)", date: .now, who: .oby, text: "The job finished.", conversation: "c1"), TurnExtras())
+        #expect(shown.list.map(\.id) == ["turn-c1", "turn-c1"], "new words are being written down: not the pill's")
+    }
+
+    /// Oby asks back about the talk key's words: the pill shows the question, and the alert still goes,
+    /// with its options, whether the question comes after its turn or before it.
+    @MainActor @Test func aQuestionThePillShowsStillAlerts() async throws {
+        let asks: @Sendable (RunnerStub.Request) -> (Int, String) = { request in
+            request.path.hasSuffix("/plans")
+                ? (200, #"{"kind":"question","said":"Which one?","question":{"text":"Which one?","options":["A","B"]},"conversation":"c1"}"#)
+                : (404, "{}")
+        }
+        for turnFirst in [true, false] {
+            let (feed, shown, _, _) = Self.following(answer: asks)
+            feed.conversations.take([RunnerConversation(id: "c1", title: "Repos")])
+            feed.pillShowsTalk = { true }
+            feed.talking("fix the web one")
+            feed.heard(Turn(date: .now, who: .user, text: "fix the web one", conversation: "c1"), TurnExtras())
+            let turn = Turn(id: "t-\(UUID().uuidString)", date: .now, who: .oby, text: "Which one?", conversation: "c1")
+            if turnFirst {
+                feed.heard(turn, TurnExtras())
+                #expect(shown.list.isEmpty, "an answer, so far")
+            }
+            try await feed.say("fix the web one", in: "c1")
+            if !turnFirst { feed.heard(turn, TurnExtras()) }
+            #expect(shown.list.count == 1, "turn first: \(turnFirst)")
+            #expect(shown.list.last?.title == "Oby asks" && shown.list.last?.options == ["A", "B"] && shown.list.last?.sound == true)
+        }
+    }
+
     /// Words from an alert go to its conversation; the window's own new conversation isn't touched.
     @Test func wordsFromAnAlertGoToTheirConversation() async throws {
         let (feed, shown, _, stub) = Self.following { request in

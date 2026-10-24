@@ -10,15 +10,19 @@ nonisolated enum TalkStage: Equatable, Sendable {
     /// How long the pill shows Oby's reply, unless the next press comes first.
     static let replyShows: Duration = .seconds(8)
 
-    /// Whether the pill shows: while the window isn't showing the turn itself (the conversation, with
-    /// its Listening line and Oby's thread), and a turn is under way.
-    static func shows(_ stage: TalkStage?, windowShowsTalk: Bool) -> Bool { stage != nil && !windowShowsTalk }
+    /// Whether the pill shows: a turn is under way and the window isn't showing it. Home and the
+    /// conversation page show what you say (their Listening line), but only the conversation shows
+    /// Oby's reply: while a reply shows, Home in front doesn't keep the pill away.
+    static func shows(_ stage: TalkStage?, reply: Bool, windowShowsTalk: Bool, windowShowsConversation: Bool) -> Bool {
+        stage != nil && !(reply ? windowShowsConversation : windowShowsTalk)
+    }
 
     /// Where the turn goes once Oby's reply shows: after hands-free words (fn + Space) Oby listens
-    /// again at once, the reply still above; while you're talking again already, that turn carries
-    /// on (nil); else the reply shows on its own.
-    static func afterReply(handsFree: Bool, talking: Bool) -> TalkStage? {
-        talking ? nil : handsFree ? .listening : .replied
+    /// again at once, the reply still above, unless a talk key is down (that press is yours: the
+    /// reply shows and your own turn starts); while you're talking again already, that turn
+    /// carries on (nil); else the reply shows on its own.
+    static func afterReply(handsFree: Bool, keyDown: Bool, talking: Bool) -> TalkStage? {
+        talking ? nil : handsFree && !keyDown ? .listening : .replied
     }
 
     /// The pill's line under the reply: your words as you talk (or why Oby can't listen), then
