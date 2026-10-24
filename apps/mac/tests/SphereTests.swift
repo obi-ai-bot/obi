@@ -1,3 +1,4 @@
+import AppKit
 import CryptoKit
 import Foundation
 import Synchronization
@@ -6,6 +7,8 @@ import Testing
 
 /// The owner's side of the Obysphere (apps/mac/app/Sphere.swift): what the owner key signs, and
 /// the invite link. obid and the Sphere check the signatures; these keep the bytes they check.
+/// Serialized: Host your own puts a fake Obysphere in `SphereServer.session` for a moment.
+@Suite(.serialized)
 struct SphereTests {
     @Test func canonicalJSONIsRFC8785ForTheProtocolsValues() {
         let value: [String: Any] = ["b": [true, false, NSNull()], "a": 1, "é": "x", "c": ["z": "\"\\\n\u{1}/é"]]
@@ -111,6 +114,89 @@ struct SphereTests {
         let (_, response) = try await session.data(from: URL(string: "https://obysphere.deskree.com/v0.1/oauth/token")!)
         #expect((response as? HTTPURLResponse)?.statusCode == 307)
         #expect(Redirecting.reachedElsewhere.withLock { $0 } == false)
+    }
+
+    @Test func anObyJoinLinkOpensTheInviteItCarries() throws {
+        let invite = InviteLink(server: URL(string: "https://obi-sphere.acme.workers.dev")!, sphere: "acme", name: "Acme & co",
+                                by: "wellington", id: "inv-1", secret: "a+b/c=")
+        let fragment = try #require(invite.link.split(separator: "#", maxSplits: 1).last)
+        let link = try #require(URL(string: "oby://join/obi-sphere.acme.workers.dev#\(fragment)"))
+        let opened = try #require(InviteLink(opened: link))
+        #expect(opened == invite)
+        #expect(opened.warning?.contains("obi-sphere.acme.workers.dev") == true, "a server Oby doesn't know asks first")
+        let port = try #require(URL(string: "oby://join/sphere.acme.com:8443#\(fragment)").flatMap(InviteLink.init(opened:)))
+        #expect(port.server.absoluteString == "https://sphere.acme.com:8443")
+        for other in ["oby://open/obi-sphere.acme.workers.dev#\(fragment)", "https://obi-sphere.acme.workers.dev/join#\(fragment)",
+                      "oby://join/obi-sphere.acme.workers.dev", "oby://join/localhost:8787#\(fragment)", "oby://join/127.0.0.1#\(fragment)",
+                      "oby://join/me@obi-sphere.acme.workers.dev#\(fragment)", "oby://join/obi-sphere.acme.workers.dev/x#\(fragment)",
+                      "oby://join/obi-sphere.acme.workers.dev?a=b#\(fragment)", "oby://join/#\(fragment)", "oby://job/123"] {
+            #expect(URL(string: other).flatMap(InviteLink.init(opened:)) == nil, "\(other)")
+        }
+    }
+
+    /// Host your own, with a fake Obysphere and obid: Deploy's token, copied concealed (paste one, into
+    /// Cloudflare); the address (paste two), checked and kept with the token under its host; then
+    /// Create makes the Obysphere with that token.
+    @MainActor @Test func hostYourOwnGoesFromDeployToACreatedObysphereWithTwoPastes() async throws {
+        let token = SphereModel.newOperatorToken()
+        // The server's own order: the operator token first, then the body.
+        let server = RunnerStub { request in
+            switch (request.method, request.path) {
+            case ("GET", "/v0.1/health"): (200, #"{"ok": true, "protocol": "obi/0.1"}"#)
+            case ("POST", "/v0.1/spheres"):
+                request.authorization != "Bearer \(token)" ? (401, #"{"error": {"code": "unauthorized", "message": ""}}"#)
+                    : request.json?["sphere"] == nil ? (400, #"{"error": {"code": "bad_request", "message": ""}}"#) : (201, #"{"sphere": "acme"}"#)
+            case ("POST", "/v0.1/oauth/token"): (200, #"{"access_token": "owner-token"}"#)
+            case ("PUT", "/v0.1/spheres/acme/policy"): (200, "{}")
+            case ("POST", "/v0.1/spheres/acme/invitations"): (201, #"{"invitation_id": "inv-1", "secret": "s"}"#)
+            default: (404, #"{"error": {"code": "not_found", "message": ""}}"#)
+            }
+        }
+        let owner = "tester-\(UUID().uuidString.lowercased())"
+        let obid = RunnerStub { request in
+            switch request.path {
+            case "/v1/obid/sphere": (200, #"{"state": "none", "owner": "\#(owner)"}"#)
+            case "/v1/obid/sphere/card": (200, #"{"card": {"name": "x"}}"#)
+            default: (200, "{}")
+            }
+        }
+        let defaults = try #require(UserDefaults(suiteName: "com.deskree.oby.tests.\(UUID().uuidString)"))
+        let board = NSPasteboard(name: .init("com.deskree.oby.tests.\(UUID().uuidString)"))
+        let session = SphereServer.session
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RunnerStubProtocol.self] + (configuration.protocolClasses ?? [])
+        SphereServer.session = URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
+        defer {
+            SphereServer.session = session
+            try? SphereModel.operatorToken.remove(server.host)
+            try? OwnerKey.store.remove(owner)
+            board.releaseGlobally()
+        }
+
+        #expect(token.count == 43 && token.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "-_".contains($0)) })
+        #expect(SphereModel.newOperatorToken() != token)
+        SphereSettingsView.copySecret(token, to: board)
+        #expect(board.string(forType: .string) == token && board.types?.contains(SphereSettingsView.concealed) == true)
+
+        await #expect(throws: RunnerError.self) { try await SphereModel.hostOwn("https://localhost:8787", token: token, defaults: defaults) }
+        await #expect(throws: RunnerError.self) { try await SphereModel.hostOwn("\(obid.host)", token: token, defaults: defaults) }
+        #expect(defaults.string(forKey: SphereModel.serverKey) == nil)
+        #expect(try SphereModel.operatorToken.value(obid.host) == nil)
+        // A token the server doesn't have is never kept, nor the server.
+        await #expect(throws: RunnerError.self) { try await SphereModel.hostOwn(server.host, token: "another", defaults: defaults) }
+        #expect(defaults.string(forKey: SphereModel.serverKey) == nil)
+        #expect(try SphereModel.operatorToken.value(server.host) == nil)
+        // Pasted as the dashboard shows it, without https://.
+        let url = try await SphereModel.hostOwn(" \(server.host)/ ", token: token, defaults: defaults)
+        #expect(url.absoluteString == "https://\(server.host)" && defaults.string(forKey: SphereModel.serverKey) == url.absoluteString)
+        #expect(try SphereModel.operatorToken.value(server.host) == token)
+
+        let feed = RunnerFeed()
+        feed.stageAlerts(following: obid.runner)
+        _ = try await SphereModel(feed: feed).create(id: "acme", name: "Acme", on: url)
+        let created = server.requests.filter { $0.method == "POST" && $0.path == "/v0.1/spheres" && $0.json?["sphere"] != nil }
+        #expect(created.count == 1 && created.first?.authorization == "Bearer \(token)")
+        #expect(obid.requests.contains { $0.method == "POST" && $0.path == "/v1/obid/sphere/join" })
     }
 
     @Test func anObysphereIdComesFromItsName() {

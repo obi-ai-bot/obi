@@ -142,7 +142,8 @@ nonisolated struct SphereServer: Sendable {
         return named && !local ? nil : "\(host.isEmpty ? "That address" : host) isn't a public Obysphere address."
     }
 
-    static let session = URLSession(configuration: .ephemeral, delegate: NoRedirects(), delegateQueue: nil)
+    // ponytail: a var only so SphereTests can put a fake Obysphere in front (their suite is serialized).
+    nonisolated(unsafe) static var session = URLSession(configuration: .ephemeral, delegate: NoRedirects(), delegateQueue: nil)
 
     func call(_ method: String, _ path: String, bearer: String? = nil, json: Any? = nil,
               form: [String: String]? = nil) async throws -> [String: Any] {
@@ -264,6 +265,16 @@ nonisolated struct InviteLink: Equatable, Sendable {
         return "This invite is for \(owner), and this Mac's Oby acts for \(mine). Ask \(by.isEmpty ? "the admin" : by) for one for \(mine)."
     }
 
+    /// The link an Obysphere's join page's Open in Oby stands for: `oby://join/<host>#<fragment>` is
+    /// `https://<host>/join#<fragment>`. Nil for any other link, or a host that isn't a public https
+    /// Obysphere's (the init below checks it with `SphereServer.problem`).
+    init?(opened url: URL) {
+        guard url.scheme == "oby", url.host() == "join", url.query() == nil, let fragment = url.fragment(percentEncoded: true) else { return nil }
+        let host = String(url.path(percentEncoded: true).dropFirst())
+        guard host.wholeMatch(of: /[A-Za-z0-9.-]+(:[0-9]{1,5})?/) != nil else { return nil }
+        self.init("https://\(host)/join#\(fragment)")
+    }
+
     /// The link as pasted, or nil when it isn't one, or its address isn't a public https one.
     init?(_ text: String) {
         guard let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)), url.scheme == "https" || url.scheme == "http",
@@ -280,6 +291,13 @@ nonisolated struct InviteLink: Equatable, Sendable {
         self.init(server: server, sphere: sphere, name: items["name"].flatMap { $0.isEmpty ? nil : $0 } ?? sphere,
                   by: items["by"] ?? "", owner: owner, obi: obi, id: id, secret: secret, domain: items["domain"].flatMap { $0.isEmpty ? nil : $0 })
     }
+}
+
+/// The invite an `oby://join` link opened (AppDelegate), until Settings › Obysphere shows it.
+@MainActor @Observable
+final class OpenedInvite {
+    static let shared = OpenedInvite()
+    var invite: InviteLink?
 }
 
 // MARK: The model
@@ -374,6 +392,39 @@ final class SphereModel {
     /// made for. Every other Mac creates an Obysphere by signing in with Google, when the server lets
     /// its Workspace (sphere-api.md section 3.1).
     nonisolated static let operatorToken = KeychainVault(service: "obi-sphere-operator-token", label: "obi-sphere operator token")
+    /// Host your own: the operator token Oby made for the Obysphere being deployed, until its address
+    /// is pasted and it's kept under that host. Only in memory: Oby forgets one never used when it quits.
+    static var madeToken: String?
+    /// A new operator token: 32 random bytes, base64url (the server takes 32 characters or more).
+    nonisolated static func newOperatorToken() -> String { SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }.base64url }
+
+    /// Host your own, once Cloudflare deployed it: `text` (https:// may be left out) has to be a public
+    /// https address where an Obysphere answers `GET /v0.1/health`, and that takes `token`, the one
+    /// made for that deploy. Then it's this Oby's server, and the token is kept under its host and
+    /// nowhere else. A wrong address never replaces a token that works.
+    nonisolated static func hostOwn(_ text: String, token: String?, defaults: UserDefaults = .standard) async throws -> URL {
+        var text = text.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !text.contains("://") { text = "https://" + text }
+        guard let url = URL(string: text), let host = url.host() else { throw RunnerError(message: "That isn't an address, like https://obi-sphere.you.workers.dev.") }
+        if let problem = SphereServer.problem(url) { throw RunnerError(message: problem) }
+        let server = SphereServer(base: url)
+        guard try await server.call("GET", "health")["ok"] as? Bool == true else {
+            throw RunnerError(message: "\(host) answers, but not as an Obysphere.")
+        }
+        if let token {
+            // The server checks the operator token before the body: an empty one is 400 with the right
+            // token, 401 with another, 403 with none set. Nothing is created.
+            do {
+                _ = try await server.call("POST", "spheres", bearer: token, json: [String: Any]())
+            } catch let error as RunnerError where error.status == 401 || error.status == 403 {
+                throw RunnerError(message: "\(host) doesn't have the token Oby copied. Choose Deploy… for a new one (close the page it opens), paste it as SPHERE_OPERATOR_TOKEN in your Worker's Settings › Variables and Secrets, then paste the address again.")
+            } catch let error as RunnerError where error.status == 400 {}
+            try operatorToken.save(token, as: host)
+        }
+        defaults.set(text, forKey: serverKey)
+        return url
+    }
+
     /// The team link the admin made last, kept so Settings can copy it again (its secret is shown once).
     nonisolated static let teamLinks = KeychainVault(service: "com.deskree.oby.sphere-link", label: "Oby Obysphere link")
     /// Not in an Obysphere yet, with a server to make one on.
@@ -464,8 +515,8 @@ final class SphereModel {
     /// creates with the operator token when this Mac has it, else by signing in with Google. Then a
     /// link for everyone at `domain` (the Sphere checks each one's Workspace), and one for the
     /// `emails` invited, which Mail opens a message with for the owner to send.
-    func create(id sphere: String, name: String, emails: [String] = [], domain: String? = nil) async throws -> Created {
-        guard let url = Self.server else { throw RunnerError(message: "Set the Obysphere server first, in Settings › Obysphere.") }
+    func create(id sphere: String, name: String, emails: [String] = [], domain: String? = nil, on url: URL? = SphereModel.server) async throws -> Created {
+        guard let url else { throw RunnerError(message: "Set the Obysphere server first, in Settings › Obysphere.") }
         let runner = try runner()
         let membership: Membership = try await runner.call("GET", "v1/obid/sphere")
         // Before anything reaches the server: a joined Oby would make a Sphere it can't join.

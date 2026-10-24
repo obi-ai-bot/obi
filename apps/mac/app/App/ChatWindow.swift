@@ -63,11 +63,11 @@ final class ChatWindow: NSObject, NSWindowDelegate {
         Task { await island.feed.conversations.open(id) }
     }
 
-    /// Shows the window on Settings (⌘, and the menu bar's Settings…): General, unless one of its
-    /// pages shows already.
-    func showSettings() {
+    /// Shows the window on Settings (⌘, and the menu bar's Settings…): `page`, else General unless one
+    /// of its pages shows already.
+    func showSettings(_ page: SettingsPage? = nil) {
         state.visible = true
-        state.openSettings()
+        state.openSettings(page)
         island.model.chatWindowVisible = true
         present()
     }

@@ -125,7 +125,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         #endif
         // Opened by hand (Finder, Spotlight, the Dock, `open`), Oby comes up in front with its window, as
         // any Mac app does; started at login, it waits in the menu bar.
-        if !FirstLaunch.done { firstLaunch.show() } else if !launchedAtLogin { chat.show(home: true) }
+        launched = true
+        if !FirstLaunch.done {
+            firstLaunch.show()
+        } else if OpenedInvite.shared.invite != nil {
+            // Opened by an oby://join link that came before this: its page instead of Home.
+            chat.showSettings(.sphere)
+        } else if !launchedAtLogin {
+            chat.show(home: true)
+        }
     }
 
     /// Sangam's design has no screen for this, so a plain alert (apps/mac/app/LoginItem.swift, `mayRegister`).
@@ -138,6 +146,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         alert.addButton(withTitle: "Not Now")
         if alert.runModal() == .alertFirstButtonReturn { NSApp.terminate(nil) }
     }
+
+    /// Whether launching finished: an oby://join link before then waits for it.
+    private var launched = false
 
     /// Whether macOS started Oby as a login item (Settings › General › Open at login). Read before
     /// launching finishes, while the launch's Apple event is still the current one.
@@ -204,6 +215,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// Oby went behind another app: what waited for the owner while the window showed it alerts now.
     func applicationDidResignActive(_ notification: Notification) {
         island.feed.windowLeft()
+    }
+
+    /// `oby://join/<host>#…`, an Obysphere's join page's Open in Oby: Settings › Obysphere on the Join
+    /// screen for that link, where you choose to join. Any other oby:// link does nothing. The link's
+    /// secret is after the #: nothing here logs it.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let invite = urls.lazy.compactMap(InviteLink.init(opened:)).first else { return }
+        OpenedInvite.shared.invite = invite
+        if launched { chat.showSettings(.sphere) }
     }
 
     /// Clicking Oby's Dock icon, or opening it again (Spotlight, Finder, `open`), while it runs opens its window.
