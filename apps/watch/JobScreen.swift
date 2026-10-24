@@ -86,7 +86,7 @@ struct JobScreen: View {
     @ViewBuilder private func decision(_ job: Job) -> some View {
         if let permission = job.permission, job.isActive {
             DecisionCard(title: permission.title, detail: permission.detail, options: CardOption.permission(permission),
-                         busy: busy, wordsNote: CardOption.denyWords,
+                         busy: busy, wordsNote: CardOption.wordsNote(permission),
                          onChoose: { option in
                              guard let decision = RunnerPermission.Decision(rawValue: option.answer) else { return }
                              Task { await run { try await watch.answer(job, decision) } }

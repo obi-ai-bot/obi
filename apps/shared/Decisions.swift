@@ -71,6 +71,11 @@ nonisolated struct RunnerPermission: Codable, Equatable, Sendable {
     var rule: String?
     /// Always allow, spelled out: "Yes, and don't ask again for swift test in deskree-inc/oby".
     var always: String?
+
+    /// Claude Code's tool for asking the user a question (#858).
+    static let askUserQuestion = "AskUserQuestion"
+    /// The agent's question: obid refuses Allow on it, and takes a Deny with words as its answer.
+    var isQuestion: Bool { tool == Self.askUserQuestion }
 }
 
 /// A saved permission rule (`GET /v1/permissions/rules`).
@@ -188,6 +193,11 @@ nonisolated struct CardOption: Equatable, Sendable {
     static let most = 4
     /// What the user's own words do on a permission card.
     static let denyWords = "Your words go with a Deny, for the agent."
+    /// What they do on the agent's question (#858): obid takes a Deny with words as its answer.
+    static let answerWords = "Your words are its answer."
+
+    /// The words note for `permission`'s card.
+    static func wordsNote(_ permission: RunnerPermission) -> String { permission.isQuestion ? answerWords : denyWords }
 
     /// The recommended one first, marked, then the others in their order, at most `most` in all.
     /// An index out of range recommends nothing.
@@ -213,8 +223,10 @@ nonisolated struct CardOption: Equatable, Sendable {
         of(options, recommended: label.flatMap { options.firstIndex(of: $0) })
     }
 
-    /// Allow, Always allow with the rule spelled out (when the runner can save one), and Deny.
+    /// Allow, Always allow with the rule spelled out (when the runner can save one), and Deny. The
+    /// agent's question (#858) has no Allow: the user's words answer it, and Deny declines it.
     static func permission(_ permission: RunnerPermission) -> [CardOption] {
+        if permission.isQuestion { return [CardOption(label: "Don't answer", answer: RunnerPermission.Decision.deny.rawValue, role: .destructive)] }
         var list = [CardOption(label: "Allow once", answer: RunnerPermission.Decision.allow.rawValue, recommended: true)]
         if let rule = InboxWords.plain(permission.rule) {
             let always = permission.always ?? "Always allow \(rule)"

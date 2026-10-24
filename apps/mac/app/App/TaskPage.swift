@@ -172,8 +172,9 @@ struct TaskDecision: View {
 
     var body: some View {
         if let permission = actions.extras?.permission, job.isActive {
-            AskCard(kind: "Permission", title: permission.title, detail: permission.detail, options: CardOption.permission(permission),
-                    busy: busy, keyboardEnabled: box, hint: box ? CardOption.denyWords : nil,
+            AskCard(kind: permission.isQuestion ? AskKind.label("agentQuestion") : "Permission", title: permission.title, detail: permission.detail,
+                    options: CardOption.permission(permission),
+                    busy: busy, keyboardEnabled: box, hint: box ? CardOption.wordsNote(permission) : nil,
                     onChoose: { option in
                         guard let decision = RunnerPermission.Decision(rawValue: option.answer) else { return }
                         run { try await actions.permission(decision, nil) }

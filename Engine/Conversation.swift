@@ -213,7 +213,7 @@ nonisolated struct Briefing: Equatable, Sendable {
         for (place, item) in waiting {
             let what = switch item.kind {
             // What the agent asked, and its options, are its own words: in the quoted file.
-            case .question: "the question and its options are quoted in \(ClaudeBrain.quotedFile)"
+            case .question, .agentQuestion: "the question and its options are quoted in \(ClaudeBrain.quotedFile)"
             case .review, .merge, .audit, .start: "\(Self.line(item.text, cap: 160)) Options: \(item.options.joined(separator: " | "))."
             // What it asks to run or edit is the agent's own: in the quoted file.
             case .permission: "what it asks to do is quoted in \(ClaudeBrain.quotedFile). Options: \(item.options.joined(separator: " | "))."
@@ -388,7 +388,7 @@ nonisolated struct Briefing: Equatable, Sendable {
 
     private static func kind(_ kind: InboxItem.Kind) -> String {
         switch kind {
-        case .question: "Question"
+        case .question, .agentQuestion: "Question"
         case .review: "Out of reviews"
         case .failed: "Failed"
         case .limit: "Out of usage"

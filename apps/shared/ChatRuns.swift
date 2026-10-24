@@ -102,6 +102,8 @@ nonisolated enum AskKind {
     static func label(_ kind: String, plan: Bool = false) -> String {
         switch kind {
         case "question": plan ? "Plan" : "Question"
+        // A job's agent asked the user, in Claude Code's AskUserQuestion (#858).
+        case "agentQuestion": "Question"
         case "permission": "Permission"
         case "review": "Out of reviews"
         case "limit": "Out of usage"
@@ -116,7 +118,7 @@ nonisolated enum AskKind {
         }
     }
 
-    static func failed(_ kind: String) -> Bool { !["question", "permission", "review", "limit", "start", "github", "audit", RunnerConfirm.kind].contains(kind) }
+    static func failed(_ kind: String) -> Bool { !["question", "agentQuestion", "permission", "review", "limit", "start", "github", "audit", RunnerConfirm.kind].contains(kind) }
 }
 
 /// A task's card under the answer that started it (Sangam's ThreadTask): where it stands, then

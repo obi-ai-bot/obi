@@ -174,7 +174,7 @@ struct JobView: View {
     @ViewBuilder private var decision: some View {
         if let permission = extras?.permission, let onPermission, job.isActive {
             DecisionCard(title: permission.title, detail: permission.detail, options: CardOption.permission(permission),
-                         busy: busy, wordsNote: CardOption.denyWords,
+                         busy: busy, wordsNote: CardOption.wordsNote(permission),
                          onChoose: { option in
                              guard let decision = RunnerPermission.Decision(rawValue: option.answer) else { return }
                              Task { await run { try await onPermission(decision, nil) } }

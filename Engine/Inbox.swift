@@ -30,13 +30,16 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
         case start
         /// The job's agent waits for the user's OK to run a command or edit a file (`Job.permission`, #134).
         case permission
+        /// The runner's job's agent asked the user in Claude Code's AskUserQuestion (obid, #858):
+        /// its options, or the user's words, answer it; only the user may.
+        case agentQuestion
 
         /// The answers that change something on an item of this kind, besides Later and Done (#215).
         /// A question's are its own options, or the user's words; an audit's `Use <column> instead`
         /// too (`Inbox.instead`). A new kind declares its own, or none of its items reach the inbox.
         var actions: [String] {
             switch self {
-            case .question: []
+            case .question, .agentQuestion: []
             case .review: [Inbox.openPR, Inbox.retryReview, Inbox.oneMoreRound, Inbox.dismiss]
             case .failed, .limit: [Inbox.tryAgain, Inbox.oneMoreRound, Inbox.dismiss]
             case .merge: [Inbox.oneMoreRound, Inbox.tryAgain, Inbox.dismiss]
@@ -47,8 +50,9 @@ nonisolated struct InboxItem: Codable, Identifiable, Equatable, Sendable {
             }
         }
 
-        /// Any words answer it: a question, or a permission (words of the user's own are its no, for the agent).
-        var takesWords: Bool { self == .question || self == .permission }
+        /// Any words answer it: a question, the agent's question, or a permission (words of the
+        /// user's own are its no, for the agent).
+        var takesWords: Bool { self == .question || self == .agentQuestion || self == .permission }
 
         /// Whether answering `option` on this kind changes something.
         func acts(on option: String) -> Bool {
