@@ -782,7 +782,8 @@ fn a_publish_github_turned_down_is_tried_again() {
     let folder = Folder::new("publish-retry");
     let bin = fake_gh(&folder.0);
     std::fs::write(folder.0.join("gh/list-fails-once"), "").unwrap();
-    let (obid, _) = obid_retrying_within(&folder, &bin, 3);
+    // Room for a loaded machine: the window caps the stand-in agent's quiet time too.
+    let (obid, _) = obid_retrying_within(&folder, &bin, 10);
     let id = dispatch(
         &obid,
         json!({"repo": "obi-e2e/fixture-app", "kind": "build", "task": "COMMIT: hello.txt"}),
@@ -794,7 +795,7 @@ fn a_publish_github_turned_down_is_tried_again() {
     let log = obid.log();
     assert!(
         log.contains(&format!(
-            "job {id}: Publishing again in 3 seconds (1 of 3): Pushed, but "
+            "job {id}: Publishing again in 10 seconds (1 of 3): Pushed, but "
         )) && log.contains("HTTP 502: Bad Gateway"),
         "{log}"
     );
@@ -806,7 +807,7 @@ fn a_publish_github_turned_down_is_tried_again() {
 fn a_push_that_went_out_stays_counted_across_tries() {
     let folder = Folder::new("publish-kept-push");
     let bin = fake_gh(&folder.0);
-    let (obid, remote) = obid_retrying_within(&folder, &bin, 5);
+    let (obid, remote) = obid_retrying_within(&folder, &bin, 10);
     let waiting = |id: &str| {
         within(60, "obid to wait before publishing again", || {
             let job = call(&obid, "GET", &format!("/v1/jobs/{id}"), None).body;

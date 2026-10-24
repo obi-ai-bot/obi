@@ -1341,7 +1341,9 @@ fn a_running_job_hears_the_words_next_and_the_owners_round_may_commit_nothing() 
     assert_eq!(left["status"], "done", "{left}");
     assert_eq!(left["commits"], 0);
     assert_eq!(left["round"], 2);
-    assert_eq!(left["rounds"], 1);
+    // The fixture's own check (`node --test`) gives a fix 3 rounds when none was named (#958), and
+    // the owner's round adds one.
+    assert_eq!(left["rounds"], 4);
 }
 
 /// DismissTests.theAPIDismissesAndSaysWhenItCant, its last line: publishing a dismissed job by hand
